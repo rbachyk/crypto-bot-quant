@@ -20,23 +20,34 @@ class GateVerdict(str, enum.Enum):
 
 @dataclass(slots=True)
 class Criterion:
-    """One checked condition within a gate."""
+    """One checked condition within a gate.
 
-    name: str
+    ``id`` is the stable criterion identifier the orchestrator parses
+    (``configs/gate_result.schema.json`` requires ``id``, not ``name``).
+    """
+
+    id: str
     status: str  # "PASS" | "FAIL"
     detail: str = ""
 
     @classmethod
-    def ok(cls, name: str, detail: str = "") -> Criterion:
-        return cls(name=name, status="PASS", detail=detail)
+    def ok(cls, id: str, detail: str = "") -> Criterion:  # noqa: A002 - schema field name
+        return cls(id=id, status="PASS", detail=detail)
 
     @classmethod
-    def fail(cls, name: str, detail: str = "") -> Criterion:
-        return cls(name=name, status="FAIL", detail=detail)
+    def fail(cls, id: str, detail: str = "") -> Criterion:  # noqa: A002 - schema field name
+        return cls(id=id, status="FAIL", detail=detail)
 
     @property
     def passed(self) -> bool:
         return self.status == "PASS"
+
+    def to_dict(self) -> dict[str, str]:
+        """Serialize matching ``gate_result.schema.json`` (criterion uses ``id``)."""
+        out: dict[str, str] = {"id": self.id, "status": self.status, "detail": self.detail}
+        if not self.passed and self.detail:
+            out["failure_reason"] = self.detail
+        return out
 
 
 @dataclass(slots=True)

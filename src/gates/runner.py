@@ -145,11 +145,11 @@ class GateRunner:
             return result
 
         overall = GateVerdict.PASS if all(c.passed for c in criteria) else GateVerdict.FAIL
-        failed = [c.name for c in criteria if not c.passed]
+        failed = [c.id for c in criteria if not c.passed]
         result = GateRunResult(
             gate_id,
             overall.value,
-            criteria=[{"name": c.name, "status": c.status, "detail": c.detail} for c in criteria],
+            criteria=[c.to_dict() for c in criteria],
             note="" if overall is GateVerdict.PASS else f"failed criteria: {failed}",
         )
         self._persist(spec, result, _VERDICT_TO_STATUS[overall])

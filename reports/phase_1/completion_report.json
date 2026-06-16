@@ -15,7 +15,7 @@
     "Exchange-adapter skeleton + sync_exchange_metadata job stub; universe-builder skeleton (src/exchange, src/universe).",
     "CLI 'make kill' independent of the dashboard process (src/killswitch.py, src/cli/main.py); full Makefile target set.",
     "Gate scaffolding wired to configs/gates.yaml: INFRA, DB, QUEUE, STORAGE implemented; MON, BACKUP skeletons present.",
-    "Gate-runner CLI contract: 'make -s run-gate GATE=<id> FORMAT=json' and 'make -s run-all-gates FORMAT=json' emit a single GateResult JSON object to stdout (gate_id, overall, criteria[], report_path); GATE/FORMAT are make variables, not flags."
+    "Gate-runner CLI contract: 'make -s run-gate GATE=<id> FORMAT=json' and 'make -s run-all-gates FORMAT=json' emit a single GateResult JSON object to stdout matching configs/gate_result.schema.json exactly (top-level gate_id, overall, criteria[], report_path; each criterion uses id (not name) + status, optional failure_reason/remediation_steps); GATE/FORMAT are make variables, not flags."
   ],
   "acceptance_criteria": [
     {"criterion": "make docker-up && make health -> services green", "met": true, "evidence": "make health returns all components healthy (db/redis/storage/kill_switch); Docker available; live engine behind 'live' profile."},

@@ -25,7 +25,7 @@ Implement **Phase 1 — Infrastructure Foundation**.
 - Exchange-adapter skeleton + `sync_exchange_metadata` job stub; universe-builder skeleton.
 - CLI `make kill` (independent of dashboard); `Makefile` targets: `setup, test, lint, typecheck, docker-up, docker-down, migrate, seed-dev, health, backup-db, restore-test, run-worker-*, run-gate, run-all-gates, kill`.
 - Gate scaffolding wired to `configs/gates.yaml`: `INFRA`, `DB`, `QUEUE`, `STORAGE`, plus skeletons for `MON`, `BACKUP`.
-- **Gate-runner CLI contract (critical):** `make -s run-gate GATE=<id> FORMAT=json` must run the gate and print a single `GateResult` JSON object to **stdout** (fields: `gate_id`, `overall` ∈ PASS|FAIL|BLOCKED|NOT_RUN, `criteria[]`, `report_path`). Use `@`/`-s` so `make` does not echo recipe lines. `GATE`/`FORMAT` are **make variables**, never flags. Also provide `make -s run-all-gates FORMAT=json` (dependency order per `configs/gates.yaml`).
+- **Gate-runner CLI contract (critical):** `make -s run-gate GATE=<id> FORMAT=json` must run the gate and print a single `GateResult` JSON object to **stdout**, matching `configs/gate_result.schema.json` exactly. Top-level: `gate_id`, `overall` ∈ PASS|FAIL|BLOCKED|NOT_RUN, `criteria[]`, `report_path`. Each criterion uses **`id`** (not `name`), `status`, optional `failure_reason`/`remediation_steps`. Use `@`/`-s` so `make` does not echo recipe lines. `GATE`/`FORMAT` are **make variables**, never flags. Also provide `make -s run-all-gates FORMAT=json` (dependency order per `configs/gates.yaml`).
 
 ## ACCEPTANCE CRITERIA (Appendix D, Phase 1 + Global DoD)
 - [ ] `make docker-up && make health` → all services green.
