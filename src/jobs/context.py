@@ -1,0 +1,69 @@
+"""Execution context handed to job handlers.
+
+Provides progress reporting, log streaming (persisted to ``job_logs``), and
+cooperative cancellation. Handlers must call :meth:`JobContext.check_cancelled`
+at safe points so cancellation works for long-running jobs (Appendix B.6).
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+import redis
+
+from src.db.base import session_scope
+from src.db.models import Job, JobLog
+
+
+class JobCancelled(Exception):
+    """Raised inside a handler when the job has been cancelled."""
+
+
+def _cancel_key(job_id: str) -> str:
+    return f"qbot:cancel:{job_id}"
+
+
+class JobContext:
+    """Per-execution context object passed to a job handler."""
+
+    def __init__(self, job_id: str, params: dict, redis_client: redis.Redis | None) -> None:
+        self.job_id = job_id
+        self.params = params
+        self._redis = redis_client
+
+    # -- logging --------------------------------------------------------- #
+    def log(self, message: str, level: str = "INFO") -> None:
+        with session_scope() as session:
+            session.add(
+                JobLog(
+                    job_id=self.job_id,
+                    level=level,
+                    message=message,
+                    ts=datetime.now(UTC),
+                )
+            )
+
+    # -- progress -------------------------------------------------------- #
+    def progress(self, current: int, total: int, message: str = "") -> None:
+        with session_scope() as session:
+            job = session.get(Job, self.job_id)
+            if job is None:
+                return
+            job.progress_current = current
+            job.progress_total = total
+            if message:
+                job.progress_message = message
+
+    # -- cancellation ---------------------------------------------------- #
+    def is_cancelled(self) -> bool:
+        if self._redis is None:
+            return False
+        try:
+            return bool(self._redis.exists(_cancel_key(self.job_id)))
+        except Exception:
+            return False
+
+    def check_cancelled(self) -> None:
+        """Raise :class:`JobCancelled` if a cancel request is pending."""
+        if self.is_cancelled():
+            raise JobCancelled(self.job_id)

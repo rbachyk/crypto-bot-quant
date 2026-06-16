@@ -1,0 +1,144 @@
+[
+  {
+    "gate_id": "INFRA",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "name": "compose_services_defined",
+        "status": "PASS",
+        "detail": "13 services"
+      },
+      {
+        "name": "live_engine_disabled_by_default",
+        "status": "PASS",
+        "detail": "behind profile ['live']"
+      },
+      {
+        "name": "env_safe_defaults",
+        "status": "PASS",
+        "detail": "TRADING_MODE=PAPER, live disabled"
+      },
+      {
+        "name": "no_real_keys",
+        "status": "PASS",
+        "detail": "no API keys in .env.example"
+      },
+      {
+        "name": "dashboard_auth_configured",
+        "status": "PASS",
+        "detail": "mode=basic"
+      },
+      {
+        "name": "health_endpoints_green",
+        "status": "PASS",
+        "detail": "db/redis/storage healthy"
+      },
+      {
+        "name": "kill_switch_independent",
+        "status": "PASS",
+        "detail": "engage/disengage works with no web process"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/INFRA_20260616T155232.json",
+    "note": ""
+  },
+  {
+    "gate_id": "DB",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "name": "db_reachable",
+        "status": "PASS",
+        "detail": "SELECT 1 ok"
+      },
+      {
+        "name": "alembic_applied",
+        "status": "PASS",
+        "detail": "alembic_version present"
+      },
+      {
+        "name": "required_tables_exist",
+        "status": "PASS",
+        "detail": "7 base tables present"
+      },
+      {
+        "name": "indexes_exist",
+        "status": "PASS",
+        "detail": "ix_jobs_type_status present"
+      },
+      {
+        "name": "connection_pooling",
+        "status": "PASS",
+        "detail": "pool size=5"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/DB_20260616T155233.json",
+    "note": ""
+  },
+  {
+    "gate_id": "QUEUE",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "name": "redis_reachable",
+        "status": "PASS",
+        "detail": "PING ok"
+      },
+      {
+        "name": "worker_consumes_jobs",
+        "status": "PASS",
+        "detail": "job job_61e25299b78d4798 -> succeeded"
+      },
+      {
+        "name": "progress_tracked",
+        "status": "PASS",
+        "detail": "3/3"
+      },
+      {
+        "name": "job_records_persisted",
+        "status": "PASS",
+        "detail": "2 log lines"
+      },
+      {
+        "name": "cancel_works",
+        "status": "PASS",
+        "detail": "queued job cancelled and skipped"
+      },
+      {
+        "name": "retry_and_failures_visible",
+        "status": "PASS",
+        "detail": "failed job visible and re-queued"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/QUEUE_20260616T155233.json",
+    "note": ""
+  },
+  {
+    "gate_id": "STORAGE",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "name": "data_lake_writable",
+        "status": "PASS",
+        "detail": "/Users/ros/Projects/crypto-bot-quant/trading-bot/var/datalake"
+      },
+      {
+        "name": "snapshot_id_generated",
+        "status": "PASS",
+        "detail": "ds_20260616T155234_0001, ds_20260616T155234_0002"
+      },
+      {
+        "name": "manifest_written_versioned",
+        "status": "PASS",
+        "detail": "checksum=a97f961d55ed6c29"
+      },
+      {
+        "name": "artifact_writable",
+        "status": "PASS",
+        "detail": "/Users/ros/Projects/crypto-bot-quant/trading-bot/var/artifacts/selftest/gate.txt"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/STORAGE_20260616T155234.json",
+    "note": ""
+  }
+]

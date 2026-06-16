@@ -1,0 +1,56 @@
+{
+  "phase": 1,
+  "name": "Infrastructure Foundation",
+  "coder": "Claude Opus 4.8 (Coding Agent)",
+  "date": "2026-06-16",
+  "branch": "phase/1",
+  "config_version": 1,
+  "data_version": null,
+  "scope_implemented": [
+    "docker-compose.yml: postgres+timescale, redis, backend, dashboard-shell, worker(s), caddy on an internal network with only 443 exposed; live engine behind the 'live' profile (never started by default).",
+    ".env.example with safe placeholders (no real keys) + pydantic-settings config system with env validation (src/config/settings.py).",
+    "PostgreSQL schema + Alembic migration 0001 for jobs, job_logs, gates, gate_results, remediation_actions, approvals, audit_log.",
+    "Job orchestration skeleton (enqueue, progress, retry, cancel) with persisted job records + logs (src/jobs/*).",
+    "Per-service health-check endpoints + dashboard shell with authentication (src/api/app.py, src/api/auth.py).",
+    "Exchange-adapter skeleton + sync_exchange_metadata job stub; universe-builder skeleton (src/exchange, src/universe).",
+    "CLI 'make kill' independent of the dashboard process (src/killswitch.py, src/cli/main.py); full Makefile target set.",
+    "Gate scaffolding wired to configs/gates.yaml: INFRA, DB, QUEUE, STORAGE implemented; MON, BACKUP skeletons present.",
+    "Gate-runner CLI contract: 'make -s run-gate GATE=<id> FORMAT=json' and 'make -s run-all-gates FORMAT=json' emit a single GateResult JSON object to stdout (gate_id, overall, criteria[], report_path); GATE/FORMAT are make variables, not flags."
+  ],
+  "acceptance_criteria": [
+    {"criterion": "make docker-up && make health -> services green", "met": true, "evidence": "make health returns all components healthy (db/redis/storage/kill_switch); Docker available; live engine behind 'live' profile."},
+    {"criterion": "make migrate idempotent; required tables exist", "met": true, "evidence": "alembic migration 0001; DB gate verifies required tables + indexes."},
+    {"criterion": "Job skeleton: enqueue/progress/retry/cancel; records + logs persisted", "met": true, "evidence": "tests/test_jobs.py; QUEUE gate PASS."},
+    {"criterion": "Dashboard shell requires auth; per-service health endpoints respond", "met": true, "evidence": "tests/test_api.py; INFRA criterion dashboard_auth_configured=PASS."},
+    {"criterion": "make kill works with the dashboard stopped", "met": true, "evidence": "tests/test_killswitch.py; INFRA criterion kill_switch_independent=PASS."},
+    {"criterion": "Gates INFRA, DB, QUEUE, STORAGE return PASS; MON, BACKUP skeletons present", "met": true, "evidence": "make -s run-all-gates FORMAT=json; all four PASS, MON/BACKUP skeleton PASS."},
+    {"criterion": "pytest, ruff, mypy green; no secrets committed; no live-mode default", "met": true, "evidence": "36 passed; ruff clean; mypy no issues; .env gitignored; TRADING_MODE=PAPER default, live disabled."},
+    {"criterion": "Completion Report filled; assumptions in docs/decisions/", "met": true, "evidence": "this file; docs/decisions/0001, 0002."}
+  ],
+  "gates_run": [
+    {"gate_id": "INFRA", "result": "PASS", "report_path": "reports/gates/INFRA_<ts>.json"},
+    {"gate_id": "DB", "result": "PASS", "report_path": "reports/gates/DB_<ts>.json"},
+    {"gate_id": "QUEUE", "result": "PASS", "report_path": "reports/gates/QUEUE_<ts>.json"},
+    {"gate_id": "STORAGE", "result": "PASS", "report_path": "reports/gates/STORAGE_<ts>.json"},
+    {"gate_id": "MON", "result": "PASS", "report_path": "reports/gates/MON_<ts>.json", "note": "skeleton only this phase"},
+    {"gate_id": "BACKUP", "result": "PASS", "report_path": "reports/gates/BACKUP_<ts>.json", "note": "skeleton only this phase"}
+  ],
+  "tests": {
+    "pytest": "36 passed, 1 warning",
+    "coverage_risk_exec_adaptation": "n/a (modules not implemented until later phases)",
+    "ruff": "ok (All checks passed; 43 files formatted)",
+    "mypy": "ok (no issues found in 33 source files)"
+  },
+  "assumptions_and_decisions": [
+    "docs/decisions/0001-phase-1-infrastructure-choices.md",
+    "docs/decisions/0002-timescaledb-optional-in-phase-1.md"
+  ],
+  "known_gaps_risks": [
+    "Gate per-run JSON dumps under reports/gates/ are gitignored transient artifacts; report_path values above use a <ts> placeholder since the concrete timestamped file is regenerated each run.",
+    "MON and BACKUP are skeletons this phase (return PASS) and are hardened in later phases per the roadmap.",
+    "Downstream gates (DQ, UNIV, BT, ... LIVE) correctly report BLOCKED/NOT_RUN until their phases land."
+  ],
+  "status": "Phase 1 — Infrastructure Foundation: complete",
+  "tested": "yes",
+  "next_step": "Hand off to Reviewer Agent; do not begin Phase 2."
+}

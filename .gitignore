@@ -1,0 +1,27 @@
+# Secrets & local config
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Local runtime state (data lake, artifacts, backups, kill flag, redis pidfile)
+var/
+.tmp/
+KILL_SWITCH
+
+# Gate run artifacts (keep phase completion reports, ignore per-run dumps)
+reports/gates/
+reports/backup/
+
+# OS
+.DS_Store

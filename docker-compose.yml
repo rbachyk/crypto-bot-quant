@@ -1,0 +1,193 @@
+# Docker Compose — MVP single-node topology (AGENTS.md Appendix B.3 / B.12).
+#
+# Safety:
+#   * trading-engine-live is DEFINED but DISABLED by default: it sits behind the
+#     `live` compose profile, so `docker compose up` never starts it. It also
+#     requires ENABLE_LIVE_TRADING=true + APP_ENV=production to even boot
+#     (enforced in src.config.Settings).
+#   * No real secrets here; everything comes from `.env` (see `.env.example`).
+#
+# Services build from a single image and differ only by `command`.
+
+x-app-env: &app-env
+  APP_ENV: ${APP_ENV:-local}
+  TRADING_MODE: ${TRADING_MODE:-PAPER}
+  DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://postgres:postgres@postgres:5432/trading_bot}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  ENABLE_LIVE_TRADING: ${ENABLE_LIVE_TRADING:-false}
+  ENABLE_BACKGROUND_RESEARCH_JOBS: ${ENABLE_BACKGROUND_RESEARCH_JOBS:-true}
+  DASHBOARD_AUTH_MODE: ${DASHBOARD_AUTH_MODE:-basic}
+  DASHBOARD_USERNAME: ${DASHBOARD_USERNAME:-admin}
+  DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-change-me-in-env}
+
+x-app-build: &app-build
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+services:
+  postgres:
+    image: timescale/timescaledb:2.15.3-pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-trading_bot}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "6379:6379"
+
+  backend:
+    <<: [*app-build, *app-env]
+    environment:
+      <<: *app-env
+      SERVICE_NAME: backend
+    command: ["uvicorn", "src.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx,sys; sys.exit(0 if httpx.get('http://localhost:8000/livez').status_code==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "8000:8000"
+
+  dashboard:
+    <<: [*app-build, *app-env]
+    environment:
+      <<: *app-env
+      SERVICE_NAME: dashboard
+    # Phase 1 dashboard shell is served by the same FastAPI app.
+    command: ["uvicorn", "src.api.app:app", "--host", "0.0.0.0", "--port", "8001"]
+    depends_on:
+      backend:
+        condition: service_started
+    ports:
+      - "8001:8001"
+
+  worker-data:
+    <<: [*app-build, *app-env]
+    environment:
+      <<: *app-env
+      SERVICE_NAME: worker-data
+    command: ["python", "-m", "src.cli.main", "worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker-backtest:
+    <<: [*app-build, *app-env]
+    environment:
+      <<: *app-env
+      SERVICE_NAME: worker-backtest
+    command: ["python", "-m", "src.cli.main", "worker"]
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker-ml:
+    <<: [*app-build, *app-env]
+    environment:
+      <<: *app-env
+      SERVICE_NAME: worker-ml
+    command: ["python", "-m", "src.cli.main", "worker"]
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker-rl:
+    <<: [*app-build, *app-env]
+    environment:
+      <<: *app-env
+      SERVICE_NAME: worker-rl
+    command: ["python", "-m", "src.cli.main", "worker"]
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker-reports:
+    <<: [*app-build, *app-env]
+    environment:
+      <<: *app-env
+      SERVICE_NAME: worker-reports
+    command: ["python", "-m", "src.cli.main", "worker"]
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  scheduler:
+    <<: [*app-build, *app-env]
+    environment:
+      <<: *app-env
+      SERVICE_NAME: scheduler
+    command: ["python", "-m", "src.cli.main", "worker"]
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  trading-engine-paper:
+    <<: [*app-build, *app-env]
+    environment:
+      <<: *app-env
+      SERVICE_NAME: trading-engine-paper
+      TRADING_MODE: PAPER
+    # Dedicated process (B.13). Phase 1 ships a placeholder loop.
+    command: ["python", "-m", "src.cli.main", "worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # DISABLED BY DEFAULT — only starts with `--profile live` AND a production,
+  # explicitly live-enabled config (see src.config.Settings safety validator).
+  trading-engine-live:
+    <<: [*app-build, *app-env]
+    profiles: ["live"]
+    environment:
+      <<: *app-env
+      SERVICE_NAME: trading-engine-live
+    command: ["python", "-m", "src.cli.main", "config"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    depends_on:
+      backend:
+        condition: service_started
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+    ports:
+      - "80:80"
+      - "443:443"
+
+volumes:
+  pgdata:
+  caddydata:

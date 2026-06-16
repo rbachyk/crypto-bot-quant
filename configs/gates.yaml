@@ -6,8 +6,12 @@
 version: 1
 meta:
   description: "Gate catalog for the quant+ML+adaptive crypto trading bot."
-  rerun_command_pattern: "make run-gate --gate {id}"
-  run_all_command: "make run-all-gates"   # runs in dependency order
+  # The Gate Runner is a Python CLI that emits a JSON GateResult on stdout.
+  # `make` cannot accept `--gate` (it parses it as a make option), so the
+  # canonical invocation calls the module directly. `make run-gate GATE=<id>`
+  # is a convenience wrapper around the same command.
+  rerun_command_pattern: "uv run python -m src.gates.runner --gate {id}"
+  run_all_command: "uv run python -m src.gates.runner --all"   # runs in dependency order
 
 defaults:
   blocks_live: true

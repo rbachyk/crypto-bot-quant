@@ -1,0 +1,89 @@
+[project]
+name = "quant-trading-bot"
+version = "0.1.0"
+description = "Quant + ML + adaptive crypto perpetual-futures trading platform (Phase 1 — Infrastructure Foundation)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.1",
+    "redis>=5.0",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "pyyaml>=6.0",
+    "structlog>=24.1",
+    "typer>=0.12",
+    "httpx>=0.27",
+    "ccxt>=4.3",
+]
+
+[project.scripts]
+qbot = "src.cli.main:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "coverage>=7.5",
+    "hypothesis>=6.100",
+    "freezegun>=1.5",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "types-PyYAML>=6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W", "C4", "SIM"]
+ignore = [
+    "B008",   # FastAPI Depends() in defaults is idiomatic
+    "UP042",  # `class X(str, Enum)` is intentional (pydantic/JSON friendliness)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+exclude = ["migrations/"]
+
+# Strict type-checking on capital-critical modules (Appendix C).
+# These modules are introduced incrementally; strict applies as they appear.
+[[tool.mypy.overrides]]
+module = ["src.risk.*", "src.execution.*", "src.adaptation.*"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_return_any = true
+no_implicit_optional = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "integration: tests that require Postgres and/or Redis to be reachable",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["src/cli/*", "migrations/*"]
+
+[tool.coverage.report]
+show_missing = true

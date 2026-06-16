@@ -1,0 +1,9 @@
+# Caddy reverse proxy (auto-HTTPS in non-local envs; Appendix C).
+# For local/dev use http on :80. In production set DASHBOARD_DOMAIN and Caddy
+# will provision TLS automatically.
+
+{$DASHBOARD_DOMAIN:http://localhost} {
+	encode gzip
+	# Dashboard shell + API are served by the backend service.
+	reverse_proxy backend:8000
+}
