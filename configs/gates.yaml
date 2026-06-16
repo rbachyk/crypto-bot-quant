@@ -1,0 +1,407 @@
+# gates.yaml — single source of truth for the Gate Runner, dashboard, and Reviewer Agent.
+# Mirrors Appendix A of AGENTS.md. Each gate: pass condition + remediation + dependencies.
+# Status values produced at runtime: PASS | FAIL | BLOCKED | NOT_RUN
+# A gate is BLOCKED automatically if any `depends_on` gate is not PASS.
+
+version: 1
+meta:
+  description: "Gate catalog for the quant+ML+adaptive crypto trading bot."
+  rerun_command_pattern: "make run-gate --gate {id}"
+  run_all_command: "make run-all-gates"   # runs in dependency order
+
+defaults:
+  blocks_live: true
+  manual_review: true
+  auto_remediation: false
+
+gates:
+
+  - id: INFRA
+    name: Infrastructure
+    phase: 1
+    depends_on: []
+    pass_condition: "All compose services healthy; health endpoints green; CLI kill switch works independent of dashboard."
+    failure_signals: ["service unhealthy", "missing health endpoint", "kill switch depends on UI"]
+    remediation_steps:
+      - "Inspect `make health` output; identify the unhealthy service."
+      - "Fix the service config / dependency ordering in docker-compose.yml."
+      - "Verify CLI `make kill` works with the dashboard stopped."
+      - "Re-run gate."
+    dashboard_actions: ["View Health", "Restart Service", "Re-run Gate"]
+    rerun_job: "gate:infra"
+
+  - id: DB
+    name: Database
+    phase: 1
+    depends_on: [INFRA]
+    pass_condition: "Postgres+Timescale reachable; migrations applied and idempotent; required tables exist."
+    failure_signals: ["migration failure", "missing tables", "non-idempotent migration"]
+    remediation_steps:
+      - "Run `make migrate`; review Alembic errors."
+      - "Fix migration scripts; ensure idempotency."
+      - "Re-run gate."
+    dashboard_actions: ["Run Migrations", "View Schema", "Re-run Gate"]
+    rerun_job: "gate:db"
+
+  - id: QUEUE
+    name: Queue
+    phase: 1
+    depends_on: [INFRA]
+    pass_condition: "Redis reachable; workers consume jobs; progress/retry/cancel work; job records persisted."
+    failure_signals: ["jobs stuck", "no progress updates", "cancel/retry broken"]
+    remediation_steps:
+      - "Check Redis connectivity and worker logs."
+      - "Fix broker config / worker registration."
+      - "Re-run gate."
+    dashboard_actions: ["View Jobs", "Restart Worker", "Re-run Gate"]
+    rerun_job: "gate:queue"
+
+  - id: STORAGE
+    name: Storage
+    phase: 1
+    depends_on: [INFRA]
+    pass_condition: "Data lake / artifact store writable and versioned; dataset snapshot ids generated."
+    failure_signals: ["unwritable path", "unversioned artifacts", "no snapshot id"]
+    remediation_steps:
+      - "Verify volume mounts/permissions."
+      - "Enable versioned snapshot id generation."
+      - "Re-run gate."
+    dashboard_actions: ["View Storage", "Re-run Gate"]
+    rerun_job: "gate:storage"
+
+  - id: DATA-COV
+    name: Data Coverage & Integrity
+    phase: 2
+    depends_on: [STORAGE]
+    auto_remediation: partial
+    manual_review: false
+    pass_condition: "Every universe symbol has all required series covering the window with 0 unfilled gaps; immutable dataset snapshot produced."
+    failure_signals: ["missing history", "gaps/duplicates/out-of-order rows", "missing series", "checksum/row-count mismatch"]
+    remediation_steps:
+      - "Open data-quality report; identify symbols/series/timestamps flagged."
+      - "Run `scripts/backfill --symbol <s> --series <x> --from <t>`."
+      - "If exchange lacks history, mark symbol `insufficient_history` and exclude from universe."
+      - "Re-snapshot dataset; re-run gate."
+    dashboard_actions: ["Run Backfill Job", "View Missing Ranges", "Quarantine Symbol", "Re-snapshot Dataset", "Re-run Gate"]
+    rerun_job: "gate:data-cov"
+
+  - id: DQ
+    name: Data Quality
+    phase: "2+"
+    depends_on: [DATA-COV]
+    pass_condition: "No critical data-quality violation active; clocks within NTP tolerance."
+    failure_signals: ["stale websocket", "mark/index/perp timestamp inconsistency", "funding-timestamp mismatch", "abnormal spread/gap", "clock drift"]
+    remediation_steps:
+      - "Inspect which check failed and the symbol/stream."
+      - "Restart the affected ingestion stream / reconnect websocket."
+      - "Fix clock (enable/repair NTP) if drift."
+      - "If exchange outage, wait for auto-retry; re-run gate."
+    dashboard_actions: ["View Data Quality Report", "Restart Stream", "Fix NTP", "Re-run Gate"]
+    rerun_job: "gate:dq"
+
+  - id: UNIV
+    name: Universe Validity
+    phase: "1-2"
+    depends_on: [DATA-COV]
+    pass_condition: "Every selected symbol meets all universe filters and has stable metadata; universe is versioned."
+    failure_signals: ["below liquidity/volume threshold", "unstable/missing metadata", "too little history", "newly listed"]
+    remediation_steps:
+      - "Review per-symbol filter report."
+      - "Tighten/relax thresholds in universe.yaml only if justified; re-validate."
+      - "Drop failing symbols; bump universe version; re-run gate."
+    dashboard_actions: ["View Filter Report", "Edit Universe Config", "Drop Symbol", "Bump Universe Version", "Re-run Gate"]
+    rerun_job: "gate:universe"
+
+  - id: META
+    name: Exchange Metadata
+    phase: "1-3"
+    depends_on: [INFRA]
+    pass_condition: "All active symbols have [VERIFIED] metadata (tick, lot, min-notional, fees, funding, leverage, order types); no [UNVERIFIED] for active symbols."
+    failure_signals: ["missing metadata", "[UNVERIFIED] flags", "contradictory values", "stale metadata"]
+    remediation_steps:
+      - "Run `sync_exchange_metadata` job."
+      - "Review new metadata against current exchange docs."
+      - "Mark verified symbols [VERIFIED]; quarantine unresolvable ones."
+      - "Bump metadata version; re-run gate."
+    dashboard_actions: ["Sync Metadata", "View Metadata Report", "Mark Verified", "Quarantine Symbol", "Re-run Gate"]
+    rerun_job: "gate:meta"
+
+  - id: FEAT
+    name: Feature Reproducibility
+    phase: 3
+    depends_on: [DATA-COV, UNIV]
+    pass_condition: "Features 100% reproducible from snapshot; no look-ahead; no unavailable features; timestamp alignment verified."
+    failure_signals: ["non-reproducible features", "look-ahead detected", "timestamp misalignment", "feature build fails from snapshot"]
+    remediation_steps:
+      - "Identify non-reproducible features; check timestamp alignment."
+      - "Run synthetic-data leakage test (must be ~0 expectancy)."
+      - "Rebuild feature store from raw snapshot; fix feature code."
+      - "Re-run reproducibility tests."
+    dashboard_actions: ["View Feature Report", "Run Leakage Test", "Rebuild Feature Store", "Re-run Gate"]
+    rerun_job: "gate:feat"
+
+  - id: BT
+    name: Backtest
+    phase: 4
+    depends_on: [DATA-COV, DQ, UNIV, META, FEAT]
+    pass_condition: "Event-based backtest completes; realistic fees/slippage/funding; no look-ahead/survivorship; universe as of test time; outputs all metrics; sane results."
+    failure_signals: ["backtest crash", "missing cost model", "look-ahead", "survivorship bias", "universe leakage", "impossible results"]
+    remediation_steps:
+      - "Review backtest logs for errors."
+      - "Verify cost model matches verified metadata."
+      - "Fix look-ahead/survivorship in code."
+      - "Re-run on clean dataset snapshot; verify outputs."
+    dashboard_actions: ["View Backtest Logs", "Fix Cost Model", "Run Leakage Test", "Re-run Gate"]
+    rerun_job: "gate:backtest --strategy <id>"
+
+  - id: WF
+    name: Walk-Forward
+    phase: 4
+    depends_on: [BT]
+    pass_condition: "Walk-forward with >=K folds passing kill-criteria; edge not isolated to one period; stable across folds; locked hold-out positive net of costs."
+    failure_signals: ["<K folds pass", "edge only in isolated folds", "high variance across folds", "parameter instability"]
+    remediation_steps:
+      - "Identify failing folds; check if edge is period-isolated."
+      - "Reduce overfitting; prefer robust parameter zones."
+      - "Restrict to stable regimes/symbols, or keep research-only (shelve per kill-criteria)."
+      - "Re-run walk-forward."
+    dashboard_actions: ["View Fold Breakdown", "Run Parameter Sensitivity", "Restrict Strategy", "Re-run Gate"]
+    rerun_job: "gate:walk-forward --strategy <id>"
+
+  - id: FEE
+    name: Fee Stress
+    phase: 4
+    depends_on: [BT, WF]
+    pass_condition: "Survives x2 fees (configurable) with positive expectancy net of costs; edge not fee-dependent."
+    failure_signals: ["expectancy negative under fee stress", "profit only from low-fee periods"]
+    remediation_steps:
+      - "Review cost-sensitivity report; reduce turnover."
+      - "Improve execution route (maker-first); raise min-edge threshold."
+      - "Disable strategy if edge disappears under realistic fees; re-run."
+    dashboard_actions: ["View Cost Report", "Run Execution Optimization", "Adjust Edge Threshold", "Disable Strategy", "Re-run Gate"]
+    rerun_job: "gate:fee --strategy <id>"
+
+  - id: SLIP
+    name: Slippage Stress
+    phase: 4
+    depends_on: [BT, WF]
+    pass_condition: "Survives +50% slippage (configurable; harsher for volatility/liquidation setups) with positive expectancy."
+    failure_signals: ["expectancy negative under slippage stress", "edge concentrated in low-slippage fills"]
+    remediation_steps:
+      - "Review slippage-sensitivity report."
+      - "Tighten liquidity/spread entry filters; prefer passive fills."
+      - "Apply harsher slippage assumption to volatility setups; disable if needed; re-run."
+    dashboard_actions: ["View Slippage Report", "Tighten Liquidity Filter", "Disable Strategy", "Re-run Gate"]
+    rerun_job: "gate:slip --strategy <id>"
+
+  - id: SETUP
+    name: Setup Quality
+    phase: "5-6"
+    depends_on: [FEAT]
+    pass_condition: "Deterministic setup-quality score wired with hard blockers; threshold validated via walk-forward; no double-counting of entry features."
+    failure_signals: ["score uses look-ahead", "threshold hand-set not validated", "hard blockers missing"]
+    remediation_steps:
+      - "Review scoring inputs; remove double-counted/entry-duplicated features."
+      - "Validate threshold via walk-forward."
+      - "Ensure all hard blockers enforced; re-run."
+    dashboard_actions: ["View Setup Scoring", "Validate Threshold", "Re-run Gate"]
+    rerun_job: "gate:setup"
+
+  - id: RISK
+    name: Risk Policy
+    phase: 6
+    depends_on: [SETUP]
+    pass_condition: "Risk manager enforces per-trade sizing, leverage-as-consequence cap, portfolio heat cap, net-beta cap, min-notional gate; breakers present; property tests pass."
+    failure_signals: ["sizing exceeds risk_cap", "leverage targeted not derived", "heat/beta uncapped", "breaker missing"]
+    remediation_steps:
+      - "Fix the violated limit; add hypothesis property tests for sizing math."
+      - "Verify leverage is derived from notional/equity, capped."
+      - "Re-run gate."
+    dashboard_actions: ["View Risk Report", "Run Property Tests", "Re-run Gate"]
+    rerun_job: "gate:risk"
+
+  - id: EXEC
+    name: Execution
+    phase: 6
+    depends_on: [META, RISK]
+    pass_condition: "Atomic exchange-side SL/TP on entry; native trailing; reconciliation; partial-fill/reject handling; revalidate-before-execute; fill quality logged."
+    failure_signals: ["position without exchange-side stop", "trailing only in bot logic", "no reconciliation", "no revalidation"]
+    remediation_steps:
+      - "Verify SL/TP attaches atomically via native SDK path if ccxt insufficient."
+      - "Move trailing to exchange-native; add reconciliation + reject handling."
+      - "Re-run gate."
+    dashboard_actions: ["View Execution Report", "Test Stop Attachment", "Re-run Gate"]
+    rerun_job: "gate:exec"
+
+  - id: KILL
+    name: Kill Switch Verification
+    phase: "6,13"
+    depends_on: [EXEC]
+    pass_condition: "CLI and dashboard kill switch each flatten positions and halt; CLI works with dashboard down; verified by deliberate test."
+    failure_signals: ["kill depends on UI", "positions not flattened", "untested"]
+    remediation_steps:
+      - "Implement independent kill flag (Redis/CLI)."
+      - "Run deliberate kill test in paper; confirm flatten + halt."
+      - "Re-run gate."
+    dashboard_actions: ["Run Kill Test", "Re-run Gate"]
+    rerun_job: "gate:kill"
+
+  - id: ORDER-OWN
+    name: Order Ownership
+    phase: "6,13"
+    depends_on: [EXEC]
+    pass_condition: "Every order carries ORDER_CLIENT_ID_PREFIX (+instance/version); foreign/unknown order/position triggers halt+alert; cleanup touches only own orders."
+    failure_signals: ["unprefixed orders", "foreign order not detected", "cleanup touches others"]
+    remediation_steps:
+      - "Add client-id prefixing and foreign-order detection."
+      - "Test with a manually-placed order → expect halt+alert."
+      - "Re-run gate."
+    dashboard_actions: ["Run Ownership Test", "Re-run Gate"]
+    rerun_job: "gate:order-own"
+
+  - id: PAPER-A
+    name: Technical Paper
+    phase: 8
+    depends_on: [DQ, UNIV, META, FEAT, SETUP, RISK, EXEC, KILL, ORDER-OWN]
+    pass_condition: "Full pipeline runs in paper (ingestion→candidate→risk→exec sim→logging); simulated stops; kill switch + reconciliation exercised."
+    failure_signals: ["pipeline step errors", "stop not simulated", "kill/reconciliation not exercised"]
+    remediation_steps:
+      - "Open failing component logs; fix and add/repair tests."
+      - "Re-run paper-A."
+    dashboard_actions: ["View Paper Logs", "Re-run Gate"]
+    rerun_job: "gate:paper-a"
+
+  - id: PAPER-B
+    name: Strategy Paper
+    phase: 8
+    depends_on: [PAPER-A, WF, FEE, SLIP, BT]
+    pass_condition: "Sufficient candidate+executed paper trades; per-symbol/regime breakdown; paper-vs-backtest consistent; manual review done."
+    failure_signals: ["too few trades (BLOCKED)", "paper << backtest", "regimes/symbols unrepresented"]
+    remediation_steps:
+      - "If too few trades, extend paper window (do not loosen filters)."
+      - "If paper << backtest, investigate slippage/fees/latency; reconcile cost model."
+      - "Document unseen regimes; re-run."
+    dashboard_actions: ["View Paper-vs-Backtest", "Extend Paper Window", "Re-run Gate"]
+    rerun_job: "gate:paper-b"
+
+  - id: ML-PROMO
+    name: ML Promotion
+    phase: "9-10"
+    blocks_live: "if_ml_enabled"
+    depends_on: [PAPER-B]
+    pass_condition: "In shadow, model beats deterministic baseline net of costs; preserves PF/maxDD; stable across folds/symbols/regimes/OOS; calibrated; explainable; no leakage; manually reviewed."
+    failure_signals: ["no improvement over baseline", "unstable across slices", "miscalibrated", "leakage"]
+    remediation_steps:
+      - "If no improvement, keep model shadow-only."
+      - "If leakage, fix features/labels and retrain."
+      - "If unstable, simplify model class or add data; re-run shadow scoring."
+    dashboard_actions: ["View Shadow Comparison", "Run Calibration Report", "Re-run Gate"]
+    rerun_job: "gate:ml-promo --model <id>"
+
+  - id: LEARN-PROMO-S
+    name: Learner Shadow -> Recommend
+    phase: 11
+    blocks_live: "if_learner_enabled"
+    depends_on: [ML-PROMO]
+    pass_condition: "Eligibility met; shadow policy beats baseline on walk-forward AND locked hold-out; bounded actions only; frozen fallback exists and tested."
+    failure_signals: ["insufficient samples (BLOCKED)", "no shadow edge", "envelope-touching action proposed"]
+    remediation_steps:
+      - "Accumulate min_samples_to_start (stay in shadow)."
+      - "If no shadow edge, keep shadow-only / revise policy."
+      - "If an action touched the envelope, fix envelope_guard (must reject) first; re-run."
+    dashboard_actions: ["View Learner Shadow Score", "Test Envelope Guard", "Re-run Gate"]
+    rerun_job: "gate:learn-promo-s"
+
+  - id: LEARN-PROMO-L
+    name: Learner Recommend -> Bounded Live
+    phase: 13
+    blocks_live: "if_learner_enabled"
+    depends_on: [LEARN-PROMO-S]
+    pass_condition: "Track record of approved-correct recommendations; bounded-update/rollback config tested; learner kill switch verified; auto-freeze-on-breaker enforced."
+    failure_signals: ["thin/negative recommendation record", "rollback untested", "kill switch unverified"]
+    remediation_steps:
+      - "Extend RECOMMEND mode until track record sufficient."
+      - "Trip a rollback trigger deliberately; confirm revert-to-fallback."
+      - "Verify learner kill switch independently; re-run."
+    dashboard_actions: ["View Recommendation Record", "Run Rollback Test", "Re-run Gate"]
+    rerun_job: "gate:learn-promo-l"
+
+  - id: SEC
+    name: Security
+    phase: 13
+    depends_on: [EXEC]
+    pass_condition: "No secrets in repo; key scoped trading-only + IP-whitelisted; dashboard authenticated/behind VPN; only 443+SSH exposed; SSH hardened."
+    failure_signals: ["secret in repo", "key withdrawal-enabled", "public unauthenticated dashboard", "open ports"]
+    remediation_steps:
+      - "Rotate/scope API key; remove withdrawal permission; whitelist IP."
+      - "Put dashboard behind auth/VPN; close non-essential ports; harden SSH."
+      - "Re-run security checklist gate."
+    dashboard_actions: ["View Security Checklist", "Re-run Gate"]
+    rerun_job: "gate:sec"
+
+  - id: DEPLOY
+    name: Deployment
+    phase: 13
+    auto_remediation: partial
+    depends_on: [INFRA]
+    pass_condition: "Reproducible deploy to VPS; auto-restart; healthchecks; live engine isolated from research workers; rollback plan present."
+    failure_signals: ["non-reproducible deploy", "no auto-restart", "live engine shares research process"]
+    remediation_steps:
+      - "Fix compose/systemd; isolate live engine process."
+      - "Add rollback runbook; verify auto-restart; re-run."
+    dashboard_actions: ["View Deploy Report", "Re-run Gate"]
+    rerun_job: "gate:deploy"
+
+  - id: BACKUP
+    name: Backup & Restore
+    phase: 13
+    depends_on: [DB]
+    pass_condition: "Scheduled DB + artifact backups; restore test passes (backup without tested restore FAILS); restore runnable as background job."
+    failure_signals: ["no backups", "untested restore", "restore failure"]
+    remediation_steps:
+      - "Configure `make backup-db`; run `make restore-test`."
+      - "Fix restore until verified; link report to gate; re-run."
+    dashboard_actions: ["Run Backup", "Run Restore Test", "Re-run Gate"]
+    rerun_job: "gate:backup"
+
+  - id: MON
+    name: Monitoring
+    phase: 13
+    auto_remediation: partial
+    depends_on: [INFRA]
+    pass_condition: "All required alerts deliver end-to-end with severity/escalation; dashboard shows system + job load; data freshness + exchange health visible."
+    failure_signals: ["alert undelivered", "no escalation path", "no load/freshness panels"]
+    remediation_steps:
+      - "Fix notifier/credentials/route for the failing alert; send a test event."
+      - "Add missing panels/escalation; re-run."
+    dashboard_actions: ["Send Test Alert", "View Monitoring Panels", "Re-run Gate"]
+    rerun_job: "gate:mon"
+
+  - id: CONFIG-FREEZE
+    name: Config Freeze
+    phase: 13
+    depends_on: [SEC, DEPLOY, BACKUP, MON]
+    pass_condition: "All versions (config/strategy/data/risk/exec/model/RL) locked and tagged; staged versioned copy verified; no unversioned live artifacts."
+    failure_signals: ["unversioned artifact", "untagged config", "drift between staged and running config"]
+    remediation_steps:
+      - "Stage config as new versioned copy; freeze + git tag all versions."
+      - "Verify no [UNVERIFIED] metadata; re-run."
+    dashboard_actions: ["View Version Lock", "Tag & Freeze", "Re-run Gate"]
+    rerun_job: "gate:config-freeze"
+
+  - id: LIVE
+    name: Live Gate
+    phase: 13
+    depends_on: [DQ, UNIV, META, FEAT, BT, WF, FEE, SLIP, SETUP, RISK, EXEC, KILL, ORDER-OWN, PAPER-A, PAPER-B, SEC, DEPLOY, BACKUP, MON, CONFIG-FREEZE]
+    pass_condition: >
+      All upstream gates PASS; >=72h soak no unhandled crash; breakers+kill verified; restart-reconciliation verified;
+      portfolio limits (heat/beta/max-concurrent) verified under load; alerts E2E; metadata [VERIFIED]; paper-B passed;
+      frozen versions + rollback ready; operator sign-off (capital loseable; risk/leverage/drawdown confirmed).
+    failure_signals: ["any upstream gate not PASS", "crash within soak", "breaker not firing", "reconciliation mismatch", "missing sign-off"]
+    remediation_steps:
+      - "Resolve each failing upstream gate (see its entry)."
+      - "Fix crash/breaker/reconciliation issue from logs; restart the 72h soak if needed."
+      - "Obtain explicit operator sign-off on the dashboard."
+      - "Re-run the full Live Gate."
+    dashboard_actions: ["View Road to Live", "Run All Upstream Gates", "Record Operator Sign-off", "Re-run Gate"]
+    rerun_job: "gate:live"
