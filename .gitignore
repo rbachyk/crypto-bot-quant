@@ -23,6 +23,9 @@ KILL_SWITCH
 reports/gates/
 reports/backup/
 reports/data/
+reports/universe/
+reports/features/
+reports/metadata/
 
 # OS
 .DS_Store

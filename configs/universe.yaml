@@ -1,0 +1,49 @@
+# universe.yaml — single source of truth for the Dynamic Symbol Universe (Section 9).
+# Read by the Universe Manager, the universe filters, and the UNIV gate. All
+# runtime behaviour is config-driven and versioned (Section 4): bumping a filter
+# threshold or the candidate set is a new UNIVERSE_VERSION.
+#
+# A symbol becomes `active` (tradable, pending downstream gates) only when it
+# passes EVERY filter below. Symbols that fail are recorded `research_only`
+# (recoverable) or `quarantined` (data/metadata unsafe) with a per-filter reason,
+# and are never silently dropped (Section 9: prevent trading on symbols that do
+# not pass gates).
+
+version: 1
+
+universe:
+  exchange_id: skeleton
+  # Policy version (Section 4). The Universe Manager additionally stamps each
+  # build with a content-addressed snapshot id `univ_0001_<hash>` so identical
+  # universes re-use the same version (idempotent re-build), mirroring the
+  # data_version / dataset_version split of the data platform.
+  universe_version: univ_0001
+
+  # Candidate symbols synced from exchange metadata (Section 9). Kept in sync
+  # with configs/data.yaml; the data platform owns data for exactly this set.
+  candidates:
+    - "BTC/USDT:USDT"
+    - "ETH/USDT:USDT"
+    - "SOL/USDT:USDT"
+
+  # The timeframe used to evaluate volume / history / missing-data filters.
+  eval_timeframe: "1m"
+
+  # Default universe filters (Section 9 "Default Universe Filters"). Thresholds
+  # are deliberately conservative; relax only with justification (UNIV
+  # remediation step 2) and a universe-version bump.
+  filters:
+    quote_currency: "USDT"            # only USDT-quoted contracts
+    contract_type: "perpetual"        # perpetual futures only
+    min_daily_notional_usd: 10000000  # >= $10M/day median notional volume
+    min_history_bars: 1000            # >= 1000 bars on eval_timeframe
+    min_listing_age_days: 0.5         # >= 0.5 day of history (no newly listed);
+                                      # the Phase 2/3 dataset window is 24h, so
+                                      # listing age is bounded by it (see decision
+                                      # doc); raise once longer history is owned.
+    max_missing_data_pct: 1.0         # <= 1% missing bars across required series
+    max_median_spread_bps: 25.0       # <= 25 bps median spread (liquidity)
+    require_metadata_verified: true   # [VERIFIED] metadata (Section 6) required
+    require_stable_status: true       # contract status must be "trading"
+    require_funding_history: true     # funding series available (Section 8)
+    require_open_interest: true       # open-interest series available

@@ -1,0 +1,83 @@
+# metadata.yaml — operator-verified exchange contract metadata (Section 6).
+#
+# This file is the recorded output of the Metadata Verification Workflow
+# (Section 6): an operator reviewed each contract spec against the venue's
+# authoritative reference and marked it [VERIFIED]. The META gate (Appendix A)
+# requires every active symbol to have complete, non-contradictory, [VERIFIED],
+# current-version metadata persisted in `exchange_metadata`.
+#
+# The Phase 2/3 venue is the OFFLINE `skeleton` exchange — a self-defined test
+# venue whose authoritative reference IS this file. No live trading occurs
+# (Priority Stack 1/2); when a real venue is wired behind the same adapter, a
+# human re-verifies these values against the real exchange docs and bumps the
+# metadata_version. Any metadata change => new version => re-verification.
+
+version: 1
+
+metadata:
+  exchange_id: skeleton
+  metadata_version: meta_0001
+  verified_against: "skeleton venue contract reference v1 (offline, self-defined)"
+  verified_at: "2026-06-15T00:00:00Z"
+
+  # Order types the venue supports (required by META: "order types").
+  supported_order_types:
+    - "limit"
+    - "market"
+    - "stop_market"
+    - "stop_limit"
+    - "take_profit_market"
+
+  # Per-symbol contract specs. Every field below is required by the META gate;
+  # a missing or contradictory value fails the symbol.
+  symbols:
+    "BTC/USDT:USDT":
+      status: "trading"
+      contract_type: "perpetual"
+      quote_currency: "USDT"
+      tick_size: 0.1
+      lot_size: 0.001
+      qty_step: 0.001
+      price_precision: 1
+      min_order_size: 0.001
+      min_notional: 5.0
+      max_leverage: 100
+      margin_mode: "isolated"
+      position_mode: "one_way"
+      maker_fee: 0.0002
+      taker_fee: 0.00055
+      funding_interval_hours: 8
+
+    "ETH/USDT:USDT":
+      status: "trading"
+      contract_type: "perpetual"
+      quote_currency: "USDT"
+      tick_size: 0.01
+      lot_size: 0.01
+      qty_step: 0.01
+      price_precision: 2
+      min_order_size: 0.01
+      min_notional: 5.0
+      max_leverage: 100
+      margin_mode: "isolated"
+      position_mode: "one_way"
+      maker_fee: 0.0002
+      taker_fee: 0.00055
+      funding_interval_hours: 8
+
+    "SOL/USDT:USDT":
+      status: "trading"
+      contract_type: "perpetual"
+      quote_currency: "USDT"
+      tick_size: 0.001
+      lot_size: 0.1
+      qty_step: 0.1
+      price_precision: 3
+      min_order_size: 0.1
+      min_notional: 5.0
+      max_leverage: 50
+      margin_mode: "isolated"
+      position_mode: "one_way"
+      maker_fee: 0.0002
+      taker_fee: 0.00055
+      funding_interval_hours: 8

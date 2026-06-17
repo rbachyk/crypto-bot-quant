@@ -9,6 +9,7 @@ and exercise the real job queue (Appendix A pass conditions; Appendix B.11).
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 import redis
 import yaml
@@ -648,6 +649,380 @@ def check_dq(settings: Settings) -> list[Criterion]:
 
 
 # --------------------------------------------------------------------------- #
+# META (Phase 1-3)                                                             #
+# --------------------------------------------------------------------------- #
+def check_meta(settings: Settings) -> list[Criterion]:
+    """Exchange Metadata (Appendix A META).
+
+    Every active (trading-candidate) symbol must carry complete, internally
+    consistent, ``[VERIFIED]``, current-version metadata. The verified specs come
+    from ``configs/metadata.yaml`` (the recorded operator-review step, Section 6);
+    this check syncs them and then audits the persisted ``exchange_metadata`` rows
+    — no ``[UNVERIFIED]`` flag may remain for an active symbol (Section 2.1).
+    """
+    import json as _json
+
+    from src.db.base import session_scope
+    from src.db.models import ExchangeMetadata, VerificationStatus
+    from src.exchange.metadata import VerifiedSpec, load_metadata_config, sync_verified_metadata
+
+    cfg = load_metadata_config()
+    out: list[Criterion] = []
+    symbols = cfg.symbols()
+
+    with session_scope() as session:
+        written = sync_verified_metadata(session, cfg)
+        session.flush()
+        rows = {
+            r.symbol: r
+            for r in session.query(ExchangeMetadata)
+            .filter_by(exchange_id=cfg.exchange_id, metadata_version=cfg.metadata_version)
+            .all()
+        }
+        # Detect any stale (older metadata_version) or UNVERIFIED rows for our symbols.
+        stale_or_unverified = (
+            session.query(ExchangeMetadata.symbol, ExchangeMetadata.metadata_version)
+            .filter(
+                ExchangeMetadata.exchange_id == cfg.exchange_id,
+                ExchangeMetadata.symbol.in_(symbols),
+                ExchangeMetadata.verification_status == VerificationStatus.UNVERIFIED,
+                ExchangeMetadata.metadata_version != cfg.metadata_version,
+            )
+            .count()
+        )
+
+        out.append(Criterion.ok("metadata_synced", f"{written} symbols at {cfg.metadata_version}"))
+
+        missing_rows = [s for s in symbols if s not in rows]
+        out.append(
+            Criterion.ok("all_active_have_metadata", f"{len(symbols)} symbols")
+            if not missing_rows
+            else Criterion.fail("all_active_have_metadata", f"no metadata: {missing_rows}")
+        )
+
+        unverified = [
+            s for s, r in rows.items() if r.verification_status is not VerificationStatus.VERIFIED
+        ]
+        out.append(
+            Criterion.ok("all_verified", "no [UNVERIFIED] active symbols")
+            if not unverified
+            else Criterion.fail("all_verified", f"[UNVERIFIED]: {unverified}")
+        )
+
+        incomplete: dict[str, list[str]] = {}
+        contradictory: dict[str, list[str]] = {}
+        for s in symbols:
+            spec = cfg.spec(s)
+            if spec is None:
+                incomplete[s] = ["no spec"]
+                continue
+            vs = VerifiedSpec(symbol=s, fields=spec.fields)
+            miss = vs.missing_fields()
+            cons = vs.contradictions()
+            if miss:
+                incomplete[s] = miss
+            if cons:
+                contradictory[s] = cons
+        out.append(
+            Criterion.ok("complete_fields", "all required fields present")
+            if not incomplete
+            else Criterion.fail("complete_fields", _json.dumps(incomplete)[:300])
+        )
+        out.append(
+            Criterion.ok("no_contradictions", "metadata internally consistent")
+            if not contradictory
+            else Criterion.fail("no_contradictions", _json.dumps(contradictory)[:300])
+        )
+
+        def _order_types(symbol: str) -> object:
+            spec = cfg.spec(symbol)
+            return spec.fields.get("order_types") if spec is not None else None
+
+        order_types_ok = all(isinstance(_order_types(s), list) and _order_types(s) for s in symbols)
+        out.append(
+            Criterion.ok("order_types_present", "order types declared for all symbols")
+            if order_types_ok
+            else Criterion.fail("order_types_present", "missing order types")
+        )
+
+        out.append(
+            Criterion.ok("not_stale", f"all metadata at current version {cfg.metadata_version}")
+            if stale_or_unverified == 0
+            else Criterion.fail(
+                "not_stale", f"{stale_or_unverified} stale/unverified rows for active symbols"
+            )
+        )
+
+    _write_report(
+        settings,
+        "metadata",
+        {
+            "metadata_version": cfg.metadata_version,
+            "exchange_id": cfg.exchange_id,
+            "verified_against": cfg.verified_against,
+            "symbols": {
+                s: (sp.fields if (sp := cfg.spec(s)) is not None else None) for s in symbols
+            },
+        },
+    )
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# UNIV (Phase 1-2 / refreshed in Phase 3)                                      #
+# --------------------------------------------------------------------------- #
+def check_univ(settings: Settings) -> list[Criterion]:
+    """Universe Validity (Appendix A UNIV).
+
+    Builds the versioned universe from ``configs/universe.yaml`` filters and
+    audits it: every selected (active) symbol must pass EVERY filter and carry
+    stable ``[VERIFIED]`` metadata; the universe must be versioned and its
+    membership changes logged (Section 9).
+    """
+    from src.db.base import session_scope
+    from src.db.models import SymbolStatus, UniverseChange, UniverseVersion
+    from src.universe import UniverseManager, load_universe_config
+
+    uni_cfg = load_universe_config()
+    out: list[Criterion] = []
+
+    with session_scope() as session:
+        result = UniverseManager(settings=settings, uni_cfg=uni_cfg).build(session)
+        session.flush()
+        version = result.version
+        evals = result.evaluations
+        active = [e for e in evals if e.status is SymbolStatus.ACTIVE]
+        change_count = session.query(UniverseChange).filter_by(universe_version=version).count()
+        versioned = session.get(UniverseVersion, version) is not None
+
+        out.append(
+            Criterion.ok("universe_versioned", version)
+            if versioned
+            else Criterion.fail("universe_versioned", "no UniverseVersion persisted")
+        )
+        out.append(
+            Criterion.ok("filters_applied", f"{len(evals)}/{len(uni_cfg.candidates)} evaluated")
+            if len(evals) == len(uni_cfg.candidates)
+            else Criterion.fail("filters_applied", "not all candidates evaluated")
+        )
+        out.append(
+            Criterion.ok("at_least_one_active", f"{len(active)} active symbols")
+            if active
+            else Criterion.fail("at_least_one_active", "no symbol passed all filters")
+        )
+
+        bad = [e.symbol for e in active if not e.passed_all]
+        out.append(
+            Criterion.ok("selected_pass_all_filters", "every active symbol passes all filters")
+            if not bad
+            else Criterion.fail("selected_pass_all_filters", f"active but failing: {bad}")
+        )
+
+        unstable = [
+            e.symbol
+            for e in active
+            if not e.metrics.get("verified_metadata")
+            or e.metrics.get("contract_status") != "trading"
+        ]
+        out.append(
+            Criterion.ok("metadata_stable", "active symbols [VERIFIED] + status=trading")
+            if not unstable
+            else Criterion.fail("metadata_stable", f"unstable metadata: {unstable}")
+        )
+
+        no_data = [
+            e.symbol
+            for e in active
+            if any(o.name == "data_availability" and not o.passed for o in e.outcomes)
+        ]
+        out.append(
+            Criterion.ok("data_availability", "active symbols have all required series")
+            if not no_data
+            else Criterion.fail("data_availability", f"missing data: {no_data}")
+        )
+
+        out.append(
+            Criterion.ok("membership_changes_logged", f"{change_count} change rows for {version}")
+            if change_count >= 1
+            else Criterion.fail("membership_changes_logged", "no membership history recorded")
+        )
+
+        report = {
+            "universe_version": version,
+            "policy_version": uni_cfg.universe_version,
+            "active": sorted(e.symbol for e in active),
+            "filter_report": result.filter_report(),
+            "changes": result.changes,
+        }
+
+    _write_report(settings, "universe", report)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# FEAT (Phase 3)                                                               #
+# --------------------------------------------------------------------------- #
+def check_feat(settings: Settings) -> list[Criterion]:
+    """Feature Reproducibility (Appendix A FEAT).
+
+    Builds the feature store from the current dataset snapshot for the active
+    universe through the single feature code path, then proves: reproducible
+    checksum, no look-ahead (causal-invariance under future truncation), zero
+    synthetic expectancy (no leakage), timestamp alignment, and no unavailable
+    features (Section 10 Parity Rule).
+    """
+    from src.data import DataPlatform, load_data_config
+    from src.data.schema import timeframe_ms
+    from src.db.base import session_scope
+    from src.db.models import FeatureSetVersion
+    from src.features import (
+        FeatureStore,
+        causal_invariance_violations,
+        has_nan_or_inf,
+        load_feature_config,
+        synthetic_leakage_report,
+    )
+    from src.features.pipeline import StoreReader
+    from src.universe import UniverseManager, latest_active_symbols, load_universe_config
+
+    out: list[Criterion] = []
+    data_cfg = load_data_config()
+    feat_cfg = load_feature_config()
+
+    # Ensure data is present + snapshotted (idempotent) and the universe is built.
+    platform = DataPlatform(settings=settings, cfg=data_cfg)
+    run = platform.run_full(repair=True, source_jobs=["gate:feat"])
+    dataset_version = run.snapshot.snapshot_id
+
+    with session_scope() as session:
+        uni = UniverseManager(settings=settings, uni_cfg=load_universe_config()).build(session)
+        session.flush()
+        active = latest_active_symbols(session) or uni.active_symbols
+        fstore = FeatureStore(settings=settings, data_cfg=data_cfg, feat_cfg=feat_cfg)
+        build = fstore.build(
+            active,
+            dataset_version,
+            universe_version=uni.version,
+            session=session,
+            source_jobs=["gate:feat"],
+        )
+        session.flush()
+        recorded = session.get(FeatureSetVersion, build.feature_snapshot_id) is not None
+
+    # 1) Builds from snapshot.
+    builds_ok = bool(active) and build.total_rows > 0 and build.checksum
+    out.append(
+        Criterion.ok(
+            "feature_store_builds_from_snapshot",
+            f"{build.feature_snapshot_id} ({build.total_rows} rows, {len(active)} symbols)",
+        )
+        if builds_ok
+        else Criterion.fail("feature_store_builds_from_snapshot", "empty/failed feature build")
+    )
+
+    # 2) Reproducible checksum (rebuild from the same snapshot must match).
+    rebuild = fstore.build(active, dataset_version, universe_version=uni.version)
+    out.append(
+        Criterion.ok("reproducible_checksum", f"checksum={build.checksum}")
+        if rebuild.checksum == build.checksum
+        else Criterion.fail("reproducible_checksum", f"{build.checksum} != {rebuild.checksum}")
+    )
+
+    # 3) No look-ahead — causal invariance under future truncation.
+    violations: list[str] = []
+    for sym in active:
+        reader = StoreReader(
+            fstore.store,
+            data_cfg.exchange_id,
+            feat_cfg.timeframe,
+            data_cfg.base_timeframe,
+            data_cfg.funding_timeframe,
+            data_cfg.window_start_ms,
+            data_cfg.window_end_ms,
+        )
+        v = causal_invariance_violations(sym, reader, feat_cfg)
+        violations.extend(f"{cv.symbol}:{cv.feature}@{cv.bar_ts}" for cv in v)
+    out.append(
+        Criterion.ok("no_lookahead_causal", "features invariant to future truncation")
+        if not violations
+        else Criterion.fail("no_lookahead_causal", f"look-ahead: {violations[:5]}")
+    )
+
+    # 4) Leakage — synthetic noise yields ~0 expectancy.
+    leak = synthetic_leakage_report(feat_cfg)
+    out.append(
+        Criterion.ok(
+            "leakage_zero_expectancy",
+            f"|z|={abs(leak['z']):.2f} <= {leak['max_abs_z']} (n={leak['n']})",
+        )
+        if leak["passed"]
+        else Criterion.fail(
+            "leakage_zero_expectancy", f"|z|={abs(leak['z']):.2f} > {leak['max_abs_z']}"
+        )
+    )
+
+    # 5) Timestamp alignment — decision_ts = bar_open + interval, on grid.
+    iv = timeframe_ms(feat_cfg.timeframe)
+    misaligned = 0
+    for frame in build.frames.values():
+        for r in frame.rows:
+            if r["decision_ts"] != r["ts"] + iv or r["ts"] % iv != 0:
+                misaligned += 1
+    out.append(
+        Criterion.ok("timestamp_alignment", "all rows on the decision-time grid")
+        if misaligned == 0
+        else Criterion.fail("timestamp_alignment", f"{misaligned} misaligned rows")
+    )
+
+    # 6) No unavailable / non-finite features.
+    nan_syms = [s for s, f in build.frames.items() if has_nan_or_inf(f)]
+    empty_syms = [s for s, f in build.frames.items() if not f.rows]
+    out.append(
+        Criterion.ok("no_unavailable_features", "finite features for every active symbol")
+        if not nan_syms and not empty_syms
+        else Criterion.fail("no_unavailable_features", f"nan={nan_syms} empty={empty_syms}")
+    )
+
+    # 7) Feature-set version recorded (relational index).
+    out.append(
+        Criterion.ok("feature_set_version_recorded", build.feature_snapshot_id)
+        if recorded
+        else Criterion.fail("feature_set_version_recorded", "feature_set_versions row missing")
+    )
+
+    _write_report(
+        settings,
+        "features",
+        {
+            "feature_snapshot_id": build.feature_snapshot_id,
+            "feature_set_version": feat_cfg.feature_set_version,
+            "dataset_version": dataset_version,
+            "universe_version": uni.version,
+            "checksum": build.checksum,
+            "symbols": active,
+            "row_counts": build.row_counts,
+            "leakage": leak,
+            "lookahead_violations": violations,
+        },
+    )
+    return out
+
+
+def _write_report(settings: Settings, kind: str, payload: dict) -> str:
+    """Persist a gate sub-report under reports/<kind>/ (dashboard 'View ...' actions)."""
+    import json as _json
+
+    reports_dir = settings.reports_path / kind
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+    path = reports_dir / f"{kind}_{stamp}.json"
+    path.write_text(
+        _json.dumps({"versions": settings.versions(), **payload}, indent=2), encoding="utf-8"
+    )
+    return str(path)
+
+
+# --------------------------------------------------------------------------- #
 # Registry                                                                     #
 # --------------------------------------------------------------------------- #
 CHECKS: dict[str, Callable[[Settings], list[Criterion]]] = {
@@ -657,6 +1032,9 @@ CHECKS: dict[str, Callable[[Settings], list[Criterion]]] = {
     "STORAGE": check_storage,
     "DATA-COV": check_data_cov,
     "DQ": check_dq,
+    "UNIV": check_univ,
+    "META": check_meta,
+    "FEAT": check_feat,
     "MON": check_mon,
     "BACKUP": check_backup,
 }

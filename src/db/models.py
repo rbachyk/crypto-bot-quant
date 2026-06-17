@@ -324,6 +324,54 @@ class UniverseMember(Base):
     __table_args__ = (UniqueConstraint("universe_version", "symbol", name="uq_universe_member"),)
 
 
+class UniverseChange(Base):
+    """Membership-history log: symbols entering/leaving or changing status across
+    universe versions (Section 9 "store universe membership history"). Every
+    universe rebuild records its diff against the previous version here so the
+    dashboard and audit trail can answer "what changed and why"."""
+
+    __tablename__ = "universe_changes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    universe_version: Mapped[str] = mapped_column(String(64), index=True)
+    prev_version: Mapped[str | None] = mapped_column(String(64), index=True)
+    symbol: Mapped[str] = mapped_column(String(48), index=True)
+    change_type: Mapped[str] = mapped_column(String(24))  # entered | left | status_changed
+    from_status: Mapped[str | None] = mapped_column(String(16))
+    to_status: Mapped[str | None] = mapped_column(String(16))
+    reason: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+# --------------------------------------------------------------------------- #
+# Feature pipeline: feature-set versions (Phase 3)                             #
+# --------------------------------------------------------------------------- #
+class FeatureSetVersion(Base):
+    """Immutable, versioned feature-store build (Section 10 Parity Rule).
+
+    Features are built from exactly one dataset snapshot through a single code
+    path; this row is the relational index/manifest pointer (the feature matrices
+    live in the data lake as Parquet). The id is content-addressed so an
+    identical rebuild reuses it (reproducibility — the FEAT gate)."""
+
+    __tablename__ = "feature_set_versions"
+
+    version: Mapped[str] = mapped_column(String(80), primary_key=True)  # = feature snapshot id
+    feature_set_version: Mapped[str] = mapped_column(String(32), default="feat_0001", index=True)
+    dataset_version: Mapped[str] = mapped_column(String(64), default="", index=True)
+    universe_version: Mapped[str | None] = mapped_column(String(64), index=True)
+    exchange_id: Mapped[str] = mapped_column(String(32), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    symbols: Mapped[list] = mapped_column(JSON, default=list)
+    timeframe: Mapped[str] = mapped_column(String(8), default="")
+    feature_names: Mapped[list] = mapped_column(JSON, default=list)
+    label_horizon: Mapped[int] = mapped_column(Integer, default=0)
+    row_counts: Mapped[dict] = mapped_column(JSON, default=dict)
+    checksum: Mapped[str] = mapped_column(String(64), default="")
+    manifest_path: Mapped[str | None] = mapped_column(Text)
+    source_jobs: Mapped[list] = mapped_column(JSON, default=list)
+
+
 # --------------------------------------------------------------------------- #
 # Data platform: dataset versions & data-quality reports (Phase 2)             #
 # --------------------------------------------------------------------------- #

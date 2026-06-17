@@ -78,10 +78,11 @@ class Settings(BaseSettings):
     bot_instance_id: str = "QBOT_LOCAL"
     order_client_id_prefix: str = "QBOT_LOCAL_v1_"
     config_version: str = "cfg_0001"
-    universe_version: str = "univ_0000"
+    universe_version: str = "univ_0001"
     data_version: str = "data_0001"
+    metadata_version: str = "meta_0001"
     strategy_version: str = "strat_0000"
-    feature_set_version: str = "feat_0000"
+    feature_set_version: str = "feat_0001"
     risk_policy_version: str = "risk_0001"
     execution_policy_version: str = "exec_0001"
 
@@ -197,6 +198,7 @@ class Settings(BaseSettings):
             "CONFIG_VERSION": self.config_version,
             "UNIVERSE_VERSION": self.universe_version,
             "DATA_VERSION": self.data_version,
+            "METADATA_VERSION": self.metadata_version,
             "STRATEGY_VERSION": self.strategy_version,
             "FEATURE_SET_VERSION": self.feature_set_version,
             "RISK_POLICY_VERSION": self.risk_policy_version,

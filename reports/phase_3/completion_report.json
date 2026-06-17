@@ -1,0 +1,122 @@
+{
+  "phase": 3,
+  "name": "Universe and Features",
+  "coder": "Claude Opus 4.8 (Coding Agent)",
+  "date": "2026-06-17",
+  "branch": "phase/3",
+  "base_commit": "e717b98",
+  "config_version": "cfg_0001",
+  "universe_version": "univ_0001",
+  "data_version": "data_0001",
+  "metadata_version": "meta_0001",
+  "feature_set_version": "feat_0001",
+  "dataset_version": "data_0001_3dce2575cf890334",
+  "universe_snapshot": "univ_0001_a7c0ed0d0aff67ab",
+  "feature_snapshot": "feat_0001_data_0001_3dce2575cf890334_8ffd68e65c498778",
+  "scope_implemented": [
+    "Dynamic universe manager with versioning + change log: src/universe/manager.py builds a content-addressed universe (univ_0001_<hash>) from configs/universe.yaml filters, promotes passing symbols to active and records research_only/quarantined with per-filter reasons, and logs symbols entering/leaving/changing status to the new universe_changes table (Section 9).",
+    "Section 9 universe filters: src/universe/filters.py evaluates quote currency, contract type, min daily notional volume, min history bars, min listing age, max missing-data %, max median spread, data availability, [VERIFIED]+stable metadata, and funding/OI availability against owned data and metadata; hard (data/metadata-safety) failures quarantine, soft (quality) failures mark research_only.",
+    "Exchange metadata verification layer: configs/metadata.yaml (operator-verified [VERIFIED] contract specs, metadata_version meta_0001) + src/exchange/metadata.py (completeness + internal-consistency checks, idempotent sync of [VERIFIED] exchange_metadata rows). The adapter still returns only [UNVERIFIED] raw metadata (Section 6 workflow).",
+    "Feature pipeline = single causal code path (Parity Rule, Section 10): src/features/pipeline.py computes Market/Derivatives/Context features for closed bar k using only bars 0..k and point-in-time samples with ts <= decision time; the only backtest/live difference is the FeatureDataReader (StoreReader). Forward-return label is future-only and never a feature input.",
+    "Feature store: src/features/store.py builds immutable, content-addressed feature matrices (feat_0001_<dataset>_<hash>) from the dataset snapshot as per-symbol Parquet + manifest, with a feature_set_versions relational index row; rebuild is byte-reproducible (same checksum).",
+    "Leakage & look-ahead harness: src/features/leakage.py — (1) causal-invariance test recomputes rows from future-truncated raw inputs and compares (no look-ahead); (2) synthetic-noise expectancy test (i.i.d. random walk) verifies a past-only signal has ~0 expectancy (no leakage).",
+    "Gate checks wired into the Gate Runner: UNIV (versioned universe + filters + selected-pass-all + metadata-stable + data-availability + membership-history), META (synced + all-verified + complete + consistent + order-types + not-stale), FEAT (builds-from-snapshot + reproducible-checksum + no-lookahead-causal + leakage-zero-expectancy + timestamp-alignment + no-unavailable-features + version-recorded).",
+    "DB schema: universe_changes + feature_set_versions tables; Alembic migration 0003 (idempotent create_all checkfirst). New first-class jobs (Appendix B.7): verify_exchange_metadata, build_symbol_universe (now real filters), build_feature_store, run_feature_leakage_test.",
+    "Config + versioning: configs/universe.yaml, configs/metadata.yaml, configs/features.yaml; settings/.env.example bumped to universe_version=univ_0001, metadata_version=meta_0001, feature_set_version=feat_0001; Settings.versions() now carries METADATA_VERSION."
+  ],
+  "acceptance_criteria": [
+    {
+      "criterion": "Dynamic universe manager with filters + versioning; symbols entering/leaving logged",
+      "met": true,
+      "evidence": "src/universe/manager.py + filters.py + config.py; configs/universe.yaml; universe_versions/universe_members + new universe_changes table; UNIV gate PASS (universe_versioned=univ_0001_a7c0ed0d0aff67ab, filters_applied 3/3, 3 active, membership_changes_logged); tests/test_universe.py (filters, versioned build, change log, idempotent rebuild)."
+    },
+    {
+      "criterion": "Feature pipeline = single code path (Parity Rule); only decision-time data; reproducible from snapshot",
+      "met": true,
+      "evidence": "src/features/pipeline.py (one compute_features; reader is the only backtest/live difference; row k uses bars 0..k + samples ts<=decision_ts); src/features/store.py (content-addressed build from dataset snapshot, byte-reproducible checksum 8ffd68e65c498778); FEAT gate PASS (feature_store_builds_from_snapshot, reproducible_checksum, no_lookahead_causal, timestamp_alignment, no_unavailable_features); tests/test_features.py."
+    },
+    {
+      "criterion": "Leakage test: synthetic/shuffled data => ~0 expectancy",
+      "met": true,
+      "evidence": "src/features/leakage.py synthetic_leakage_report (i.i.d. random walk, momentum signal) -> |z|=2.09 <= 4.0 over n=3939; causal_invariance_violations recomputes from future-truncated inputs (0 violations). Non-tautological: tests/test_features.py proves a deliberately leaky compute is caught and a sign-of-future signal trips the z-score. FEAT gate leakage_zero_expectancy PASS."
+    },
+    {
+      "criterion": "Gates PASS: UNIV, FEAT, META",
+      "met": true,
+      "evidence": "uv run python -m src.gates.runner --gate {UNIV|META|FEAT} --json -> PASS (7/7 criteria each); run --all keeps DATA-COV->UNIV->FEAT and INFRA->META ordering and PASS; persisted GateResult rows PASSED; tests/test_phase3_gates.py."
+    },
+    {
+      "criterion": "New/changed code has tests; pytest, ruff, mypy green; coverage thresholds met on critical modules",
+      "met": true,
+      "evidence": "101 passed (was 79); ruff check + format clean (76 files); mypy Success (54 source files). New tests: tests/test_metadata.py, tests/test_universe.py, tests/test_features.py, tests/test_phase3_gates.py. Risk/exec/adaptation modules not introduced until later phases."
+    },
+    {
+      "criterion": "No forbidden shortcut; no live-mode default; no secrets committed (Appendix B.17 / Section 30)",
+      "met": true,
+      "evidence": "Universe/feature builds are versioned (universe_changes / feature_set_versions + manifests), not loose files; feature matrices live in the git-ignored regenerable data lake; TRADING_MODE=PAPER + live disabled unchanged; no keys added; metadata is [VERIFIED] only via the recorded operator-review config, adapter stays [UNVERIFIED]."
+    },
+    {
+      "criterion": "All new runtime behavior is config-driven and versioned (Section 4)",
+      "met": true,
+      "evidence": "configs/universe.yaml (filters + universe_version), configs/metadata.yaml (verified specs + metadata_version), configs/features.yaml (feature set + windows + label horizon + leakage tol); settings/.env.example version bumps; Settings.versions() includes METADATA_VERSION; reports link versions."
+    },
+    {
+      "criterion": "Completion Report filled; docs/decisions updated for assumptions",
+      "met": true,
+      "evidence": "this file; docs/decisions/0004-phase-3-universe-and-features.md."
+    }
+  ],
+  "gates_run": [
+    {
+      "gate_id": "META",
+      "result": "PASS",
+      "report_path": "reports/gates/META_<ts>.json",
+      "criteria": ["metadata_synced", "all_active_have_metadata", "all_verified", "complete_fields", "no_contradictions", "order_types_present", "not_stale"]
+    },
+    {
+      "gate_id": "UNIV",
+      "result": "PASS",
+      "report_path": "reports/gates/UNIV_<ts>.json",
+      "criteria": ["universe_versioned", "filters_applied", "at_least_one_active", "selected_pass_all_filters", "metadata_stable", "data_availability", "membership_changes_logged"]
+    },
+    {
+      "gate_id": "FEAT",
+      "result": "PASS",
+      "report_path": "reports/gates/FEAT_<ts>.json",
+      "criteria": ["feature_store_builds_from_snapshot", "reproducible_checksum", "no_lookahead_causal", "leakage_zero_expectancy", "timestamp_alignment", "no_unavailable_features", "feature_set_version_recorded"]
+    },
+    {
+      "gate_id": "DATA-COV",
+      "result": "PASS",
+      "report_path": "reports/gates/DATA-COV_<ts>.json",
+      "note": "upstream dependency of UNIV/FEAT; still PASS"
+    }
+  ],
+  "tests": {
+    "pytest": "101 passed, 1 warning",
+    "new_test_files": [
+      "tests/test_metadata.py",
+      "tests/test_universe.py",
+      "tests/test_features.py",
+      "tests/test_phase3_gates.py"
+    ],
+    "updated_test_files": [
+      "tests/test_gates.py (FEAT now PASSes; the dependency-blocking + remediation invariants are now exercised via WF<-BT, still NOT_RUN until Phase 4)"
+    ],
+    "coverage_risk_exec_adaptation": "n/a (modules not implemented until later phases); universe filters, metadata specs, and feature pipeline covered by direct unit tests",
+    "ruff": "ok (All checks passed; 76 files formatted)",
+    "mypy": "ok (no issues found in 54 source files)"
+  },
+  "assumptions_and_decisions": [
+    "docs/decisions/0004-phase-3-universe-and-features.md ([VERIFIED] metadata for the offline skeleton venue via configs/metadata.yaml; META audits the candidate set to avoid a UNIV<->META cycle; content-addressed universe/feature versions; listing-age filter bounded by the 24h dataset window; single causal feature code path; Cross-asset/Execution feature groups deferred to Phases 4/6; synthetic-noise leakage test)."
+  ],
+  "known_gaps_risks": [
+    "The exchange/data source remains the OFFLINE deterministic skeleton; the universe filters, metadata verification, feature pipeline and gates are venue-agnostic and swap to the ccxt source behind the same interfaces in a later phase.",
+    "Cross-asset and Execution feature groups (Section 10) are deferred to Phases 4/6 (they need synchronous multi-symbol joins and live fill data). No deferred feature is critical to a live decision (Parity Rule).",
+    "min_listing_age_days is 0.5 because the Phase 2/3 dataset window is 24h; it is raised once longer history is owned (config-driven, version-bumped).",
+    "Feature matrices live in the git-ignored, regenerable data lake; committed provenance is the manifest + feature_set_versions row + content checksum. Per-run reports/universe|features|metadata dumps are git-ignored like Phase 2 reports/data and reports/gates."
+  ],
+  "status": "Phase 3 — Universe and Features: complete",
+  "tested": "yes",
+  "next_step": "Hand off to Reviewer Agent; do not begin Phase 4."
+}

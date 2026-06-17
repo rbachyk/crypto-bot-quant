@@ -1,0 +1,37 @@
+# features.yaml — single source of truth for the Feature Pipeline (Section 10).
+#
+# Read by the feature pipeline (one code path for backtest + live — the Parity
+# Rule), the feature store, the leakage harness, and the FEAT gate. All runtime
+# behaviour is config-driven and versioned (Section 4): changing a window, the
+# feature set, or the label horizon is a new FEATURE_SET_VERSION.
+#
+# Every feature uses ONLY data available at decision time (Section 10): a feature
+# row indexed by bar open-time t_i is computed from CLOSED candles (bars < i) and
+# point-in-time samples with ts <= t_i. The forward-return label is future-only
+# and is NEVER an input feature — it exists solely for the leakage test.
+
+version: 1
+
+features:
+  feature_set_version: feat_0001
+
+  # The bar timeframe features are computed on (must be one of the OHLCV TFs in
+  # configs/data.yaml). Point-in-time series (mark/index/funding/OI) are joined
+  # onto this grid by backward as-of (last sample with ts <= bar open-time).
+  timeframe: "5m"
+
+  # Rolling-window lengths (in bars of `timeframe`).
+  windows:
+    short: 12        # ~1h at 5m
+    long: 48         # ~4h at 5m
+    rank: 96         # percentile lookback for ATR%
+
+  # Forward-return label horizon (bars). Used ONLY by the leakage test.
+  label_horizon: 12
+
+  # Leakage / look-ahead test tolerances (FEAT gate). On synthetic data with no
+  # real structure, a causal pipeline must show ~0 expectancy: |E| must stay
+  # within `max_synthetic_expectancy_z` standard errors of zero.
+  leakage:
+    synthetic_bars: 4000
+    max_synthetic_expectancy_z: 4.0

@@ -17,7 +17,6 @@ from src.db.models import ExchangeMetadata, VerificationStatus
 from src.exchange import get_adapter
 from src.jobs.context import JobContext
 from src.jobs.registry import job_handler
-from src.universe import UniverseBuilder
 
 _registered = False
 
@@ -78,17 +77,90 @@ def _sync_exchange_metadata(ctx: JobContext, params: dict) -> dict:
     return {"message": f"synced {len(symbols)} symbols (UNVERIFIED)", "symbols": symbols}
 
 
+@job_handler("verify_exchange_metadata")
+def _verify_exchange_metadata(ctx: JobContext, params: dict) -> dict:
+    """Apply operator-verified metadata from ``configs/metadata.yaml`` (Section 6
+    verification workflow step 3): persist ``[VERIFIED]`` metadata rows the META
+    gate reads. Idempotent."""
+    from src.exchange import load_metadata_config, sync_verified_metadata
+
+    cfg = load_metadata_config()
+    ctx.log(
+        f"applying [VERIFIED] metadata for {len(cfg.symbols())} symbols ({cfg.metadata_version})"
+    )
+    with session_scope() as session:
+        written = sync_verified_metadata(session, cfg)
+    ctx.progress(1, 1, f"{written} verified")
+    return {
+        "message": f"verified {written} symbols ({cfg.metadata_version})",
+        "symbols": cfg.symbols(),
+    }
+
+
 @job_handler("build_symbol_universe")
 def _build_symbol_universe(ctx: JobContext, params: dict) -> dict:
-    """Skeleton universe build: persist a versioned universe snapshot whose
-    members are all ``research_only`` (Section 9)."""
-    builder = UniverseBuilder(get_adapter(params.get("exchange_id")))
-    ctx.log("building universe skeleton")
+    """Build a versioned universe: filter every candidate (Section 9) and promote
+    passing symbols to ``active``, logging entering/leaving symbols."""
+    from src.universe import UniverseManager
+
+    ctx.log("building dynamic universe (Phase 3 filters)")
     with session_scope() as session:
-        uv = builder.build(session, version=params.get("version"))
-        version = uv.version
-    ctx.progress(1, 1, f"universe {version} built")
-    return {"message": f"built universe {version}", "version": version}
+        result = UniverseManager().build(session)
+        version = result.version
+        active = result.active_symbols
+        changes = len(result.changes)
+    ctx.progress(1, 1, f"universe {version}: {len(active)} active, {changes} changes")
+    return {
+        "message": f"built universe {version} ({len(active)} active)",
+        "version": version,
+        "active": active,
+        "changes": changes,
+    }
+
+
+@job_handler("build_feature_store")
+def _build_feature_store(ctx: JobContext, params: dict) -> dict:
+    """Build the immutable feature store from the current dataset snapshot for the
+    active universe through the single feature code path (Section 10)."""
+    from src.data import DataPlatform, load_data_config
+    from src.features import FeatureStore
+    from src.universe import UniverseManager, latest_active_symbols
+
+    ctx.log("ensuring data snapshot + building feature store")
+    platform = DataPlatform(cfg=load_data_config())
+    run = platform.run_full(repair=True, source_jobs=["job:build_feature_store"])
+    with session_scope() as session:
+        uni = UniverseManager().build(session)
+        active = latest_active_symbols(session) or uni.active_symbols
+        build = FeatureStore().build(
+            active,
+            run.snapshot.snapshot_id,
+            universe_version=uni.version,
+            session=session,
+            source_jobs=["job:build_feature_store"],
+        )
+        snapshot_id = build.feature_snapshot_id
+        rows = build.total_rows
+    ctx.progress(1, 1, f"features {snapshot_id} ({rows} rows)")
+    return {
+        "message": f"built features {snapshot_id} ({rows} rows)",
+        "feature_snapshot_id": snapshot_id,
+        "checksum": build.checksum,
+        "rows": rows,
+    }
+
+
+@job_handler("run_feature_leakage_test")
+def _run_feature_leakage_test(ctx: JobContext, params: dict) -> dict:
+    """Run the synthetic-data leakage test (Section 16 / FEAT gate)."""
+    from src.features import load_feature_config, synthetic_leakage_report
+
+    ctx.log("running synthetic-data leakage test")
+    report = synthetic_leakage_report(load_feature_config())
+    ctx.progress(
+        1, 1, f"leakage {'PASS' if report['passed'] else 'FAIL'} (|z|={abs(report['z']):.2f})"
+    )
+    return {"message": f"leakage {'PASS' if report['passed'] else 'FAIL'}", **report}
 
 
 # --------------------------------------------------------------------------- #

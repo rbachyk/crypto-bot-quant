@@ -43,20 +43,20 @@ def test_result_persisted_to_db() -> None:
 
 @requires_redis
 def test_dependency_blocks_downstream() -> None:
-    # FEAT depends on DATA-COV (PASS in Phase 2) and UNIV, which has no check yet
-    # (NOT_RUN, introduced in Phase 3) -> FEAT BLOCKED on the unmet dependency.
+    # WF depends on BT, which has no check yet (NOT_RUN, introduced in Phase 4)
+    # -> WF is BLOCKED on the unmet dependency (Appendix A dependency rules).
     runner = GateRunner()
-    feat = runner.run("FEAT")
-    assert feat.overall == "BLOCKED"
-    assert "UNIV" in feat.note
+    wf = runner.run("WF")
+    assert wf.overall == "BLOCKED"
+    assert "BT" in wf.note
 
 
 @requires_redis
 def test_blocked_gate_creates_remediation_actions() -> None:
-    GateRunner().run("FEAT")
+    GateRunner().run("WF")
     with session_scope() as session:
         actions = (
-            session.execute(select(RemediationAction).where(RemediationAction.gate_id == "FEAT"))
+            session.execute(select(RemediationAction).where(RemediationAction.gate_id == "WF"))
             .scalars()
             .all()
         )
