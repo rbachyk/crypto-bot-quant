@@ -4,7 +4,7 @@
   "coder": "claude-sonnet-4-6",
   "date": "2026-06-17",
   "branch": "phase/8",
-  "commit": "TBD",
+  "commit": "73d50c9",
   "scope_implemented": [
     "PaperTradingEngine (src/paper/engine.py): full pipeline — candidate → SetupQualityScorer → RiskManager → ExecutionEngine (SimulatedVenue) → PaperTrade; kill switch, reconciliation, decision logs",
     "PaperSession / PaperTrade / RejectedPaperCandidate / PaperDecisionLog dataclasses (src/paper/session.py): symbol/regime/strategy breakdowns, to_dict()",
