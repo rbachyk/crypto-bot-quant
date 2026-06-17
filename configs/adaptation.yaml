@@ -1,0 +1,64 @@
+# adaptation.yaml — Online Learning Shadow configuration (AGENTS.md Section 21, Phase 11).
+#
+# The adaptation module implements the bounded learner (Section 21.2–21.9).
+# `risk_envelope` values here are read-only references — the authoritative copy
+# lives in configs/risk.yaml and is enforced in code by envelope_guard.py
+# regardless of what this file says. The guard clamps or rejects any out-of-box
+# action even if adaptation.yaml were edited at runtime.
+#
+# Promotion path: SHADOW → RECOMMEND → LIVE_BOUNDED (Section 21.3).
+# Phase 11 delivers SHADOW mode only. RECOMMEND / LIVE_BOUNDED require
+# LEARN-PROMO-S / LEARN-PROMO-L gates to PASS and manual approval.
+
+version: 1
+learner_version: "learner_0001"
+
+adaptation:
+  enabled: true                       # master on/off switch
+  mode: "SHADOW"                      # SHADOW | RECOMMEND | LIVE_BOUNDED (manual promotion only)
+  min_samples_to_start: 50            # minimum logged decisions before scoring; eligibility §21.1
+  learner_id: "online_shadow_v1"
+
+  # --- What the learner may touch (Section 21.2, 21.6) -------------------- #
+  # Only params explicitly registered here are tunable; stops/leverage/heat/
+  # beta/breakers and no-trade regimes are NEVER registered.
+  registered_tunables: {}             # empty in Phase 11 shadow mode
+
+  # --- Bounded action space (Section 21.6) --------------------------------- #
+  bounds:
+    strategy_weight:
+      w_min: 0.0
+      w_max: 2.0                      # max relative weight vs 1.0 baseline
+    size_buckets: [0.0, 0.25, 0.5, 1.0]
+    max_change_per_update: 0.10       # |Δ| per single update
+    max_change_rate: 0.25             # max cumulative drift per rolling window
+
+  # --- Rollback / circuit breaker (Section 21.7) --------------------------- #
+  rollback:
+    rollback_window: 20               # look-back decisions for underperformance check
+    rollback_margin: 0.05             # realized vs projected shortfall threshold
+    max_divergence: 0.20              # policy vs shadow projection max divergence
+    auto_freeze_on_breaker: true      # IMMUTABLE: cannot be set false
+
+  # --- Periodic offline retrain (Section 21.7) ----------------------------- #
+  retrain:
+    schedule: "0 2 * * *"            # 02:00 UTC daily
+    min_oos_expectancy_r: 0.10        # kill-criteria for retrain promotion
+
+  # --- Frozen fallback policy (Section 21.7) ------------------------------- #
+  # Path to the serialised frozen policy bytes; set after first snapshot is written.
+  frozen_fallback_policy: "var/adaptation/frozen_fallback.pkl"
+
+  # --- Scoring / promotion criteria (Section 21.3, LEARN-PROMO-S gate) ----- #
+  scoring:
+    min_shadow_decisions: 50          # minimum logged decisions for promotion eval
+    min_wf_folds_positive: 2          # walk-forward: at least N folds beat baseline
+    min_holdout_edge: 0.0             # hold-out must be non-negative (beat = ≥ 0)
+    calibration_max_brier: 0.30       # maximum Brier score for "calibrated" claim
+    max_drift_per_window: 0.15        # drift monitoring threshold
+
+  # --- Drift / calibration monitoring ------------------------------------- #
+  monitoring:
+    enabled: true
+    drift_window: 20                  # decisions per drift check
+    calibration_window: 50            # decisions per calibration check

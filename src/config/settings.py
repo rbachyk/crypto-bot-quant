@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     feature_set_version: str = "feat_0001"
     risk_policy_version: str = "risk_0001"
     execution_policy_version: str = "exec_0001"
+    online_learner_version: str = "learner_0001"
 
     # --- Infrastructure endpoints (Appendix B.1) ---------------------------
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/trading_bot"
@@ -203,6 +204,7 @@ class Settings(BaseSettings):
             "FEATURE_SET_VERSION": self.feature_set_version,
             "RISK_POLICY_VERSION": self.risk_policy_version,
             "EXECUTION_POLICY_VERSION": self.execution_policy_version,
+            "ONLINE_LEARNER_VERSION": self.online_learner_version,
         }
 
 

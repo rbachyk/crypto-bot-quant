@@ -18,7 +18,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from alembic import op
-
 from src.db import models  # noqa: F401  (registers tables on Base.metadata)
 from src.db.base import Base
 

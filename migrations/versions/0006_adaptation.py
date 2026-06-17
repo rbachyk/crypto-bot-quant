@@ -1,14 +1,12 @@
-"""Phase 2 data-platform schema.
+"""Phase 11 — Online Learning Shadow schema.
 
-Adds ``dataset_versions`` (immutable dataset snapshots / manifests, Appendix
-B.4/B.5) and ``data_quality_reports`` (persisted Section 8/23 validation
-reports). Schema is derived from the ORM metadata via ``create_all`` so it can
-never drift from ``src.db.models``. Idempotent: ``create_all(checkfirst=True)``
-only creates missing objects, and Alembic's version table makes repeated
-upgrades a no-op.
+Adds ``learner_logs`` (AGENTS.md Section 21.8 LearnerLogEntry). Schema is
+derived from the ORM metadata via ``create_all`` so it can never drift from
+``src.db.models``. Idempotent: ``create_all(checkfirst=True)`` only creates
+missing objects, and Alembic's version table makes repeated upgrades a no-op.
 
-Revision ID: 0002
-Revises: 0001
+Revision ID: 0006
+Revises: 0005
 Create Date: 2026-06-17
 """
 
@@ -20,12 +18,12 @@ from alembic import op
 from src.db import models  # noqa: F401  (registers tables on Base.metadata)
 from src.db.base import Base
 
-revision: str = "0002"
-down_revision: str | None = "0001"
+revision: str = "0006"
+down_revision: str | None = "0005"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-_NEW_TABLES = ("dataset_versions", "data_quality_reports")
+_NEW_TABLES = ("learner_logs",)
 
 
 def upgrade() -> None:

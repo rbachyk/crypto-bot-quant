@@ -1,0 +1,96 @@
+{
+  "phase": 11,
+  "name": "Online Learning Shadow",
+  "coder": "claude-sonnet-4-6",
+  "date": "2026-06-17T21:14:00Z",
+  "branch": "phase/11",
+  "base_commit": "0cedd9b",
+  "config_version": "cfg_0001",
+  "online_learner_version": "learner_0001",
+  "scope_implemented": [
+    "src/adaptation/ module layout per AGENTS.md Section 21.5 (10 submodules)",
+    "BoundedAction schema + ActionBounds + validate() (action_space.py)",
+    "Immutable envelope guard with _FORBIDDEN_TUNABLES frozenset (envelope_guard.py)",
+    "Policy protocol + Context/Outcome dataclasses (policy_base.py)",
+    "OnlineLogRegPolicy: SGDClassifier(loss=log_loss) with partial_fit (policies/online_logreg.py)",
+    "GaussianTSBandit: Gaussian Thompson Sampling with conjugate updates (policies/bandit.py)",
+    "RLPolicyStub: Phase 12 placeholder returning neutral SHADOW action (policies/rl_policy.py)",
+    "Walk-forward scorer with locked hold-out + Brier calibration + drift monitoring (scorer.py)",
+    "LearnerController state machine (SHADOW/RECOMMEND/LIVE_BOUNDED/FROZEN); applied=False in shadow (controller.py)",
+    "RollbackGuard with 5 triggers: envelope_breaker, regime_unsafe, divergence, underperformance, manual_kill (rollback.py)",
+    "Snapshot versioning with SHA-256 checksum + frozen-fallback persistence (versioning.py)",
+    "InMemoryLearnerStore + write_learner_log() + DB write (store.py)",
+    "AdaptationConfig loading from configs/adaptation.yaml with lru_cache (config.py)",
+    "configs/adaptation.yaml with mode=SHADOW, bounds, rollback, scoring params",
+    "LearnerLog SQLAlchemy model added to src/db/models.py",
+    "Alembic migration 0006_adaptation.py adding learner_logs table",
+    "online_learner_version field added to Settings + versions() output",
+    "LEARN-PROMO-S gate implemented (src/gates/phase11.py, 15 criteria) and registered in checks.py",
+    "53 unit tests in tests/test_phase11_adaptation.py"
+  ],
+  "acceptance_criteria": [
+    {
+      "criterion": "Bounded learner in SHADOW mode (applied=False always); learner_log table populated",
+      "status": "PASS",
+      "evidence": "gate criterion controller_shadow_applies_false; learner_log_db; shadow_log_applied_false"
+    },
+    {
+      "criterion": "Drift monitoring implemented and exercised",
+      "status": "PASS",
+      "evidence": "gate criterion drift_monitoring_runs: drift_scores=[0.05,0.05,0.05] max_drift=0.050"
+    },
+    {
+      "criterion": "Calibration monitoring (Brier score) implemented and exercised",
+      "status": "PASS",
+      "evidence": "gate criterion scorer_runs: brier=0.245 (threshold 0.30)"
+    },
+    {
+      "criterion": "Section 21.x eligibility met (BoundedAction schema, ActionBounds, SHADOW mode only)",
+      "status": "PASS",
+      "evidence": "adaptation_imports PASS; config_mode_shadow PASS; validate_clamps_bucket PASS"
+    },
+    {
+      "criterion": "Frozen fallback exists and tested (snapshot save/load + frozen-fallback round-trip)",
+      "status": "PASS",
+      "evidence": "gate criterion frozen_fallback_roundtrip PASS"
+    },
+    {
+      "criterion": "envelope_guard rejects any out-of-box action (tested)",
+      "status": "PASS",
+      "evidence": "gate criterion envelope_guard_rejects_bad: forbidden param rejected; unknown strategy rejected; oversized bucket clamped"
+    },
+    {
+      "criterion": "Gate LEARN-PROMO-S evaluated",
+      "status": "PASS",
+      "evidence": "reports/gates/LEARN-PROMO-S_20260617T211413.json — overall=PASS 15/15"
+    }
+  ],
+  "gates": [
+    {
+      "gate_id": "LEARN-PROMO-S",
+      "result": "PASS",
+      "criteria_passed": 15,
+      "criteria_total": 15,
+      "report_path": "reports/gates/LEARN-PROMO-S_20260617T211413.json"
+    }
+  ],
+  "tests": {
+    "pytest_result": "PASS",
+    "total_passed": 397,
+    "total_failed": 0,
+    "phase11_tests_passed": 53,
+    "phase11_tests_total": 53,
+    "ruff": "PASS",
+    "mypy": "PASS"
+  },
+  "assumptions_and_decisions": [],
+  "known_gaps_risks": [
+    "RLPolicyStub is a Phase 12 placeholder; real RL policy delivered in Phase 12",
+    "SHADOW mode only — no live influence; applied=False is enforced by controller not policy",
+    "Scorer uses synthetic decisions in gate; real shadow log accumulation begins post-deploy",
+    "LEARN-PROMO-S promotion to RECOMMEND requires manual operator step (no automatic promotion)"
+  ],
+  "status": "COMPLETE",
+  "tested": "yes",
+  "next_step": "Reviewer Agent independently re-runs LEARN-PROMO-S gate and verifies criteria; human approves advancing to Phase 12 (RL Policy)"
+}

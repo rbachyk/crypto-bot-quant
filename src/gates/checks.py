@@ -29,6 +29,7 @@ from src.gates.phase6 import (
 from src.gates.phase8 import check_paper_a, check_paper_b
 from src.gates.phase9 import check_ml_promo as _check_ml_promo_phase9
 from src.gates.phase10 import check_ml_phase10
+from src.gates.phase11 import check_learn_promo_s
 from src.gates.result import Criterion
 from src.killswitch import KillSwitch
 from src.monitoring import Alert, AlertSeverity, check_health, get_alert_sink
@@ -1521,6 +1522,8 @@ CHECKS: dict[str, Callable[[Settings], list[Criterion]]] = {
     "PAPER-B": check_paper_b,
     # Phase 9–10 — ML promotion gate (shadow + recommendation + constrained filter).
     "ML-PROMO": check_ml_promo,
+    # Phase 11 — Online Learning Shadow gate.
+    "LEARN-PROMO-S": check_learn_promo_s,
 }
 
 

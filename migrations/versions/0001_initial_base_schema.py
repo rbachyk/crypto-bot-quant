@@ -20,9 +20,8 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-
-from src.db.base import Base
 from src.db import models  # noqa: F401  (registers tables on Base.metadata)
+from src.db.base import Base
 
 revision: str = "0001"
 down_revision: str | None = None

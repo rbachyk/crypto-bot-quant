@@ -492,6 +492,36 @@ class MLModelRegistry(Base):
     notes: Mapped[str] = mapped_column(Text, default="")
 
 
+class LearnerLog(Base):
+    """Online learner decision log (AGENTS.md Section 21.8 LearnerLogEntry schema).
+
+    Records every bounded action emitted by the learner in SHADOW / RECOMMEND /
+    LIVE_BOUNDED mode.  ``applied`` is False in SHADOW and RECOMMEND; it may be
+    True in LIVE_BOUNDED only after LEARN-PROMO-S + LEARN-PROMO-L gates pass and
+    manual promotion is approved (Section 21.3, 27).
+    """
+
+    __tablename__ = "learner_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
+    learner_id: Mapped[str] = mapped_column(String(80), index=True)
+    learner_version: Mapped[str] = mapped_column(String(32), default="learner_0001")
+    mode: Mapped[str] = mapped_column(String(16), default="SHADOW", index=True)
+    symbol: Mapped[str | None] = mapped_column(String(48), index=True)
+    context_features: Mapped[dict] = mapped_column(JSON, default=dict)
+    proposed_action: Mapped[dict] = mapped_column(JSON, default=dict)
+    projected_outcome: Mapped[float] = mapped_column(default=0.0)
+    realized_outcome: Mapped[float | None] = mapped_column()
+    applied: Mapped[bool] = mapped_column(Boolean, default=False)
+    clamped_fields: Mapped[list] = mapped_column(JSON, default=list)
+    rollback_event: Mapped[str | None] = mapped_column(Text)
+    config_version: Mapped[str] = mapped_column(String(32), default="cfg_0001")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (Index("ix_learner_logs_id_ts", "learner_id", "ts"),)
+
+
 class DataQualityReportRow(Base):
     """Persisted data-validation report (Section 8/23/34). A report is generated
     before every research/paper/live run; the DQ gate reads the latest."""
