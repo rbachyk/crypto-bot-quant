@@ -1,9 +1,12 @@
-# Caddy reverse proxy (auto-HTTPS in non-local envs; Appendix C).
-# For local/dev use http on :80. In production set DASHBOARD_DOMAIN and Caddy
-# will provision TLS automatically.
+# Caddy reverse proxy — the only externally published service (port 443).
+# Local/dev: default site is `https://localhost`; Caddy serves it on :443 using
+# its built-in internal CA (self-signed), so no public port 80 / ACME is needed.
+# Production: set DASHBOARD_DOMAIN to a real hostname and Caddy provisions a
+# public TLS certificate automatically — still on 443 only.
 
-{$DASHBOARD_DOMAIN:http://localhost} {
+{$DASHBOARD_DOMAIN:https://localhost} {
 	encode gzip
-	# Dashboard shell + API are served by the backend service.
+	# Dashboard shell + API are served by the backend service over the internal
+	# network; the backend enforces dashboard auth (DASHBOARD_AUTH_MODE).
 	reverse_proxy backend:8000
 }

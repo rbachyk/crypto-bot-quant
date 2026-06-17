@@ -25,3 +25,4 @@ reports/backup/
 
 # OS
 .DS_Store
+.aider*

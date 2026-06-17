@@ -18,29 +18,95 @@
     "Gate-runner CLI contract: 'make -s run-gate GATE=<id> FORMAT=json' and 'make -s run-all-gates FORMAT=json' emit a single GateResult JSON object to stdout matching configs/gate_result.schema.json exactly (top-level gate_id, overall, criteria[], report_path; each criterion uses id (not name) + status, optional failure_reason/remediation_steps); GATE/FORMAT are make variables, not flags."
   ],
   "acceptance_criteria": [
-    {"criterion": "make docker-up && make health -> services green", "met": true, "evidence": "make health returns all components healthy (db/redis/storage/kill_switch); Docker available; live engine behind 'live' profile."},
-    {"criterion": "make migrate idempotent; required tables exist", "met": true, "evidence": "alembic migration 0001; DB gate verifies required tables + indexes."},
-    {"criterion": "Job skeleton: enqueue/progress/retry/cancel; records + logs persisted", "met": true, "evidence": "tests/test_jobs.py; QUEUE gate PASS."},
-    {"criterion": "Dashboard shell requires auth; per-service health endpoints respond", "met": true, "evidence": "tests/test_api.py; INFRA criterion dashboard_auth_configured=PASS."},
-    {"criterion": "make kill works with the dashboard stopped", "met": true, "evidence": "tests/test_killswitch.py; INFRA criterion kill_switch_independent=PASS."},
-    {"criterion": "Gates INFRA, DB, QUEUE, STORAGE return PASS; MON, BACKUP skeletons present", "met": true, "evidence": "make -s run-all-gates FORMAT=json; all four PASS, MON/BACKUP skeleton PASS."},
-    {"criterion": "pytest, ruff, mypy green; no secrets committed; no live-mode default", "met": true, "evidence": "36 passed; ruff clean; mypy no issues; .env gitignored; TRADING_MODE=PAPER default, live disabled."},
-    {"criterion": "Completion Report filled; assumptions in docs/decisions/", "met": true, "evidence": "this file; docs/decisions/0001, 0002."}
+    {
+      "criterion": "make docker-up && make health -> services green",
+      "met": true,
+      "evidence": "make health returns all components healthy (db/redis/storage/kill_switch); Docker available; live engine behind 'live' profile."
+    },
+    {
+      "criterion": "make migrate idempotent; required tables exist",
+      "met": true,
+      "evidence": "alembic migration 0001; DB gate verifies required tables + indexes."
+    },
+    {
+      "criterion": "Job skeleton: enqueue/progress/retry/cancel; records + logs persisted",
+      "met": true,
+      "evidence": "tests/test_jobs.py; QUEUE gate PASS."
+    },
+    {
+      "criterion": "Dashboard shell requires auth; per-service health endpoints respond",
+      "met": true,
+      "evidence": "tests/test_api.py; INFRA criterion dashboard_auth_configured=PASS."
+    },
+    {
+      "criterion": "make kill works with the dashboard stopped",
+      "met": true,
+      "evidence": "tests/test_killswitch.py; INFRA criterion kill_switch_independent=PASS."
+    },
+    {
+      "criterion": "Gates INFRA, DB, QUEUE, STORAGE return PASS; MON, BACKUP skeletons present",
+      "met": true,
+      "evidence": "make -s run-all-gates FORMAT=json; all four PASS, MON/BACKUP skeleton PASS."
+    },
+    {
+      "criterion": "pytest, ruff, mypy green; no secrets committed; no live-mode default",
+      "met": true,
+      "evidence": "36 passed; ruff clean; mypy no issues; .env gitignored; TRADING_MODE=PAPER default, live disabled."
+    },
+    {
+      "criterion": "Completion Report filled; assumptions in docs/decisions/",
+      "met": true,
+      "evidence": "this file; docs/decisions/0001, 0002."
+    }
   ],
   "gates_run": [
-    {"gate_id": "INFRA", "result": "PASS", "report_path": "reports/gates/INFRA_<ts>.json"},
-    {"gate_id": "DB", "result": "PASS", "report_path": "reports/gates/DB_<ts>.json"},
-    {"gate_id": "QUEUE", "result": "PASS", "report_path": "reports/gates/QUEUE_<ts>.json"},
-    {"gate_id": "STORAGE", "result": "PASS", "report_path": "reports/gates/STORAGE_<ts>.json"},
-    {"gate_id": "MON", "result": "PASS", "report_path": "reports/gates/MON_<ts>.json", "note": "skeleton only this phase"},
-    {"gate_id": "BACKUP", "result": "PASS", "report_path": "reports/gates/BACKUP_<ts>.json", "note": "skeleton only this phase"}
+    {
+      "gate_id": "INFRA",
+      "result": "PASS",
+      "report_path": "reports/gates/INFRA_<ts>.json"
+    },
+    {
+      "gate_id": "DB",
+      "result": "PASS",
+      "report_path": "reports/gates/DB_<ts>.json"
+    },
+    {
+      "gate_id": "QUEUE",
+      "result": "PASS",
+      "report_path": "reports/gates/QUEUE_<ts>.json"
+    },
+    {
+      "gate_id": "STORAGE",
+      "result": "PASS",
+      "report_path": "reports/gates/STORAGE_<ts>.json"
+    },
+    {
+      "gate_id": "MON",
+      "result": "PASS",
+      "report_path": "reports/gates/MON_<ts>.json",
+      "note": "skeleton only this phase"
+    },
+    {
+      "gate_id": "BACKUP",
+      "result": "PASS",
+      "report_path": "reports/gates/BACKUP_<ts>.json",
+      "note": "skeleton only this phase"
+    }
   ],
   "tests": {
-    "pytest": "36 passed, 1 warning",
+    "pytest": "36 passed, 1 warning (re-run after review fix)",
     "coverage_risk_exec_adaptation": "n/a (modules not implemented until later phases)",
     "ruff": "ok (All checks passed; 43 files formatted)",
     "mypy": "ok (no issues found in 33 source files)"
   },
+  "review_fixes": [
+    {
+      "required_fix": "Reviewer output could not be parsed into a verdict.",
+      "root_cause": "Orchestrator reviewer-output parser (orchestrator/agents.py _parse_review/_unwrap_response) sliced JSON with a naive first-'{'/last-'}' span. Reasoning-model reviewers (gpt-5.5, gemini-3-pro, glm-4.6) wrap the verdict JSON in prose containing braces, so the slice captured non-JSON and fell back to the fail-closed 'could not be parsed' FAIL.",
+      "fix": "Replaced the slice with a balanced-brace scanner (_iter_json_objects/_load_json_objects) that respects string literals/escapes, yields every top-level {...} candidate, and selects the last object carrying a 'verdict' key. Fail-closed FAIL is retained for genuinely unparseable output and for well-formed objects with an invalid verdict; the message now appends the schema-validation detail.",
+      "tests": "orchestrator/tests/test_review_parsing.py (12 stdlib-unittest cases: prose/reasoning/fence/multi-object/brace-in-string parse correctly; garbage and invalid verdicts fail closed). ruff + mypy clean on the changed file."
+    }
+  ],
   "assumptions_and_decisions": [
     "docs/decisions/0001-phase-1-infrastructure-choices.md",
     "docs/decisions/0002-timescaledb-optional-in-phase-1.md"

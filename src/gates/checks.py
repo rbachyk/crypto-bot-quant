@@ -75,6 +75,40 @@ def _load_compose() -> dict:
 # --------------------------------------------------------------------------- #
 # INFRA                                                                        #
 # --------------------------------------------------------------------------- #
+def _external_published_ports(compose: dict) -> dict[str, list[str]]:
+    """Map service -> host ports published on a non-loopback interface.
+
+    A port bound to 127.0.0.1 / localhost is loopback-only (dev tooling) and is
+    NOT considered externally exposed. Everything else is. Used to enforce the
+    deliverable "internal network; only 443 exposed".
+    """
+    offending: dict[str, list[str]] = {}
+    for name, svc in (compose.get("services") or {}).items():
+        if not isinstance(svc, dict):
+            continue
+        hosts: list[str] = []
+        for entry in svc.get("ports", []) or []:
+            host_ip = ""
+            host_port = ""
+            if isinstance(entry, dict):
+                host_ip = str(entry.get("host_ip", ""))
+                host_port = str(entry.get("published", ""))
+            else:
+                parts = str(entry).split(":")
+                if len(parts) == 3:  # host_ip:host_port:container_port
+                    host_ip, host_port = parts[0], parts[1]
+                elif len(parts) == 2:  # host_port:container_port
+                    host_port = parts[0]
+                else:  # bare container port -> ephemeral host port (still exposed)
+                    host_port = parts[0]
+            if host_ip in ("127.0.0.1", "localhost", "::1"):
+                continue
+            hosts.append(host_port)
+        if hosts:
+            offending[name] = hosts
+    return offending
+
+
 def check_infra(settings: Settings) -> list[Criterion]:
     out: list[Criterion] = []
 
@@ -106,6 +140,16 @@ def check_infra(settings: Settings) -> list[Criterion]:
                 "trading-engine-live must sit behind a non-default compose profile",
             )
         )
+
+    # Only 443 is published to the outside world (deliverable: internal network;
+    # only 443 exposed). Loopback-bound dev ports do not count.
+    published = _external_published_ports(compose)
+    bad_ports = {svc: ports for svc, ports in published.items() if set(ports) - {"443"}}
+    out.append(
+        Criterion.ok("only_443_exposed", "only caddy:443 published externally")
+        if not bad_ports
+        else Criterion.fail("only_443_exposed", f"unexpected external ports: {bad_ports}")
+    )
 
     # Safe env defaults (Appendix B.3 / B.17).
     env = _load_env_example()

@@ -5,41 +5,94 @@
     "criteria": [
       {
         "id": "compose_services_defined",
+        "title": "compose_services_defined",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "13 services"
       },
       {
         "id": "live_engine_disabled_by_default",
+        "title": "live_engine_disabled_by_default",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "behind profile ['live']"
       },
       {
-        "id": "env_safe_defaults",
+        "id": "only_443_exposed",
+        "title": "only_443_exposed",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "only caddy:443 published externally"
+      },
+      {
+        "id": "env_safe_defaults",
+        "title": "env_safe_defaults",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "TRADING_MODE=PAPER, live disabled"
       },
       {
         "id": "no_real_keys",
+        "title": "no_real_keys",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "no API keys in .env.example"
       },
       {
         "id": "dashboard_auth_configured",
+        "title": "dashboard_auth_configured",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "mode=basic"
       },
       {
         "id": "health_endpoints_green",
+        "title": "health_endpoints_green",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "db/redis/storage healthy"
       },
       {
         "id": "kill_switch_independent",
+        "title": "kill_switch_independent",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "engage/disengage works with no web process"
       }
     ],
-    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/INFRA_20260616T162213.json",
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/INFRA_20260617T085038.json",
     "note": ""
   },
   {
@@ -48,31 +101,61 @@
     "criteria": [
       {
         "id": "db_reachable",
+        "title": "db_reachable",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "SELECT 1 ok"
       },
       {
         "id": "alembic_applied",
+        "title": "alembic_applied",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "alembic_version present"
       },
       {
         "id": "required_tables_exist",
+        "title": "required_tables_exist",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "7 base tables present"
       },
       {
         "id": "indexes_exist",
+        "title": "indexes_exist",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "ix_jobs_type_status present"
       },
       {
         "id": "connection_pooling",
+        "title": "connection_pooling",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "pool size=5"
       }
     ],
-    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/DB_20260616T162214.json",
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/DB_20260617T085039.json",
     "note": ""
   },
   {
@@ -81,36 +164,72 @@
     "criteria": [
       {
         "id": "redis_reachable",
+        "title": "redis_reachable",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "PING ok"
       },
       {
         "id": "worker_consumes_jobs",
+        "title": "worker_consumes_jobs",
         "status": "PASS",
-        "detail": "job job_829d62ef0fdc4d4b -> succeeded"
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "job job_5f00d10a2d4f4fa0 -> succeeded"
       },
       {
         "id": "progress_tracked",
+        "title": "progress_tracked",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "3/3"
       },
       {
         "id": "job_records_persisted",
+        "title": "job_records_persisted",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "2 log lines"
       },
       {
         "id": "cancel_works",
+        "title": "cancel_works",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "queued job cancelled and skipped"
       },
       {
         "id": "retry_and_failures_visible",
+        "title": "retry_and_failures_visible",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "failed job visible and re-queued"
       }
     ],
-    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/QUEUE_20260616T162215.json",
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/QUEUE_20260617T085040.json",
     "note": ""
   },
   {
@@ -119,26 +238,50 @@
     "criteria": [
       {
         "id": "data_lake_writable",
+        "title": "data_lake_writable",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "/Users/ros/Projects/crypto-bot-quant/trading-bot/var/datalake"
       },
       {
         "id": "snapshot_id_generated",
+        "title": "snapshot_id_generated",
         "status": "PASS",
-        "detail": "ds_20260616T162216_0001, ds_20260616T162216_0002"
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "ds_20260617T085041_0001, ds_20260617T085041_0002"
       },
       {
         "id": "manifest_written_versioned",
+        "title": "manifest_written_versioned",
         "status": "PASS",
-        "detail": "checksum=bd9058829571ef62"
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "checksum=803c120a4aab5a03"
       },
       {
         "id": "artifact_writable",
+        "title": "artifact_writable",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "/Users/ros/Projects/crypto-bot-quant/trading-bot/var/artifacts/selftest/gate.txt"
       }
     ],
-    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/STORAGE_20260616T162216.json",
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/STORAGE_20260617T085041.json",
     "note": ""
   }
 ]

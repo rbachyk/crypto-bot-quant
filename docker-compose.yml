@@ -7,6 +7,16 @@
 #     (enforced in src.config.Settings).
 #   * No real secrets here; everything comes from `.env` (see `.env.example`).
 #
+# Networking (deliverable: "internal network; only 443 exposed"):
+#   * All services join a single private bridge network and talk over it by
+#     service name (e.g. postgres:5432, backend:8000). They are NOT published.
+#   * Caddy is the ONLY service that publishes to the public interface, on 443.
+#   * postgres/redis are bound to 127.0.0.1 ONLY — loopback access for host-run
+#     dev tooling (make migrate / run-gate / health) without exposing them on
+#     any external interface. The backend/dashboard shell is reachable solely
+#     through Caddy (authenticated), satisfying "no unauthenticated dashboard
+#     outside local".
+#
 # Services build from a single image and differ only by `command`.
 
 x-app-env: &app-env
@@ -39,8 +49,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    # Loopback-only: reachable from host dev tooling, never externally exposed.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
 
   redis:
     image: redis:7-alpine
@@ -50,8 +61,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    # Loopback-only: reachable from host dev tooling, never externally exposed.
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
 
   backend:
     <<: [*app-build, *app-env]
@@ -69,8 +81,9 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-    ports:
-      - "8000:8000"
+    # Internal only — exposed to the outside solely through Caddy (443).
+    expose:
+      - "8000"
 
   dashboard:
     <<: [*app-build, *app-env]
@@ -82,8 +95,9 @@ services:
     depends_on:
       backend:
         condition: service_started
-    ports:
-      - "8001:8001"
+    # Internal only — never published; fronted by Caddy (443) with auth.
+    expose:
+      - "8001"
 
   worker-data:
     <<: [*app-build, *app-env]
@@ -184,9 +198,16 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddydata:/data
+    # The ONLY publicly published port in the stack (deliverable: only 443).
     ports:
-      - "80:80"
       - "443:443"
+
+# Single private bridge network; services reach each other by name. Nothing is
+# reachable from outside except Caddy:443 (and loopback-bound postgres/redis).
+networks:
+  default:
+    name: trading-bot-internal
+    driver: bridge
 
 volumes:
   pgdata:
