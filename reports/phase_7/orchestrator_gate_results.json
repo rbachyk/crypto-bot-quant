@@ -1,0 +1,160 @@
+[
+  {
+    "gate_id": "MON",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "health_checks_active",
+        "title": "health_checks_active",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "service=backend"
+      },
+      {
+        "id": "alert_test_delivered",
+        "title": "alert_test_delivered",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "4 alerts delivered to sink"
+      },
+      {
+        "id": "monitoring_skeleton",
+        "title": "monitoring_skeleton",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "stale-data / failed-job / kill-switch alerts wired (skeleton; transports in P13)"
+      },
+      {
+        "id": "gate_status_panel",
+        "title": "gate_status_panel",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "returned 22 gate results"
+      },
+      {
+        "id": "road_to_live_panel",
+        "title": "road_to_live_panel",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "score=76.9% (20/26 critical)"
+      },
+      {
+        "id": "stats_panel_time_filter",
+        "title": "stats_panel_time_filter",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "all/today/last_7d/last_30d periods return valid schema"
+      },
+      {
+        "id": "per_symbol_stats_panel",
+        "title": "per_symbol_stats_panel",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "per-symbol stats endpoint works"
+      },
+      {
+        "id": "remediation_panel",
+        "title": "remediation_panel",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "returned 100 remediation items"
+      },
+      {
+        "id": "jobs_panel",
+        "title": "jobs_panel",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "returned 5 jobs"
+      },
+      {
+        "id": "audit_log_panel",
+        "title": "audit_log_panel",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "audit log endpoint accessible"
+      },
+      {
+        "id": "approvals_panel",
+        "title": "approvals_panel",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "approvals endpoint accessible"
+      },
+      {
+        "id": "reports_panel",
+        "title": "reports_panel",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "returned 100 report entries"
+      },
+      {
+        "id": "gate_result_rendering",
+        "title": "gate_result_rendering",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "gate detail endpoint returns spec + result + remediation_actions"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/MON_20260617T164225.json",
+    "note": ""
+  },
+  {
+    "gate_id": "QUALITY",
+    "overall": "PASS",
+    "criteria": [],
+    "report_path": "",
+    "note": "make test lint typecheck passed"
+  }
+]

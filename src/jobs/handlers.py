@@ -327,4 +327,136 @@ def _run_restore_test_check(ctx: JobContext, params: dict) -> dict:
     return {"message": "restore test passed"}
 
 
+# --------------------------------------------------------------------------- #
+# ML shadow jobs (Phase 9 — shadow mode only; no live influence)              #
+# --------------------------------------------------------------------------- #
+@job_handler("build_ml_dataset")
+def _build_ml_dataset(ctx: JobContext, params: dict) -> dict:
+    """Build a labeled dataset for meta-labeler training from paper trade outcomes.
+
+    Phase 9 uses the deterministic synthetic reference dataset; once sufficient
+    paper trade outcomes accumulate (Phase 10+), this job builds from the real
+    shadow_log + paper_trades tables.
+    """
+    from src.ml.labels import build_reference_dataset
+
+    n_good = int(params.get("n_good", 40))
+    n_bad = int(params.get("n_bad", 30))
+    n_neutral = int(params.get("n_neutral", 30))
+    seed = int(params.get("seed", 42))
+
+    ctx.log(f"building ML dataset: n_good={n_good} n_bad={n_bad} n_neutral={n_neutral}")
+    samples = build_reference_dataset(n_good=n_good, n_bad=n_bad, n_neutral=n_neutral, seed=seed)
+    ctx.progress(1, 1, f"{len(samples)} labeled samples")
+    return {"message": f"built ML dataset: {len(samples)} samples", "n_samples": len(samples)}
+
+
+@job_handler("train_ml_models")
+def _train_ml_models(ctx: JobContext, params: dict) -> dict:
+    """Train all five shadow ML models on the reference dataset.
+
+    Shadow mode only — the trained models are stored in the artifact registry
+    but never influence live trading decisions.
+    """
+    from src.ml import ShadowPredictor
+    from src.ml.config import load_ml_config
+    from src.ml.labels import build_reference_dataset, train_test_split
+
+    ctx.log("loading ML config and building reference dataset")
+    ml_cfg = load_ml_config()
+    samples = build_reference_dataset(seed=42)
+    train_samples, _ = train_test_split(samples, seed=42)
+
+    ctx.log(f"training 5 shadow models on {len(train_samples)} samples")
+    predictor = ShadowPredictor.from_config(ml_cfg)
+    metrics = predictor.train(train_samples)
+    ctx.progress(1, 1, "5 models trained")
+    ctx.log(f"train metrics: {metrics}")
+    return {
+        "message": "5 shadow ML models trained (shadow mode; no live influence)",
+        "model_version": ml_cfg.model_version,
+        "ml_stage": ml_cfg.ml_stage,
+        "metrics": metrics,
+    }
+
+
+@job_handler("evaluate_ml_models")
+def _evaluate_ml_models(ctx: JobContext, params: dict) -> dict:
+    """Evaluate trained shadow models against the ML-PROMO kill criteria.
+
+    Produces a scoring report but does NOT promote models — promotion requires
+    the ML-PROMO gate PASS and manual review (Section 20).
+    """
+    from src.config import get_settings
+    from src.ml import ShadowPredictor, ShadowScorer
+    from src.ml.config import load_ml_config
+    from src.ml.labels import build_reference_dataset, train_test_split
+
+    ctx.log("evaluating shadow ML models against ML-PROMO kill criteria")
+    ml_cfg = load_ml_config()
+    settings = get_settings()
+    samples = build_reference_dataset(seed=42)
+    train_samples, test_samples = train_test_split(samples, seed=42)
+
+    predictor = ShadowPredictor.from_config(ml_cfg)
+    predictor.train(train_samples)
+    test_result = predictor.run(
+        [s.candidate for s in test_samples], settings=settings, write_to_db=False
+    )
+    test_preds = [b.meta_label.label if b.meta_label else 1 for b in test_result.bundles]
+
+    kc = ml_cfg.kill_criteria
+    scorer = ShadowScorer(
+        min_improvement=kc.min_improvement_over_baseline,
+        min_pf_ratio=kc.min_profit_factor_ratio,
+        max_tail_loss_ratio=kc.max_tail_loss_ratio,
+        max_best_removed_pct=kc.max_best_trades_removed_pct,
+    )
+    score = scorer.score(test_samples, test_preds)
+    ctx.progress(1, 1, f"scoring: passed={score.passed}")
+    ctx.log(f"expectancy improvement: {score.expectancy_improvement:+.4f}R")
+    return {
+        "message": f"ML evaluation: {'PASS' if score.passed else 'FAIL'}",
+        "passed": score.passed,
+        "scoring": score.to_dict(),
+        "fail_reasons": score.fail_reasons,
+        "note": "promotion requires ML-PROMO gate PASS + manual_reviewed=True in registry",
+    }
+
+
+@job_handler("run_ml_shadow_pass")
+def _run_ml_shadow_pass(ctx: JobContext, params: dict) -> dict:
+    """Run the shadow ML predictor over a set of candidates and log results.
+
+    Phase 9: runs over the reference dataset to prove the logging pipeline.
+    Phase 10+: wired into the paper-trading loop for every candidate batch.
+    """
+    from src.config import get_settings
+    from src.ml import ShadowPredictor
+    from src.ml.config import load_ml_config
+    from src.ml.labels import build_reference_dataset, train_test_split
+
+    ctx.log("running ML shadow pass (shadow mode; applied=False on all log entries)")
+    ml_cfg = load_ml_config()
+    settings = get_settings()
+    samples = build_reference_dataset(seed=42)
+    train_samples, test_samples = train_test_split(samples, seed=42)
+
+    predictor = ShadowPredictor.from_config(ml_cfg)
+    predictor.train(train_samples)
+    result = predictor.run(
+        [s.candidate for s in test_samples[:20]],
+        settings=settings,
+        write_to_db=True,
+    )
+    ctx.progress(1, 1, f"{len(result.shadow_log_ids)} shadow log entries written")
+    assert not result.applied, "shadow pass must never set applied=True"
+    return {
+        "message": f"shadow pass: {len(result.shadow_log_ids)} entries logged (applied=False)",
+        "model_version": result.model_version,
+        "shadow_log_ids": len(result.shadow_log_ids),
+        "applied": result.applied,
+    }
+
+
 ensure_handlers_registered()

@@ -1,0 +1,157 @@
+[
+  {
+    "gate_id": "PAPER-A",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "paper_a_imports",
+        "title": "paper_a_imports",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "all pipeline component imports successful"
+      },
+      {
+        "id": "paper_a_pipeline",
+        "title": "paper_a_pipeline",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "pipeline ran: 3 executed, 0 rejected of 3 candidates"
+      },
+      {
+        "id": "paper_a_stops",
+        "title": "paper_a_stops",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "all 3 executed trades have exchange-side stop"
+      },
+      {
+        "id": "paper_a_kill_switch",
+        "title": "paper_a_kill_switch",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "kill switch engaged: candidate correctly blocked (0 executed)"
+      },
+      {
+        "id": "paper_a_reconciliation",
+        "title": "paper_a_reconciliation",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "reconciliation detected foreign order and set halt_required=True"
+      },
+      {
+        "id": "paper_a_decision_logs",
+        "title": "paper_a_decision_logs",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "3 decision log entries; all required fields present"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/PAPER-A_20260617T184701.json",
+    "note": ""
+  },
+  {
+    "gate_id": "PAPER-B",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "paper_b_candidates",
+        "title": "paper_b_candidates",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "23 candidates \u2265 10 required"
+      },
+      {
+        "id": "paper_b_executed",
+        "title": "paper_b_executed",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "20 executed trades \u2265 5 required"
+      },
+      {
+        "id": "paper_b_symbol_breakdown",
+        "title": "paper_b_symbol_breakdown",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "per-symbol breakdown: ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT']"
+      },
+      {
+        "id": "paper_b_regime_breakdown",
+        "title": "paper_b_regime_breakdown",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "per-regime breakdown: ['low_vol_down', 'low_vol_up', 'range', 'trend_down', 'trend_up']"
+      },
+      {
+        "id": "paper_b_vs_backtest",
+        "title": "paper_b_vs_backtest",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "both pipelines ran ok; paper=20 trades pnl=216.6090; backtest=306 trades"
+      },
+      {
+        "id": "paper_b_rejection_analysis",
+        "title": "paper_b_rejection_analysis",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "rejection breakdown: {'exec_stale_data': 3}"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/PAPER-B_20260617T184745.json",
+    "note": ""
+  },
+  {
+    "gate_id": "QUALITY",
+    "overall": "PASS",
+    "criteria": [],
+    "report_path": "",
+    "note": "make test lint typecheck passed"
+  }
+]

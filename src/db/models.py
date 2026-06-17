@@ -433,6 +433,65 @@ class BacktestRun(Base):
     related_versions: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
+class ShadowLog(Base):
+    """ML shadow-mode prediction log (AGENTS.md Section 24 ``shadow_log``).
+
+    Records every model prediction in SHADOW mode for offline comparison against
+    the deterministic baseline. ``applied`` is **always False** in Phase 9; it can
+    only be set True after ML-PROMO gate PASS + manual promotion (Section 20).
+    """
+
+    __tablename__ = "shadow_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
+    model_id: Mapped[str] = mapped_column(String(80), index=True)
+    model_version: Mapped[str] = mapped_column(String(32), default="ml_shadow_0001")
+    model_type: Mapped[str] = mapped_column(String(32), index=True)
+    mode: Mapped[str] = mapped_column(String(16), default="SHADOW")
+    symbol: Mapped[str | None] = mapped_column(String(48), index=True)
+    context_features: Mapped[dict] = mapped_column(JSON, default=dict)
+    prediction: Mapped[dict] = mapped_column(JSON, default=dict)
+    confidence: Mapped[float | None] = mapped_column()
+    deterministic_baseline: Mapped[dict | None] = mapped_column(JSON)
+    applied: Mapped[bool] = mapped_column(Boolean, default=False)
+    config_version: Mapped[str] = mapped_column(String(32), default="cfg_0001")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (Index("ix_shadow_logs_model_ts", "model_type", "ts"),)
+
+
+class MLModelRegistry(Base):
+    """Versioned ML model artifact registry (AGENTS.md Section 20).
+
+    Required fields per Section 20: model_id, data/feature versions, label &
+    target definitions, train/validation/OOS periods, performance +
+    calibration + explainability reports, known failure modes, promotion status.
+    Only promoted models (promotion_status='promoted') may influence live decisions
+    and only after ML-PROMO gate PASS + manual approval.
+    """
+
+    __tablename__ = "ml_model_registry"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    model_id: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    model_version: Mapped[str] = mapped_column(String(32), default="ml_shadow_0001", index=True)
+    model_type: Mapped[str] = mapped_column(String(32), index=True)
+    ml_stage: Mapped[int] = mapped_column(Integer, default=2)
+    promotion_status: Mapped[str] = mapped_column(String(24), default="shadow", index=True)
+    dataset_version: Mapped[str | None] = mapped_column(String(64))
+    feature_set_version: Mapped[str | None] = mapped_column(String(80))
+    train_period: Mapped[dict] = mapped_column(JSON, default=dict)
+    oos_period: Mapped[dict] = mapped_column(JSON, default=dict)
+    label_definition: Mapped[dict] = mapped_column(JSON, default=dict)
+    performance_metrics: Mapped[dict] = mapped_column(JSON, default=dict)
+    known_failure_modes: Mapped[list] = mapped_column(JSON, default=list)
+    artifact_path: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    manually_reviewed: Mapped[bool] = mapped_column(Boolean, default=False)
+    notes: Mapped[str] = mapped_column(Text, default="")
+
+
 class DataQualityReportRow(Base):
     """Persisted data-validation report (Section 8/23/34). A report is generated
     before every research/paper/live run; the DQ gate reads the latest."""

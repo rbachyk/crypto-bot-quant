@@ -1,0 +1,84 @@
+# ML Shadow Configuration — Phase 9 (AGENTS.md Section 20).
+# ML Stage 2: Shadow Mode only. No live influence permitted (Section 20 ML Stage 2).
+# Promotion to Stage 3+ requires ML-PROMO gate PASS + manual review.
+version: 1
+model_version: "ml_shadow_0001"
+ml_stage: 2  # SHADOW (Section 20 ML Stage 2)
+
+# --- meta-labeler (primary model) ------------------------------------------
+# Best first use per AGENTS.md Section 20: ML estimates whether to take or skip
+# a deterministic candidate. ML answers "should we," never "which direction."
+meta_labeler:
+  enabled: true
+  model_class: "logistic_regression"
+  min_train_samples: 30
+  test_fraction: 0.25
+  features:
+    - signal_strength
+    - expected_edge_frac
+    - spread_bps
+    - slippage_est
+    - atr_pct
+    - premium
+    - funding_z
+
+# --- regime classifier shadow -----------------------------------------------
+regime_classifier:
+  enabled: true
+  model_class: "random_forest"
+  n_estimators: 50
+  min_train_samples: 30
+  test_fraction: 0.25
+  features:
+    - atr_pct
+    - premium
+    - funding_z
+    - rv_short
+    - ret_1
+
+# --- execution quality model shadow -----------------------------------------
+exec_quality:
+  enabled: true
+  model_class: "logistic_regression"
+  min_train_samples: 30
+  test_fraction: 0.25
+  features:
+    - spread_bps
+    - slippage_est
+    - atr_pct
+
+# --- strategy selector shadow -----------------------------------------------
+strategy_selector:
+  enabled: true
+  model_class: "logistic_regression"
+  min_train_samples: 30
+  test_fraction: 0.25
+  features:
+    - signal_strength
+    - expected_edge_frac
+    - atr_pct
+
+# --- symbol ranker shadow ----------------------------------------------------
+symbol_ranker:
+  enabled: true
+  model_class: "logistic_regression"
+  min_train_samples: 30
+  test_fraction: 0.25
+  features:
+    - signal_strength
+    - expected_edge_frac
+    - atr_pct
+    - premium
+
+# --- shadow mode settings ---------------------------------------------------
+shadow:
+  mode: "SHADOW"           # ML Stage 2 — observations only
+  applied_to_live: false   # NEVER true in Phase 9 (no live influence)
+  log_context_features: true
+
+# --- kill-criteria (declared upfront per Section 16) -----------------------
+kill_criteria:
+  min_improvement_over_baseline: 0.0  # expectancy net of costs must strictly improve
+  min_profit_factor_ratio: 1.0        # PF must be preserved (>= baseline PF)
+  max_tail_loss_ratio: 1.0            # worst-trade severity must not worsen
+  max_best_trades_removed_pct: 0.2    # at most 20% of best trades may be filtered

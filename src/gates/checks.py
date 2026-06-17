@@ -27,6 +27,7 @@ from src.gates.phase6 import (
     check_setup,
 )
 from src.gates.phase8 import check_paper_a, check_paper_b
+from src.gates.phase9 import check_ml_promo
 from src.gates.result import Criterion
 from src.killswitch import KillSwitch
 from src.monitoring import Alert, AlertSeverity, check_health, get_alert_sink
@@ -1510,6 +1511,8 @@ CHECKS: dict[str, Callable[[Settings], list[Criterion]]] = {
     # Phase 8 — Paper Trading (technical + strategy validation).
     "PAPER-A": check_paper_a,
     "PAPER-B": check_paper_b,
+    # Phase 9 — Shadow ML promotion gate.
+    "ML-PROMO": check_ml_promo,
 }
 
 
