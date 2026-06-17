@@ -22,6 +22,7 @@ KILL_SWITCH
 # Gate run artifacts (keep phase completion reports, ignore per-run dumps)
 reports/gates/
 reports/backup/
+reports/data/
 
 # OS
 .DS_Store

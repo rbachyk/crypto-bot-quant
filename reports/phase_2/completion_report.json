@@ -1,0 +1,98 @@
+{
+  "phase": 2,
+  "name": "Data Platform",
+  "coder": "Claude Opus 4.8 (Coding Agent)",
+  "date": "2026-06-17",
+  "branch": "phase/2",
+  "config_version": "cfg_0001",
+  "data_version": "data_0001",
+  "dataset_version": "data_0001_3dce2575cf890334",
+  "scope_implemented": [
+    "Canonical data schema + config: configs/data.yaml (symbols, timeframes, required series, fixed as_of coverage window, validation thresholds) and src/data/schema.py (SeriesKey, per-data_type row schemas, regular-grid math).",
+    "Ingestion for OHLCV (all timeframes 1m/5m/1h), mark price, index price, funding, open interest, and spread snapshots via a DataSource interface; Phase 2 source is an OFFLINE deterministic generator (pure function of ts -> reproducible, range-independent) behind the same interface the ccxt source will use later (src/data/source.py).",
+    "Parquet series store (src/data/store.py): month-partitioned per Appendix B.5 keys (exchange/data_type/symbol/timeframe/year/month), append-only, deduplicated by grid timestamp, ordered, content-checksummed; large history lives in the data lake, not Postgres (Appendix B.4).",
+    "Historical downloader + incremental updater + automatic gap detection and backfill (src/data/ingest.py, src/data/gaps.py); scripts/backfill CLI (DATA-COV remediation: --symbol/--series/--from), idempotent.",
+    "Data-quality validation (src/data/validation.py, Section 23): missing/duplicate/out-of-order/future timestamps, impossible prices, extreme gaps, funding-grid alignment, mark/index/perp alignment, abnormal spread, clock drift -> DataQualityReport.",
+    "Immutable versioned dataset snapshots with manifests (src/data/snapshot.py, Appendix B.5): deterministic snapshot id from window+content; manifest records symbols/time range/data types/row counts/missing ranges/validation status/source jobs + per-series checksums.",
+    "Relational index: dataset_versions and data_quality_reports tables + Alembic migration 0002 (idempotent via create_all checkfirst).",
+    "Data-platform orchestrator (src/data/platform.py): ensure_coverage (safe gap repair) -> validate -> snapshot -> persist report; data-validation report generated before runs and stored on disk + DB (Section 34).",
+    "First-class data jobs (Appendix B.7): download_ohlcv_history, download_mark_index_history, download_funding_history, download_open_interest_history, download_spread_snapshots, download_liquidation_history (records unavailable), repair_missing_data, validate_data_quality, build_dataset_version.",
+    "Gate checks wired into the Gate Runner: DATA-COV (coverage + zero unfilled gaps + immutable snapshot + manifest + dataset_versions row) and DQ (one criterion per Section 23 check); both emit GateResult JSON matching configs/gate_result.schema.json."
+  ],
+  "acceptance_criteria": [
+    {
+      "criterion": "Ingestion for OHLCV (all TFs), mark/index, funding, OI, spread snapshots; historical downloader + incremental updater",
+      "met": true,
+      "evidence": "src/data/ingest.py + src/data/source.py; download_* jobs; tests/test_data_gaps_backfill.py::test_incremental_update_fetches_only_the_tail; dataset has 8721 rows across 24 series (3 symbols x {ohlcv@1m/5m/1h, mark, index, funding, open_interest, spread})."
+    },
+    {
+      "criterion": "Automatic gap detection + backfill (scripts/backfill); append-only, deduplicated, checksummed; versioned dataset snapshots",
+      "met": true,
+      "evidence": "src/data/gaps.py + src/data/backfill.py + scripts/backfill; src/data/store.py (append-only dedup + checksum), tests/test_data_store.py; src/data/snapshot.py deterministic immutable snapshot data_0001_3dce2575cf890334; tests/test_data_coverage_snapshot.py."
+    },
+    {
+      "criterion": "Data-validation report generated before runs",
+      "met": true,
+      "evidence": "src/data/validation.py + DataPlatform.write_quality_report -> reports/data/quality_<ts>.json + data_quality_reports table (series_validated=24, critical=0); validate_data_quality job; DQ gate writes the report."
+    },
+    {
+      "criterion": "Gates PASS: DATA-COV, DQ",
+      "met": true,
+      "evidence": "make -s run-gate GATE=DATA-COV FORMAT=json -> PASS (5/5 criteria); make -s run-gate GATE=DQ FORMAT=json -> PASS (11/11 criteria); tests/test_data_gates.py; persisted GateResult rows PASSED."
+    },
+    {
+      "criterion": "New/changed code has tests; pytest, ruff, mypy green; coverage thresholds met on critical modules",
+      "met": true,
+      "evidence": "79 passed (was 36); ruff check + format clean; mypy Success (45 source files). data/validation has direct unit tests; risk/execution/adaptation not yet introduced."
+    },
+    {
+      "criterion": "No forbidden shortcut; no live-mode default; no secrets committed (Appendix B.17 / Section 30)",
+      "met": true,
+      "evidence": "Datasets are versioned (dataset_versions + manifest), not untracked loose files; no monolithic script; TRADING_MODE=PAPER default unchanged; data lake (var/) git-ignored and regenerable; no keys added."
+    },
+    {
+      "criterion": "All new runtime behavior is config-driven and versioned (Section 4)",
+      "met": true,
+      "evidence": "configs/data.yaml drives symbols/timeframes/series/window/thresholds; DATA_VERSION bumped to data_0001; reports link versions via Settings.versions()."
+    },
+    {
+      "criterion": "Completion Report filled; docs/decisions updated for assumptions",
+      "met": true,
+      "evidence": "this file; docs/decisions/0003-phase-2-data-platform-choices.md."
+    }
+  ],
+  "gates_run": [
+    { "gate_id": "DATA-COV", "result": "PASS", "report_path": "reports/gates/DATA-COV_<ts>.json",
+      "criteria": ["required_series_present", "zero_unfilled_gaps", "immutable_snapshot_produced", "manifest_complete", "dataset_version_recorded"] },
+    { "gate_id": "DQ", "result": "PASS", "report_path": "reports/gates/DQ_<ts>.json",
+      "criteria": ["missing_candles", "duplicates", "ordering", "future_timestamps", "impossible_prices", "extreme_gaps", "funding_alignment", "markindex_alignment", "abnormal_spread", "clock_drift", "validation_report_written"] },
+    { "gate_id": "STORAGE", "result": "PASS", "report_path": "reports/gates/STORAGE_<ts>.json", "note": "upstream dependency of DATA-COV; still PASS" }
+  ],
+  "tests": {
+    "pytest": "79 passed, 1 warning",
+    "new_test_files": [
+      "tests/test_data_schema_source.py",
+      "tests/test_data_store.py",
+      "tests/test_data_gaps_backfill.py",
+      "tests/test_data_validation.py",
+      "tests/test_data_coverage_snapshot.py",
+      "tests/test_data_jobs.py",
+      "tests/test_data_gates.py"
+    ],
+    "coverage_risk_exec_adaptation": "n/a (modules not implemented until later phases); data/validation covered by tests/test_data_validation.py",
+    "ruff": "ok (All checks passed; 63 files formatted)",
+    "mypy": "ok (no issues found in 45 source files)"
+  },
+  "assumptions_and_decisions": [
+    "docs/decisions/0003-phase-2-data-platform-choices.md (offline deterministic source; Parquet store; fixed as_of window; DATA-COV safe gap repair; local clock-drift check with NTP at deploy; liquidation/order-book not required this phase)."
+  ],
+  "known_gaps_risks": [
+    "Phase 2 data source is the OFFLINE deterministic generator (no exchange access). The ccxt + native-SDK source is wired in a later phase behind the same DataSource interface; the platform, gaps/backfill, validation, snapshots and gates are venue-agnostic.",
+    "The Parquet data lake under var/ is git-ignored and regenerable from the source via safe gap repair; the relational dataset_versions row + immutable manifest are the committed provenance. Per-run reports/data/ and reports/gates/ dumps are git-ignored.",
+    "Clock-drift verification is local (wall vs monotonic); absolute NTP sync is enforced on the host at deploy and re-verified by the Phase 13 MON gate.",
+    "UNIV and META gates remain NOT_RUN (no check yet) and are delivered in Phase 3; downstream gates correctly report BLOCKED until their phases land."
+  ],
+  "status": "Phase 2 — Data Platform: complete",
+  "tested": "yes",
+  "next_step": "Hand off to Reviewer Agent; do not begin Phase 3."
+}

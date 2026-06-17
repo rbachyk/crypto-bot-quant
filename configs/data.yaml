@@ -1,0 +1,59 @@
+# data.yaml — single source of truth for the Phase 2 Data Platform.
+# Read by the data ingestion/validation pipeline, the DATA-COV and DQ gates,
+# and scripts/backfill. All runtime behaviour is config-driven (Section 4).
+#
+# The Phase 2 data source is the deterministic OFFLINE source (no network):
+# it fabricates reproducible, schema-valid market data on the exact timeframe
+# grid so the platform, gaps/backfill, validation and gates are exercised end
+# to end without exchange access. Later phases swap in the ccxt-backed source
+# behind the same DataSource interface (Section 5/6).
+
+version: 1
+
+data:
+  exchange_id: skeleton
+  data_version: data_0001
+
+  # Symbols the data platform must own data for (Section 8 Data Ownership).
+  # Kept in sync with the universe; Phase 3 derives this from the Universe
+  # Manager. For Phase 2 it is config-driven and versioned.
+  symbols:
+    - "BTC/USDT:USDT"
+    - "ETH/USDT:USDT"
+    - "SOL/USDT:USDT"
+
+  # OHLCV is collected for every timeframe (Appendix D Phase 2: "all TFs").
+  timeframes: ["1m", "5m", "1h"]
+
+  # Point-in-time series (mark/index/OI/spread) are sampled on this base grid.
+  base_timeframe: "5m"
+
+  # Funding is published on this fixed interval (perpetual futures).
+  funding_interval_hours: 8
+
+  # Required series for every symbol (DATA-COV pass condition). Liquidation and
+  # order-book snapshots are "if available"; the skeleton source does not
+  # provide them, so they are not required this phase.
+  required_series: ["ohlcv", "mark", "index", "funding", "open_interest", "spread"]
+
+  # Coverage window the DATA-COV gate requires (Section 8 "data coverage meets
+  # configured minimums"). Anchored to a fixed as_of for reproducibility: the
+  # same window always yields the same immutable snapshot (idempotent re-runs).
+  window:
+    as_of: "2026-06-01T00:00:00Z"
+    duration_hours: 24
+
+  # Data-quality thresholds (Section 23 / DQ gate).
+  validation:
+    max_unfilled_gap_bars: 0        # DATA-COV requires zero unfilled gaps
+    max_spread_bps: 250.0           # spreads above this are abnormal (toxic)
+    min_price: 0.0                  # prices must be strictly positive
+    max_price: 1.0e12               # impossible-price ceiling
+    max_funding_misalignment_s: 1   # funding ts must sit on the funding grid
+    max_markindex_misalignment_s: 1 # mark/index ts must align to the OHLCV grid
+    clock_drift_tolerance_s: 2.0    # NTP tolerance (Section 23: run NTP)
+
+  # Symbols the exchange genuinely lacks history for. They are excluded from
+  # the required universe (DATA-COV remediation step 3) rather than failing the
+  # gate forever. Empty by default.
+  insufficient_history: []

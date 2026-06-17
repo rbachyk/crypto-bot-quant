@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     order_client_id_prefix: str = "QBOT_LOCAL_v1_"
     config_version: str = "cfg_0001"
     universe_version: str = "univ_0000"
-    data_version: str = "data_0000"
+    data_version: str = "data_0001"
     strategy_version: str = "strat_0000"
     feature_set_version: str = "feat_0000"
     risk_policy_version: str = "risk_0001"

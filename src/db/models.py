@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     Enum,
     ForeignKey,
@@ -321,3 +322,50 @@ class UniverseMember(Base):
     universe: Mapped[UniverseVersion] = relationship(back_populates="members")
 
     __table_args__ = (UniqueConstraint("universe_version", "symbol", name="uq_universe_member"),)
+
+
+# --------------------------------------------------------------------------- #
+# Data platform: dataset versions & data-quality reports (Phase 2)             #
+# --------------------------------------------------------------------------- #
+class DatasetVersion(Base):
+    """An immutable, versioned dataset snapshot (Appendix B.4 'dataset versions',
+    B.5 manifest). Large history lives in the data lake as Parquet; this row is
+    the relational index/manifest pointer (Appendix B.4: don't store large
+    candle history in relational tables)."""
+
+    __tablename__ = "dataset_versions"
+
+    version: Mapped[str] = mapped_column(String(64), primary_key=True)  # = snapshot id
+    data_version: Mapped[str] = mapped_column(String(32), default="data_0001", index=True)
+    exchange_id: Mapped[str] = mapped_column(String(32), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    symbols: Mapped[list] = mapped_column(JSON, default=list)
+    data_types: Mapped[list] = mapped_column(JSON, default=list)
+    timeframes: Mapped[list] = mapped_column(JSON, default=list)
+    time_range: Mapped[dict] = mapped_column(JSON, default=dict)
+    row_counts: Mapped[dict] = mapped_column(JSON, default=dict)
+    missing_ranges: Mapped[list] = mapped_column(JSON, default=list)
+    checksum: Mapped[str] = mapped_column(String(64), default="")
+    validation_status: Mapped[str] = mapped_column(String(24), default="unvalidated")
+    manifest_path: Mapped[str | None] = mapped_column(Text)
+    source_jobs: Mapped[list] = mapped_column(JSON, default=list)
+
+
+class DataQualityReportRow(Base):
+    """Persisted data-validation report (Section 8/23/34). A report is generated
+    before every research/paper/live run; the DQ gate reads the latest."""
+
+    __tablename__ = "data_quality_reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, index=True
+    )
+    dataset_version: Mapped[str | None] = mapped_column(String(64), index=True)
+    passed: Mapped[bool] = mapped_column(Boolean, default=False)
+    critical_count: Mapped[int] = mapped_column(Integer, default=0)
+    violation_count: Mapped[int] = mapped_column(Integer, default=0)
+    series_validated: Mapped[int] = mapped_column(Integer, default=0)
+    window: Mapped[dict] = mapped_column(JSON, default=dict)
+    report: Mapped[dict] = mapped_column(JSON, default=dict)
+    report_path: Mapped[str | None] = mapped_column(Text)

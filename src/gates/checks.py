@@ -508,6 +508,146 @@ def check_backup(settings: Settings) -> list[Criterion]:
 
 
 # --------------------------------------------------------------------------- #
+# DATA-COV (Phase 2)                                                           #
+# --------------------------------------------------------------------------- #
+def check_data_cov(settings: Settings) -> list[Criterion]:
+    """Data Coverage & Integrity (Appendix A DATA-COV).
+
+    Every active universe symbol must have all required series covering the
+    configured window with zero unfilled gaps, and an immutable dataset
+    snapshot must be produced. Auto-remediation is partial: safe gap repair is
+    attempted from the data source before coverage is judged.
+    """
+    from src.data import DataPlatform, load_data_config
+
+    out: list[Criterion] = []
+    cfg = load_data_config()
+    platform = DataPlatform(settings=settings, cfg=cfg)
+
+    coverage = platform.ensure_coverage(repair=True)  # safe gap repair (partial auto-remediation)
+    validation = platform.validate()
+    snapshot = platform.build_snapshot(coverage, validation, source_jobs=["gate:data-cov"])
+    platform.write_quality_report(validation, snapshot.snapshot_id)
+
+    out.append(
+        Criterion.ok(
+            "required_series_present",
+            f"{coverage.covered_series}/{coverage.required_series} series across "
+            f"{len(cfg.active_symbols())} symbols",
+        )
+        if coverage.covered_series == coverage.required_series
+        else Criterion.fail(
+            "required_series_present",
+            f"{coverage.required_series - coverage.covered_series} series missing data",
+        )
+    )
+
+    total_missing = sum(len(g.missing_ts) for g in coverage.uncovered)
+    if coverage.covered:
+        out.append(Criterion.ok("zero_unfilled_gaps", "0 unfilled gaps over the window"))
+    else:
+        flagged = "; ".join(
+            f"{g.key.label()}({len(g.missing_ts)} missing)" for g in coverage.uncovered[:5]
+        )
+        out.append(
+            Criterion.fail(
+                "zero_unfilled_gaps",
+                f"{total_missing} unfilled gaps remain after repair: {flagged}",
+            )
+        )
+
+    manifest = snapshot.manifest
+    snapshot_ok = bool(manifest.snapshot_id and manifest.checksum and manifest.row_counts)
+    out.append(
+        Criterion.ok(
+            "immutable_snapshot_produced",
+            f"{manifest.snapshot_id} (checksum={snapshot.dataset_checksum}, "
+            f"{sum(manifest.row_counts.values())} rows)",
+        )
+        if snapshot_ok
+        else Criterion.fail("immutable_snapshot_produced", "snapshot/manifest incomplete")
+    )
+
+    # Manifest must carry the Appendix B.5 required fields.
+    manifest_fields_ok = bool(
+        manifest.symbols and manifest.time_range and manifest.data_types and manifest.row_counts
+    )
+    out.append(
+        Criterion.ok("manifest_complete", "symbols/time_range/data_types/row_counts present")
+        if manifest_fields_ok
+        else Criterion.fail("manifest_complete", "manifest missing required fields")
+    )
+
+    # Relational dataset-version index recorded (Appendix B.4).
+    try:
+        from src.db.base import session_scope
+        from src.db.models import DatasetVersion
+
+        with session_scope() as session:
+            row = session.get(DatasetVersion, snapshot.snapshot_id)
+            recorded = row is not None and row.checksum == snapshot.dataset_checksum
+        out.append(
+            Criterion.ok("dataset_version_recorded", f"dataset_versions[{snapshot.snapshot_id}]")
+            if recorded
+            else Criterion.fail("dataset_version_recorded", "dataset_versions row missing")
+        )
+    except Exception as exc:  # noqa: BLE001
+        out.append(Criterion.fail("dataset_version_recorded", f"error: {exc}"))
+
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# DQ (Phase 2+)                                                                #
+# --------------------------------------------------------------------------- #
+_DQ_CHECKS = [
+    "missing_candles",
+    "duplicates",
+    "ordering",
+    "future_timestamps",
+    "impossible_prices",
+    "extreme_gaps",
+    "funding_alignment",
+    "markindex_alignment",
+    "abnormal_spread",
+    "clock_drift",
+]
+
+
+def check_dq(settings: Settings) -> list[Criterion]:
+    """Data Quality (Appendix A DQ / Section 23).
+
+    No *critical* data-quality violation may be active and the clock must be
+    within NTP tolerance. Emits one criterion per Section 23 check so the
+    dashboard can point at exactly what failed.
+    """
+    from src.data import DataPlatform, load_data_config
+
+    out: list[Criterion] = []
+    platform = DataPlatform(settings=settings, cfg=load_data_config())
+    report = platform.validate()
+    path = platform.write_quality_report(report, dataset_version=None)
+
+    critical_by_check: dict[str, list[str]] = {}
+    for v in report.critical:
+        critical_by_check.setdefault(v.check, []).append(f"{v.series or 'global'}: {v.detail}")
+
+    for check in _DQ_CHECKS:
+        hits = critical_by_check.get(check)
+        if not hits:
+            out.append(Criterion.ok(check, "no critical violation"))
+        else:
+            out.append(Criterion.fail(check, "; ".join(hits[:3])))
+
+    out.append(
+        Criterion.ok("validation_report_written", path)
+        if path
+        else Criterion.fail("validation_report_written", "report not written")
+    )
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Registry                                                                     #
 # --------------------------------------------------------------------------- #
 CHECKS: dict[str, Callable[[Settings], list[Criterion]]] = {
@@ -515,6 +655,8 @@ CHECKS: dict[str, Callable[[Settings], list[Criterion]]] = {
     "DB": check_db,
     "QUEUE": check_queue,
     "STORAGE": check_storage,
+    "DATA-COV": check_data_cov,
+    "DQ": check_dq,
     "MON": check_mon,
     "BACKUP": check_backup,
 }

@@ -92,6 +92,116 @@ def _build_symbol_universe(ctx: JobContext, params: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Data platform jobs (Appendix B.7 data jobs; Phase 2)                        #
+# --------------------------------------------------------------------------- #
+def _download_series(ctx: JobContext, data_types: list[str]) -> dict:
+    """Shared body for the per-series historical download jobs."""
+    from src.data import DataPlatform, load_data_config
+
+    cfg = load_data_config()
+    platform = DataPlatform(cfg=cfg)
+    keys = [k for k in cfg.all_required_keys() if k.data_type in data_types]
+    written = 0
+    for i, key in enumerate(keys):
+        ctx.check_cancelled()
+        written += platform.download(key)
+        ctx.progress(i + 1, len(keys), f"downloaded {key.label()}")
+    ctx.log(f"downloaded {written} rows across {len(keys)} series ({', '.join(data_types)})")
+    return {"message": f"downloaded {written} rows", "series": len(keys), "rows": written}
+
+
+@job_handler("download_ohlcv_history")
+def _download_ohlcv_history(ctx: JobContext, params: dict) -> dict:
+    return _download_series(ctx, ["ohlcv"])
+
+
+@job_handler("download_mark_index_history")
+def _download_mark_index_history(ctx: JobContext, params: dict) -> dict:
+    return _download_series(ctx, ["mark", "index"])
+
+
+@job_handler("download_funding_history")
+def _download_funding_history(ctx: JobContext, params: dict) -> dict:
+    return _download_series(ctx, ["funding"])
+
+
+@job_handler("download_open_interest_history")
+def _download_open_interest_history(ctx: JobContext, params: dict) -> dict:
+    return _download_series(ctx, ["open_interest"])
+
+
+@job_handler("download_spread_snapshots")
+def _download_spread_snapshots(ctx: JobContext, params: dict) -> dict:
+    return _download_series(ctx, ["spread"])
+
+
+@job_handler("download_liquidation_history")
+def _download_liquidation_history(ctx: JobContext, params: dict) -> dict:
+    """Liquidation data is "if available" (Section 8). The offline source does
+    not provide it; the job records that it is unavailable rather than failing,
+    so liquidation is simply not a required series this phase."""
+    ctx.log("liquidation history unavailable for the skeleton source; skipping")
+    ctx.progress(1, 1, "liquidation unavailable")
+    return {"message": "liquidation history unavailable (not required this phase)", "rows": 0}
+
+
+@job_handler("repair_missing_data")
+def _repair_missing_data(ctx: JobContext, params: dict) -> dict:
+    """Detect gaps and backfill only the missing ranges (safe gap repair)."""
+    from src.data import DataPlatform, load_data_config
+
+    cfg = load_data_config()
+    platform = DataPlatform(cfg=cfg)
+    keys = cfg.all_required_keys()
+    written = 0
+    remaining = 0
+    for i, key in enumerate(keys):
+        ctx.check_cancelled()
+        result = platform.ingestor.repair(key, cfg.window_start_ms, cfg.window_end_ms)
+        written += result.rows_written
+        remaining += result.gaps_after
+        ctx.progress(i + 1, len(keys), f"repaired {key.label()}")
+    ctx.log(f"repaired {written} rows; {remaining} timestamps still missing")
+    return {"message": f"repaired {written} rows", "rows": written, "still_missing": remaining}
+
+
+@job_handler("validate_data_quality")
+def _validate_data_quality(ctx: JobContext, params: dict) -> dict:
+    """Run the Section 23 data-quality checks and persist the report."""
+    from src.data import DataPlatform, load_data_config
+
+    platform = DataPlatform(cfg=load_data_config())
+    ctx.log("validating data quality")
+    report = platform.validate()
+    path = platform.write_quality_report(report, params.get("dataset_version"))
+    ctx.progress(1, 1, f"data quality: {'PASS' if report.passed else 'FAIL'}")
+    return {
+        "message": f"data quality {'PASS' if report.passed else 'FAIL'}",
+        "passed": report.passed,
+        "critical": len(report.critical),
+        "artifact_uri": path,
+    }
+
+
+@job_handler("build_dataset_version")
+def _build_dataset_version(ctx: JobContext, params: dict) -> dict:
+    """Ensure coverage, validate, and produce an immutable dataset snapshot."""
+    from src.data import DataPlatform, load_data_config
+
+    platform = DataPlatform(cfg=load_data_config())
+    ctx.log("ensuring coverage + building dataset snapshot")
+    run = platform.run_full(repair=True, source_jobs=["job:build_dataset_version"])
+    ctx.progress(1, 1, f"snapshot {run.snapshot.snapshot_id}")
+    return {
+        "message": f"dataset {run.snapshot.snapshot_id} (covered={run.coverage.covered})",
+        "dataset_version": run.snapshot.snapshot_id,
+        "covered": run.coverage.covered,
+        "validation_passed": run.validation.passed,
+        "artifact_uri": run.report_path,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Gate runner jobs                                                            #
 # --------------------------------------------------------------------------- #
 @job_handler("run_gate")

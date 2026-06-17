@@ -1,0 +1,112 @@
+"""Loader for ``configs/data.yaml`` — the data-platform contract.
+
+Turns the YAML into a typed :class:`DataConfig` and enumerates the concrete
+set of :class:`SeriesKey` the platform must own for the coverage window. The
+Gate Runner, ingestion jobs, validation and ``scripts/backfill`` all read this
+one object so they never drift (Section 4 config-driven behaviour).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from functools import lru_cache
+from pathlib import Path
+
+import yaml
+
+from src.config.settings import REPO_ROOT
+from src.data.schema import (
+    FUNDING,
+    OHLCV,
+    SeriesKey,
+    parse_utc_ms,
+)
+
+DATA_YAML = REPO_ROOT / "configs" / "data.yaml"
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationThresholds:
+    max_unfilled_gap_bars: int = 0
+    max_spread_bps: float = 250.0
+    min_price: float = 0.0
+    max_price: float = 1.0e12
+    max_funding_misalignment_s: int = 1
+    max_markindex_misalignment_s: int = 1
+    clock_drift_tolerance_s: float = 2.0
+
+
+@dataclass(frozen=True, slots=True)
+class DataConfig:
+    exchange_id: str
+    data_version: str
+    symbols: list[str]
+    timeframes: list[str]
+    base_timeframe: str
+    funding_interval_hours: int
+    required_series: list[str]
+    window_start_ms: int
+    window_end_ms: int
+    insufficient_history: list[str] = field(default_factory=list)
+    thresholds: ValidationThresholds = field(default_factory=ValidationThresholds)
+
+    @property
+    def funding_timeframe(self) -> str:
+        return f"{self.funding_interval_hours}h"
+
+    def active_symbols(self) -> list[str]:
+        """Symbols that must be fully covered (insufficient-history excluded)."""
+        excluded = set(self.insufficient_history)
+        return [s for s in self.symbols if s not in excluded]
+
+    def required_keys(self, symbol: str) -> list[SeriesKey]:
+        """Every series this symbol must have over the coverage window."""
+        keys: list[SeriesKey] = []
+        for series in self.required_series:
+            if series == OHLCV:
+                for tf in self.timeframes:
+                    keys.append(SeriesKey(self.exchange_id, OHLCV, symbol, tf))
+            elif series == FUNDING:
+                keys.append(SeriesKey(self.exchange_id, FUNDING, symbol, self.funding_timeframe))
+            else:
+                keys.append(SeriesKey(self.exchange_id, series, symbol, self.base_timeframe))
+        return keys
+
+    def all_required_keys(self) -> list[SeriesKey]:
+        keys: list[SeriesKey] = []
+        for symbol in self.active_symbols():
+            keys.extend(self.required_keys(symbol))
+        return keys
+
+
+@lru_cache
+def load_data_config(path: str | None = None) -> DataConfig:
+    yaml_path = Path(path) if path else DATA_YAML
+    raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    data = raw["data"]
+    window = data["window"]
+    end_ms = parse_utc_ms(window["as_of"])
+    start_ms = end_ms - int(window["duration_hours"]) * 3_600_000
+    v = data.get("validation", {})
+    thresholds = ValidationThresholds(
+        max_unfilled_gap_bars=int(v.get("max_unfilled_gap_bars", 0)),
+        max_spread_bps=float(v.get("max_spread_bps", 250.0)),
+        min_price=float(v.get("min_price", 0.0)),
+        max_price=float(v.get("max_price", 1.0e12)),
+        max_funding_misalignment_s=int(v.get("max_funding_misalignment_s", 1)),
+        max_markindex_misalignment_s=int(v.get("max_markindex_misalignment_s", 1)),
+        clock_drift_tolerance_s=float(v.get("clock_drift_tolerance_s", 2.0)),
+    )
+    return DataConfig(
+        exchange_id=str(data["exchange_id"]),
+        data_version=str(data.get("data_version", "data_0001")),
+        symbols=list(data["symbols"]),
+        timeframes=list(data["timeframes"]),
+        base_timeframe=str(data["base_timeframe"]),
+        funding_interval_hours=int(data["funding_interval_hours"]),
+        required_series=list(data["required_series"]),
+        window_start_ms=start_ms,
+        window_end_ms=end_ms,
+        insufficient_history=list(data.get("insufficient_history", [])),
+        thresholds=thresholds,
+    )

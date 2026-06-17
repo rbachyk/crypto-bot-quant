@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# scripts/backfill — DATA-COV remediation entry point (Appendix A DATA-COV).
+#   scripts/backfill --symbol BTC/USDT:USDT --series ohlcv --from 2026-05-31T00:00:00Z
+#   scripts/backfill                       # repair the whole required universe
+# Detects missing grid timestamps and refetches only those (idempotent).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+exec uv run python -m src.data.backfill "$@"
