@@ -22,6 +22,7 @@ from src.backtest.config import BacktestConfig, KillCriteria
 from src.backtest.engine import SymbolInput
 from src.backtest.metrics import BacktestReport
 from src.backtest.service import rebase_window, run_engine
+from src.backtest.strategy import PortfolioStrategy, Strategy
 from src.exchange.metadata import MetadataConfig
 
 
@@ -96,6 +97,7 @@ def run_walk_forward(
     cfg: BacktestConfig,
     meta: MetadataConfig,
     inputs: list[SymbolInput],
+    strategy: Strategy | PortfolioStrategy | None = None,
 ) -> WalkForwardResult:
     wf = cfg.walk_forward
     kc = wf.kill_criteria
@@ -115,7 +117,7 @@ def run_walk_forward(
         lo = i * fold_span
         hi = (i + 1) * fold_span if i < wf.folds - 1 else test_end_ts
         windowed = rebase_window(inputs, lo, hi)
-        report = run_engine(cfg, meta, windowed, label=f"wf_fold_{i}").report
+        report = run_engine(cfg, meta, windowed, strategy=strategy, label=f"wf_fold_{i}").report
         passed, failures = _evaluate_fold(report, kc)
         out.folds.append(FoldResult(i, lo, hi, passed, failures, report))
 
@@ -125,7 +127,7 @@ def run_walk_forward(
     holdout_report: BacktestReport | None = None
     if holdout_bars > 0:
         windowed = rebase_window(inputs, test_end_ts, span_ts)
-        holdout_report = run_engine(cfg, meta, windowed, label="wf_holdout").report
+        holdout_report = run_engine(cfg, meta, windowed, strategy=strategy, label="wf_holdout").report
         holdout_passed = holdout_report.expectancy_r > 0 and holdout_report.net_pnl > 0
         out.holdout = FoldResult(-1, test_end_ts, span_ts, holdout_passed, [], holdout_report)
 

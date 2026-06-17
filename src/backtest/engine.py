@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from src.backtest.config import BacktestConfig
 from src.backtest.costs import BUY, SELL, FeeModel, FundingModel, SlippageModel
 from src.backtest.risk import RiskSimulator
-from src.backtest.strategy import Signal, Strategy
+from src.backtest.strategy import PortfolioStrategy, Signal, Strategy
 from src.exchange.metadata import MetadataConfig
 from src.features.pipeline import FeatureFrame
 
@@ -172,11 +172,13 @@ class BacktestEngine:
         self,
         cfg: BacktestConfig,
         meta: MetadataConfig,
-        strategy: Strategy,
+        strategy: Strategy | PortfolioStrategy,
     ) -> None:
         self.cfg = cfg
         self.meta = meta
         self.strategy = strategy
+        # Cross-asset strategies decide from peer rows at the same decision time.
+        self.is_portfolio = hasattr(strategy, "evaluate_portfolio")
         self.fees = FeeModel(meta, cfg.costs)
         self.slippage = SlippageModel(cfg.costs)
         self.funding = FundingModel(cfg.costs)
@@ -193,7 +195,10 @@ class BacktestEngine:
         n_bars = max(len(s.bars) for s in inputs)
         # Per-symbol: signals indexed by entry bar (decision made on bar-1's close).
         # Each entry carries the originating feature row so entry never re-scans.
-        signals_by_bar = {s.symbol: self._signals(s) for s in inputs}
+        if self.is_portfolio:
+            signals_by_bar = self._portfolio_signals(inputs)
+        else:
+            signals_by_bar = {s.symbol: self._signals(s) for s in inputs}
         inputs_by_symbol = {s.symbol: s for s in inputs}
 
         equity = self.cfg.account.initial_equity
@@ -281,6 +286,40 @@ class BacktestEngine:
                 out[int(entry_bar)] = (sig, row)
         return out
 
+    def _portfolio_signals(
+        self, inputs: list[SymbolInput]
+    ) -> dict[str, dict[int, tuple[Signal, dict]]]:
+        """Cross-asset signals: each symbol evaluated with peer rows at the same ts.
+
+        For every decision time present across the universe, build the peer
+        snapshot (each symbol's feature row for that exact ``decision_ts`` — the
+        close of the previous bar, so strictly causal) and let the portfolio
+        strategy decide per symbol. Timing matches the per-symbol path: a signal
+        for ``decision_ts`` fills at entry bar ``decision_ts // iv``.
+        """
+        out: dict[str, dict[int, tuple[Signal, dict]]] = {s.symbol: {} for s in inputs}
+        rows_by_dts: dict[str, dict[int, dict]] = {
+            s.symbol: {int(r["decision_ts"]): r for r in s.frame.rows} for s in inputs
+        }
+        n_bars_by_symbol = {s.symbol: len(s.bars) for s in inputs}
+        iv_by_symbol = {s.symbol: self._iv(s) for s in inputs}
+        activation_by_symbol = {s.symbol: s.activation_ts for s in inputs}
+
+        all_dts = sorted({dts for m in rows_by_dts.values() for dts in m})
+        for dts in all_dts:
+            peers = {sym: m[dts] for sym, m in rows_by_dts.items() if dts in m}
+            for sym, row in peers.items():
+                if dts < activation_by_symbol[sym]:
+                    continue  # symbol not yet in-universe (future-universe guard)
+                entry_bar = dts // iv_by_symbol[sym]
+                if entry_bar >= n_bars_by_symbol[sym]:
+                    continue
+                others = {k: v for k, v in peers.items() if k != sym}
+                sig = self.strategy.evaluate_portfolio(sym, row, others)
+                if sig is not None:
+                    out[sym][int(entry_bar)] = (sig, row)
+        return out
+
     # -- entry ----------------------------------------------------------- #
     def _maybe_enter(
         self,
@@ -352,7 +391,8 @@ class BacktestEngine:
             risk_amount=sizing.qty * entry_price * sig.stop_frac,
             stop_price=stop_price,
             tp_price=tp_price,
-            hold_until_bar=bar_idx + self.cfg.reference_strategy.hold_bars,
+            hold_until_bar=bar_idx
+            + (sig.hold_bars if sig.hold_bars is not None else self.cfg.reference_strategy.hold_bars),
             entry_fee=entry_fee,
             funding=0.0,
             slippage_cost=entry_slip_cost,

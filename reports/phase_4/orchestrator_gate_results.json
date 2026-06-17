@@ -5,46 +5,94 @@
     "criteria": [
       {
         "id": "engine_completes",
+        "title": "engine_completes",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "306 trades, 2678 rejected"
       },
       {
         "id": "parity_rule_single_pipeline",
+        "title": "parity_rule_single_pipeline",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "engine uses the live feature pipeline"
       },
       {
         "id": "realistic_costs_modeled",
+        "title": "realistic_costs_modeled",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "fees=20020.85 slippage=6308.44 funding=-97.06"
       },
       {
         "id": "fees_from_verified_metadata",
+        "title": "fees_from_verified_metadata",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "maker/taker fees sourced from metadata"
       },
       {
         "id": "all_required_outputs_present",
+        "title": "all_required_outputs_present",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "17 metrics emitted"
       },
       {
         "id": "no_lookahead_noise",
+        "title": "no_lookahead_noise",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "noise expectancy_r=-0.1059 <= 0.05 (n=251)"
       },
       {
         "id": "no_future_universe_leakage",
+        "title": "no_future_universe_leakage",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "0 pre-activation trades; point-in-time universe exercised (True)"
       },
       {
         "id": "sane_results",
+        "title": "sane_results",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "total_return=0.4201, max|pnl_R| bounded"
       }
     ],
-    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/BT_20260617T120150.json",
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/BT_20260617T135442.json",
     "note": ""
   },
   {
@@ -53,26 +101,94 @@
     "criteria": [
       {
         "id": "walk_forward_completes",
+        "title": "walk_forward_completes",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "5 folds evaluated"
       },
       {
         "id": "min_folds_passed",
+        "title": "min_folds_passed",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "5/5 folds clear kill-criteria (need 4)"
       },
       {
         "id": "edge_not_isolated",
+        "title": "edge_not_isolated",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "5/5 folds positive expectancy"
       },
       {
         "id": "locked_holdout_positive",
+        "title": "locked_holdout_positive",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "hold-out expectancy_r=0.252, net_pnl=9753.33 (evaluated once)"
+      },
+      {
+        "id": "candidate_lead_lag_xasset",
+        "title": "candidate_lead_lag_xasset",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "promoted (A); folds 5/5, holdout=ok; sides=long+short"
+      },
+      {
+        "id": "candidate_basis_reversion",
+        "title": "candidate_basis_reversion",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "promoted (B); folds 5/5, holdout=ok; sides=short"
+      },
+      {
+        "id": "candidate_xsection_rs",
+        "title": "candidate_xsection_rs",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "promoted (G); folds 5/5, holdout=ok; sides=long+short"
+      },
+      {
+        "id": "families_A_B_G_promoted",
+        "title": "families_A_B_G_promoted",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "families A, B, G each have a promoted candidate"
       }
     ],
-    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/WF_20260617T120157.json",
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/WF_20260617T135546.json",
     "note": ""
   },
   {
@@ -81,21 +197,83 @@
     "criteria": [
       {
         "id": "baseline_positive",
+        "title": "baseline_positive",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "baseline expectancy_r=0.230"
       },
       {
         "id": "survives_fee_stress",
+        "title": "survives_fee_stress",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "\u00d72.0 fees \u21d2 expectancy_r=0.120, net_pnl=20069.26"
       },
       {
         "id": "edge_not_fee_dependent",
+        "title": "edge_not_fee_dependent",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "edge persists net of doubled fees"
+      },
+      {
+        "id": "candidate_lead_lag_xasset",
+        "title": "candidate_lead_lag_xasset",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "promoted (A); \u00d72.0 fees \u21d2 expectancy_r=0.185, pf=7.58; sides=long+short"
+      },
+      {
+        "id": "candidate_basis_reversion",
+        "title": "candidate_basis_reversion",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "promoted (B); \u00d72.0 fees \u21d2 expectancy_r=0.165, pf=9.71; sides=short"
+      },
+      {
+        "id": "candidate_xsection_rs",
+        "title": "candidate_xsection_rs",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "promoted (G); \u00d72.0 fees \u21d2 expectancy_r=0.147, pf=1.73; sides=long+short"
+      },
+      {
+        "id": "families_A_B_G_promoted",
+        "title": "families_A_B_G_promoted",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "families A, B, G each have a promoted candidate"
       }
     ],
-    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/FEE_20260617T120203.json",
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/FEE_20260617T135655.json",
     "note": ""
   },
   {
@@ -104,21 +282,83 @@
     "criteria": [
       {
         "id": "baseline_positive",
+        "title": "baseline_positive",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "baseline expectancy_r=0.230"
       },
       {
         "id": "survives_slippage_stress",
+        "title": "survives_slippage_stress",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "\u00d71.5 slippage \u21d2 expectancy_r=0.213, net_pnl=38324.11"
       },
       {
         "id": "edge_not_slippage_dependent",
+        "title": "edge_not_slippage_dependent",
         "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
         "detail": "edge persists under harsher slippage"
+      },
+      {
+        "id": "candidate_lead_lag_xasset",
+        "title": "candidate_lead_lag_xasset",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "promoted (A); \u00d71.5 slippage \u21d2 expectancy_r=0.262, pf=18.19; sides=long+short"
+      },
+      {
+        "id": "candidate_basis_reversion",
+        "title": "candidate_basis_reversion",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "promoted (B); \u00d71.5 slippage \u21d2 expectancy_r=0.220, pf=15.83; sides=short"
+      },
+      {
+        "id": "candidate_xsection_rs",
+        "title": "candidate_xsection_rs",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "promoted (G); \u00d71.5 slippage \u21d2 expectancy_r=0.212, pf=2.25; sides=long+short"
+      },
+      {
+        "id": "families_A_B_G_promoted",
+        "title": "families_A_B_G_promoted",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "families A, B, G each have a promoted candidate"
       }
     ],
-    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/SLIP_20260617T120209.json",
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/SLIP_20260617T135753.json",
     "note": ""
   }
 ]

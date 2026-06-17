@@ -1,0 +1,114 @@
+# strategies.yaml — single source of truth for the Phase 5 deterministic quant
+# research candidates (AGENTS.md Section 12 strategy families; Section 13 lifecycle).
+#
+# Phase 5 ships REAL deterministic strategy logic (families A, B, G) as *research
+# candidates* (lifecycle Stage 2-4). Each candidate runs through the SAME
+# event-based engine + walk-forward + fee/slippage stress as Phase 4 (the Parity
+# Rule, Section 10), and is judged against the up-front kill-criteria declared in
+# configs/backtest.yaml (Section 16: "validation exists to reject").
+#
+# Like the Phase 4 reference fixture, there is no live/real market data offline,
+# so each candidate is validated on a DETERMINISTIC reference series that plants
+# the family's hypothesised causal structure (and a matching no-structure control
+# that must yield ~0 expectancy — the look-ahead guard). The strategy code is
+# real; the data is a labelled synthetic fixture. These are research candidates,
+# NOT proven live edges (lifecycle Stage 4 → paper is Phase 8).
+#
+# All runtime behaviour is config-driven and versioned (Section 4): changing any
+# threshold, exit-geometry, side permission, or fixture parameter is a new
+# STRATEGY_VERSION.
+
+version: 1
+
+strategies:
+  strategy_version: strat_0001
+
+  # Long/short expectancy is computed separately for every candidate; a side whose
+  # out-of-sample expectancy_r is at or below this floor is DISABLED before
+  # promotion and the candidate is re-validated on the surviving side(s)
+  # (Section 16 long/short breakdown; Appendix D Phase 5 "losing side disabled").
+  min_side_expectancy_r: 0.0
+
+  candidates:
+    # ----------------------------------------------------------------------- #
+    # Family A — Cross-Asset Lead-Lag (Section 12.A)                           #
+    # ----------------------------------------------------------------------- #
+    - id: lead_lag_xasset
+      family: A
+      enabled: true
+      # Exit geometry: momentum/short-burst — explicit initial SL for sizing,
+      # time-stop, NO fixed TP (tp_frac large; the lagged move is the edge).
+      exit_profile: momentum
+      params:
+        leader_ret_threshold: 0.0025  # leader's last-bar return must exceed this
+        stop_frac: 0.012              # initial SL (fraction of price) — anchors sizing
+        tp_frac: 0.50                 # ~no fixed TP (unreachable); time-stop exits
+        hold_bars: 3                  # short hold: capture the lagged response then exit
+        allow_long: true
+        allow_short: true
+      fixture:
+        seed: lead_lag_v1
+        bars: 3000
+        timeframe: "5m"
+        leader: "BTC/USDT:USDT"
+        followers: ["ETH/USDT:USDT", "SOL/USDT:USDT"]
+        leader_drift: 0.0016          # peak per-bar drift of the leader trend
+        leader_period_bars: 140
+        leader_sigma: 0.0024
+        lag_beta: 0.70                # follower bar return = lag_beta * leader prev-bar return
+        follower_sigma: 0.0018        # follower idiosyncratic noise (< planted signal)
+
+    # ----------------------------------------------------------------------- #
+    # Family B — Perpetual Premium / Basis Mean Reversion (Section 12.B)       #
+    # ----------------------------------------------------------------------- #
+    - id: basis_reversion
+      family: B
+      enabled: true
+      # Exit geometry: mean-reversion — near fixed TP, wider SL, asymmetric
+      # (high win-rate / low R). Reversion is measured net of fees+slippage+funding.
+      exit_profile: mean_reversion
+      params:
+        premium_threshold: 0.0015     # |premium| (mark-vs-index) must exceed this to fire
+        stop_frac: 0.018              # wider SL (mean-reversion can run before reverting)
+        tp_frac: 0.006                # near TP (capture the reversion)
+        hold_bars: 6
+        allow_long: true              # the harness disables the structurally-weak side
+        allow_short: true
+      fixture:
+        seed: basis_v1
+        bars: 3000
+        timeframe: "5m"
+        symbols: ["BTC/USDT:USDT", "ETH/USDT:USDT"]
+        rho: 0.86                     # OU persistence of the premium deviation
+        shock_sigma: 0.0016           # premium-deviation innovation scale
+        kappa_rich: 0.85              # reversion strength when perp is RICH (premium>0) -> short wins
+        kappa_cheap: 0.05             # reversion strength when perp is CHEAP (premium<0) -> long weak
+        noise_sigma: 0.0030           # idiosyncratic price noise
+
+    # ----------------------------------------------------------------------- #
+    # Family G — Cross-Sectional Relative Strength / Dispersion (Section 12.G) #
+    # ----------------------------------------------------------------------- #
+    - id: xsection_rs
+      family: G
+      enabled: true
+      # Exit geometry: momentum (relative-strength continuation) — initial SL for
+      # sizing, time-stop, no fixed TP.
+      exit_profile: momentum
+      params:
+        rs_threshold: 0.003           # |relative strength vs cross-sectional mean| to fire
+        stop_frac: 0.014
+        tp_frac: 0.50
+        hold_bars: 4
+        allow_long: true
+        allow_short: true
+      fixture:
+        seed: xsection_v1
+        bars: 3000
+        timeframe: "5m"
+        # All fixtures use the 3 [VERIFIED]-metadata symbols so fees come from
+        # configs/metadata.yaml (META gate), never a fallback.
+        symbols: ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
+        market_sigma: 0.0010          # common market-factor per-bar move (small)
+        idio_rho: 0.92                # persistence of idiosyncratic relative strength
+        idio_shock: 0.0014            # idiosyncratic innovation scale (dispersion source)
+        idio_noise: 0.0016

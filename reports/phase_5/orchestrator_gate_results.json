@@ -1,287 +1,268 @@
 [
   {
-    "gate_id": "INFRA",
+    "gate_id": "WF",
     "overall": "PASS",
     "criteria": [
       {
-        "id": "compose_services_defined",
-        "title": "compose_services_defined",
+        "id": "walk_forward_completes",
+        "title": "walk_forward_completes",
         "status": "PASS",
         "measured": {},
         "threshold": {},
         "failure_reason": null,
         "remediation_steps": [],
         "rerun_job": "",
-        "detail": "13 services"
+        "detail": "5 folds evaluated"
       },
       {
-        "id": "live_engine_disabled_by_default",
-        "title": "live_engine_disabled_by_default",
+        "id": "min_folds_passed",
+        "title": "min_folds_passed",
         "status": "PASS",
         "measured": {},
         "threshold": {},
         "failure_reason": null,
         "remediation_steps": [],
         "rerun_job": "",
-        "detail": "behind profile ['live']"
+        "detail": "5/5 folds clear kill-criteria (need 4)"
       },
       {
-        "id": "only_443_exposed",
-        "title": "only_443_exposed",
+        "id": "edge_not_isolated",
+        "title": "edge_not_isolated",
         "status": "PASS",
         "measured": {},
         "threshold": {},
         "failure_reason": null,
         "remediation_steps": [],
         "rerun_job": "",
-        "detail": "only caddy:443 published externally"
+        "detail": "5/5 folds positive expectancy"
       },
       {
-        "id": "env_safe_defaults",
-        "title": "env_safe_defaults",
+        "id": "locked_holdout_positive",
+        "title": "locked_holdout_positive",
         "status": "PASS",
         "measured": {},
         "threshold": {},
         "failure_reason": null,
         "remediation_steps": [],
         "rerun_job": "",
-        "detail": "TRADING_MODE=PAPER, live disabled"
+        "detail": "hold-out expectancy_r=0.252, net_pnl=9753.33 (evaluated once)"
       },
       {
-        "id": "no_real_keys",
-        "title": "no_real_keys",
+        "id": "candidate_lead_lag_xasset",
+        "title": "candidate_lead_lag_xasset",
         "status": "PASS",
         "measured": {},
         "threshold": {},
         "failure_reason": null,
         "remediation_steps": [],
         "rerun_job": "",
-        "detail": "no API keys in .env.example"
+        "detail": "promoted (A); folds 5/5, holdout=ok; sides=long+short"
       },
       {
-        "id": "dashboard_auth_configured",
-        "title": "dashboard_auth_configured",
+        "id": "candidate_basis_reversion",
+        "title": "candidate_basis_reversion",
         "status": "PASS",
         "measured": {},
         "threshold": {},
         "failure_reason": null,
         "remediation_steps": [],
         "rerun_job": "",
-        "detail": "mode=basic"
+        "detail": "promoted (B); folds 5/5, holdout=ok; sides=short"
       },
       {
-        "id": "health_endpoints_green",
-        "title": "health_endpoints_green",
+        "id": "candidate_xsection_rs",
+        "title": "candidate_xsection_rs",
         "status": "PASS",
         "measured": {},
         "threshold": {},
         "failure_reason": null,
         "remediation_steps": [],
         "rerun_job": "",
-        "detail": "db/redis/storage healthy"
+        "detail": "promoted (G); folds 5/5, holdout=ok; sides=long+short"
       },
       {
-        "id": "kill_switch_independent",
-        "title": "kill_switch_independent",
+        "id": "families_A_B_G_promoted",
+        "title": "families_A_B_G_promoted",
         "status": "PASS",
         "measured": {},
         "threshold": {},
         "failure_reason": null,
         "remediation_steps": [],
         "rerun_job": "",
-        "detail": "engage/disengage works with no web process"
+        "detail": "families A, B, G each have a promoted candidate"
       }
     ],
-    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/INFRA_20260617T134749.json",
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/WF_20260617T140013.json",
     "note": ""
   },
   {
-    "gate_id": "DB",
+    "gate_id": "FEE",
     "overall": "PASS",
     "criteria": [
       {
-        "id": "db_reachable",
-        "title": "db_reachable",
+        "id": "baseline_positive",
+        "title": "baseline_positive",
         "status": "PASS",
         "measured": {},
         "threshold": {},
         "failure_reason": null,
         "remediation_steps": [],
         "rerun_job": "",
-        "detail": "SELECT 1 ok"
+        "detail": "baseline expectancy_r=0.230"
       },
       {
-        "id": "alembic_applied",
-        "title": "alembic_applied",
+        "id": "survives_fee_stress",
+        "title": "survives_fee_stress",
         "status": "PASS",
         "measured": {},
         "threshold": {},
         "failure_reason": null,
         "remediation_steps": [],
         "rerun_job": "",
-        "detail": "alembic_version present"
+        "detail": "\u00d72.0 fees \u21d2 expectancy_r=0.120, net_pnl=20069.26"
       },
       {
-        "id": "required_tables_exist",
-        "title": "required_tables_exist",
+        "id": "edge_not_fee_dependent",
+        "title": "edge_not_fee_dependent",
         "status": "PASS",
         "measured": {},
         "threshold": {},
         "failure_reason": null,
         "remediation_steps": [],
         "rerun_job": "",
-        "detail": "7 base tables present"
+        "detail": "edge persists net of doubled fees"
       },
       {
-        "id": "indexes_exist",
-        "title": "indexes_exist",
+        "id": "candidate_lead_lag_xasset",
+        "title": "candidate_lead_lag_xasset",
         "status": "PASS",
         "measured": {},
         "threshold": {},
         "failure_reason": null,
         "remediation_steps": [],
         "rerun_job": "",
-        "detail": "ix_jobs_type_status present"
+        "detail": "promoted (A); \u00d72.0 fees \u21d2 expectancy_r=0.185, pf=7.58; sides=long+short"
       },
       {
-        "id": "connection_pooling",
-        "title": "connection_pooling",
+        "id": "candidate_basis_reversion",
+        "title": "candidate_basis_reversion",
         "status": "PASS",
         "measured": {},
         "threshold": {},
         "failure_reason": null,
         "remediation_steps": [],
         "rerun_job": "",
-        "detail": "pool size=5"
+        "detail": "promoted (B); \u00d72.0 fees \u21d2 expectancy_r=0.165, pf=9.71; sides=short"
+      },
+      {
+        "id": "candidate_xsection_rs",
+        "title": "candidate_xsection_rs",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "promoted (G); \u00d72.0 fees \u21d2 expectancy_r=0.147, pf=1.73; sides=long+short"
+      },
+      {
+        "id": "families_A_B_G_promoted",
+        "title": "families_A_B_G_promoted",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "families A, B, G each have a promoted candidate"
       }
     ],
-    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/DB_20260617T134751.json",
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/FEE_20260617T140106.json",
     "note": ""
   },
   {
-    "gate_id": "QUEUE",
+    "gate_id": "SLIP",
     "overall": "PASS",
     "criteria": [
       {
-        "id": "redis_reachable",
-        "title": "redis_reachable",
+        "id": "baseline_positive",
+        "title": "baseline_positive",
         "status": "PASS",
         "measured": {},
         "threshold": {},
         "failure_reason": null,
         "remediation_steps": [],
         "rerun_job": "",
-        "detail": "PING ok"
+        "detail": "baseline expectancy_r=0.230"
       },
       {
-        "id": "worker_consumes_jobs",
-        "title": "worker_consumes_jobs",
+        "id": "survives_slippage_stress",
+        "title": "survives_slippage_stress",
         "status": "PASS",
         "measured": {},
         "threshold": {},
         "failure_reason": null,
         "remediation_steps": [],
         "rerun_job": "",
-        "detail": "job job_9c2fb4e11084416f -> succeeded"
+        "detail": "\u00d71.5 slippage \u21d2 expectancy_r=0.213, net_pnl=38324.11"
       },
       {
-        "id": "progress_tracked",
-        "title": "progress_tracked",
+        "id": "edge_not_slippage_dependent",
+        "title": "edge_not_slippage_dependent",
         "status": "PASS",
         "measured": {},
         "threshold": {},
         "failure_reason": null,
         "remediation_steps": [],
         "rerun_job": "",
-        "detail": "3/3"
+        "detail": "edge persists under harsher slippage"
       },
       {
-        "id": "job_records_persisted",
-        "title": "job_records_persisted",
+        "id": "candidate_lead_lag_xasset",
+        "title": "candidate_lead_lag_xasset",
         "status": "PASS",
         "measured": {},
         "threshold": {},
         "failure_reason": null,
         "remediation_steps": [],
         "rerun_job": "",
-        "detail": "2 log lines"
+        "detail": "promoted (A); \u00d71.5 slippage \u21d2 expectancy_r=0.262, pf=18.19; sides=long+short"
       },
       {
-        "id": "cancel_works",
-        "title": "cancel_works",
+        "id": "candidate_basis_reversion",
+        "title": "candidate_basis_reversion",
         "status": "PASS",
         "measured": {},
         "threshold": {},
         "failure_reason": null,
         "remediation_steps": [],
         "rerun_job": "",
-        "detail": "queued job cancelled and skipped"
+        "detail": "promoted (B); \u00d71.5 slippage \u21d2 expectancy_r=0.220, pf=15.83; sides=short"
       },
       {
-        "id": "retry_and_failures_visible",
-        "title": "retry_and_failures_visible",
+        "id": "candidate_xsection_rs",
+        "title": "candidate_xsection_rs",
         "status": "PASS",
         "measured": {},
         "threshold": {},
         "failure_reason": null,
         "remediation_steps": [],
         "rerun_job": "",
-        "detail": "failed job visible and re-queued"
+        "detail": "promoted (G); \u00d71.5 slippage \u21d2 expectancy_r=0.212, pf=2.25; sides=long+short"
+      },
+      {
+        "id": "families_A_B_G_promoted",
+        "title": "families_A_B_G_promoted",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "families A, B, G each have a promoted candidate"
       }
     ],
-    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/QUEUE_20260617T134752.json",
-    "note": ""
-  },
-  {
-    "gate_id": "STORAGE",
-    "overall": "PASS",
-    "criteria": [
-      {
-        "id": "data_lake_writable",
-        "title": "data_lake_writable",
-        "status": "PASS",
-        "measured": {},
-        "threshold": {},
-        "failure_reason": null,
-        "remediation_steps": [],
-        "rerun_job": "",
-        "detail": "/Users/ros/Projects/crypto-bot-quant/trading-bot/var/datalake"
-      },
-      {
-        "id": "snapshot_id_generated",
-        "title": "snapshot_id_generated",
-        "status": "PASS",
-        "measured": {},
-        "threshold": {},
-        "failure_reason": null,
-        "remediation_steps": [],
-        "rerun_job": "",
-        "detail": "ds_20260617T134753_0001, ds_20260617T134753_0002"
-      },
-      {
-        "id": "manifest_written_versioned",
-        "title": "manifest_written_versioned",
-        "status": "PASS",
-        "measured": {},
-        "threshold": {},
-        "failure_reason": null,
-        "remediation_steps": [],
-        "rerun_job": "",
-        "detail": "checksum=6b6a13e57a529db9"
-      },
-      {
-        "id": "artifact_writable",
-        "title": "artifact_writable",
-        "status": "PASS",
-        "measured": {},
-        "threshold": {},
-        "failure_reason": null,
-        "remediation_steps": [],
-        "rerun_job": "",
-        "detail": "/Users/ros/Projects/crypto-bot-quant/trading-bot/var/artifacts/selftest/gate.txt"
-      }
-    ],
-    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/STORAGE_20260617T134753.json",
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/SLIP_20260617T140201.json",
     "note": ""
   }
 ]

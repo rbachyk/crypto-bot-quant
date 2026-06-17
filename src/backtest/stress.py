@@ -16,6 +16,7 @@ from src.backtest.config import BacktestConfig
 from src.backtest.engine import SymbolInput
 from src.backtest.metrics import BacktestReport
 from src.backtest.service import run_engine
+from src.backtest.strategy import PortfolioStrategy, Strategy
 from src.exchange.metadata import MetadataConfig
 
 
@@ -43,8 +44,13 @@ class StressResult:
         }
 
 
-def _baseline(cfg: BacktestConfig, meta: MetadataConfig, inputs: list[SymbolInput]) -> float:
-    return run_engine(cfg, meta, inputs, label="baseline").report.expectancy_r
+def _baseline(
+    cfg: BacktestConfig,
+    meta: MetadataConfig,
+    inputs: list[SymbolInput],
+    strategy: Strategy | PortfolioStrategy | None,
+) -> float:
+    return run_engine(cfg, meta, inputs, strategy=strategy, label="baseline").report.expectancy_r
 
 
 def fee_stress(
@@ -54,13 +60,20 @@ def fee_stress(
     *,
     multiplier: float | None = None,
     baseline_expectancy_r: float | None = None,
+    strategy: Strategy | PortfolioStrategy | None = None,
 ) -> StressResult:
     mult = multiplier if multiplier is not None else cfg.stress.fee_multiplier
     base = (
-        baseline_expectancy_r if baseline_expectancy_r is not None else _baseline(cfg, meta, inputs)
+        baseline_expectancy_r
+        if baseline_expectancy_r is not None
+        else _baseline(cfg, meta, inputs, strategy)
     )
     stressed = run_engine(
-        cfg.with_cost_overrides(fee_multiplier=mult), meta, inputs, label=f"fee_x{mult}"
+        cfg.with_cost_overrides(fee_multiplier=mult),
+        meta,
+        inputs,
+        strategy=strategy,
+        label=f"fee_x{mult}",
     ).report
     return _result("fee", mult, base, stressed)
 
@@ -72,13 +85,20 @@ def slippage_stress(
     *,
     multiplier: float | None = None,
     baseline_expectancy_r: float | None = None,
+    strategy: Strategy | PortfolioStrategy | None = None,
 ) -> StressResult:
     mult = multiplier if multiplier is not None else cfg.stress.slippage_multiplier
     base = (
-        baseline_expectancy_r if baseline_expectancy_r is not None else _baseline(cfg, meta, inputs)
+        baseline_expectancy_r
+        if baseline_expectancy_r is not None
+        else _baseline(cfg, meta, inputs, strategy)
     )
     stressed = run_engine(
-        cfg.with_cost_overrides(slippage_multiplier=mult), meta, inputs, label=f"slip_x{mult}"
+        cfg.with_cost_overrides(slippage_multiplier=mult),
+        meta,
+        inputs,
+        strategy=strategy,
+        label=f"slip_x{mult}",
     ).report
     return _result("slippage", mult, base, stressed)
 

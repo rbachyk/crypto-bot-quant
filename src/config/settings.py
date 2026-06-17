@@ -81,7 +81,7 @@ class Settings(BaseSettings):
     universe_version: str = "univ_0001"
     data_version: str = "data_0001"
     metadata_version: str = "meta_0001"
-    strategy_version: str = "strat_0000"
+    strategy_version: str = "strat_0001"
     feature_set_version: str = "feat_0001"
     risk_policy_version: str = "risk_0001"
     execution_policy_version: str = "exec_0001"

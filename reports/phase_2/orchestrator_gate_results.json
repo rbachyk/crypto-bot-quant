@@ -59,7 +59,7 @@
         "detail": "dataset_versions[data_0001_3dce2575cf890334]"
       }
     ],
-    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/DATA-COV_20260617T092124.json",
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/DATA-COV_20260617T134840.json",
     "note": ""
   },
   {
@@ -185,10 +185,10 @@
         "failure_reason": null,
         "remediation_steps": [],
         "rerun_job": "",
-        "detail": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/data/quality_20260617T092126.json"
+        "detail": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/data/quality_20260617T134842.json"
       }
     ],
-    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/DQ_20260617T092126.json",
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/DQ_20260617T134842.json",
     "note": ""
   }
 ]

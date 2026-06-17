@@ -27,6 +27,10 @@ reports/data/
 reports/universe/
 reports/features/
 reports/metadata/
+reports/strategies/
+reports/ranking/
+reports/risk/
+reports/execution/
 
 # OS
 .DS_Store

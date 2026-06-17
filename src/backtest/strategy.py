@@ -29,12 +29,19 @@ class Signal:
     ``side`` is +1 (long) or -1 (short). ``stop_frac`` / ``tp_frac`` are the stop
     and take-profit distances as a fraction of the entry price; ``stop_frac`` is
     the per-trade risk that anchors position sizing (Section 17).
+
+    ``hold_bars`` overrides the engine's default time-stop for this signal so each
+    family can carry its own exit geometry (Section 12: momentum trades hold for
+    the tail with no fixed TP; mean-reversion exits quickly). ``None`` falls back
+    to the reference time-stop. A very large ``tp_frac`` encodes "no fixed TP"
+    (momentum), where the time-stop / trailing logic is the real exit.
     """
 
     side: int
     stop_frac: float
     tp_frac: float
     reason: str = ""
+    hold_bars: int | None = None
 
 
 @runtime_checkable
@@ -49,6 +56,32 @@ class Strategy(Protocol):
 
     def evaluate(self, row: dict) -> Signal | None:
         """Return a :class:`Signal` for this decision-time feature row, or None."""
+
+
+@runtime_checkable
+class PortfolioStrategy(Protocol):
+    """A cross-asset strategy that sees peer symbols' rows at the SAME decision time.
+
+    Cross-asset families (Section 12 A — lead-lag, G — cross-sectional relative
+    strength) cannot decide from one symbol in isolation; they need the universe's
+    state at decision time. The engine still preserves causality: ``row`` and every
+    entry in ``peers`` are decision-time feature rows for the SAME ``decision_ts``
+    (the close of the previous bar), so no peer datum from the fill bar or later is
+    ever visible. ``peers`` excludes the evaluated symbol itself.
+    """
+
+    @property
+    def name(self) -> str:
+        """Stable strategy identifier (read-only)."""
+
+    @property
+    def strategy_version(self) -> str:
+        """Versioned strategy parameters (read-only; Section 4)."""
+
+    def evaluate_portfolio(
+        self, symbol: str, row: dict, peers: dict[str, dict]
+    ) -> Signal | None:
+        """Return a :class:`Signal` for ``symbol`` given its row + peer rows, or None."""
 
 
 @dataclass(slots=True)

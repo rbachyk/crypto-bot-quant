@@ -1174,7 +1174,85 @@ def check_bt(settings: Settings) -> list[Criterion]:
 
 
 # --------------------------------------------------------------------------- #
-# WF — Walk-Forward Gate (Phase 4)                                             #
+# Phase 5 — research candidate validation shared by WF / FEE / SLIP            #
+# --------------------------------------------------------------------------- #
+def _candidate_criteria(settings: Settings, dimension: str) -> list[Criterion]:
+    """Per-candidate criteria for the Phase 5 promotion gates (WF/FEE/SLIP).
+
+    Re-derives the promotion decision from a single shared validation pass and
+    asserts, for ``dimension`` in {"wf", "fee", "slip"}: every PROMOTED candidate
+    passes that dimension (promotion requires it), every SHELVED candidate carries
+    a reason (correctly rejected per kill-criteria, not a gate failure), and the
+    Appendix-D minimum families A/B/G each have a promoted candidate. A Strategy
+    Report is written per candidate (Section 13) for the dashboard.
+    """
+    from src.strategies.research import (
+        families_promoted,
+        get_validations,
+        write_strategy_reports,
+    )
+
+    out: list[Criterion] = []
+    validations = get_validations()
+    write_strategy_reports(validations, settings)
+
+    for v in validations:
+        if dimension == "wf":
+            ok = v.walk_forward["passed"]
+            detail = (
+                f"folds {v.walk_forward['folds_passed']}/{v.walk_forward['n_folds']}, "
+                f"holdout={'ok' if (v.walk_forward.get('holdout') or {}).get('passed') else 'n/a'}"
+            )
+        elif dimension == "fee":
+            ok = v.fee_stress["survives"]
+            detail = (
+                f"×{v.fee_stress['multiplier']} fees ⇒ expectancy_r="
+                f"{v.fee_stress['stressed_expectancy_r']:.3f}, pf="
+                f"{v.fee_stress['stressed_profit_factor']:.2f}"
+            )
+        else:  # slip
+            ok = v.slippage_stress["survives"]
+            detail = (
+                f"×{v.slippage_stress['multiplier']} slippage ⇒ expectancy_r="
+                f"{v.slippage_stress['stressed_expectancy_r']:.3f}, pf="
+                f"{v.slippage_stress['stressed_profit_factor']:.2f}"
+            )
+
+        cid = f"candidate_{v.candidate_id}"
+        if v.promoted:
+            # A promoted candidate MUST pass this dimension (promotion requires it).
+            out.append(
+                Criterion.ok(cid, f"promoted ({v.family}); {detail}; sides={_sides(v)}")
+                if ok
+                else Criterion.fail(cid, f"promoted but fails {dimension}: {detail}")
+            )
+        else:
+            # A shelved candidate is correctly rejected (not a gate failure) as long
+            # as it carries a kill-criteria reason (Section 16 "validation rejects").
+            out.append(
+                Criterion.ok(cid, f"shelved ({v.family}); reasons={v.shelved_reasons}")
+                if v.shelved_reasons
+                else Criterion.fail(cid, "shelved without a recorded reason")
+            )
+
+    fam = families_promoted(validations)
+    missing = [f for f, ok in fam.items() if not ok]
+    out.append(
+        Criterion.ok("families_A_B_G_promoted", "families A, B, G each have a promoted candidate")
+        if not missing
+        else Criterion.fail("families_A_B_G_promoted", f"no promoted candidate for: {missing}")
+    )
+    return out
+
+
+def _sides(v: object) -> str:
+    sd = v.side_decision  # type: ignore[attr-defined]
+    on = [s for s, flag in (("long", sd.allow_long), ("short", sd.allow_short)) if flag]
+    return "+".join(on) if on else "none"
+
+
+# --------------------------------------------------------------------------- #
+# WF — Walk-Forward Gate (Phase 4 engine self-test + Phase 5 candidates)       #
 # --------------------------------------------------------------------------- #
 def check_wf(settings: Settings) -> list[Criterion]:
     """Walk-Forward Gate (Appendix A WF).
@@ -1248,6 +1326,9 @@ def check_wf(settings: Settings) -> list[Criterion]:
         passed=wf.passed,
         summary_extra={"walk_forward": wf.to_dict()},
     )
+
+    # Phase 5: walk-forward must pass for every promoted research candidate.
+    out.extend(_candidate_criteria(settings, "wf"))
     return out
 
 
@@ -1303,6 +1384,9 @@ def check_fee(settings: Settings) -> list[Criterion]:
         passed=all(c.passed for c in out),
         summary_extra={"fee_stress": stress.to_dict()},
     )
+
+    # Phase 5: fee stress must pass for every promoted research candidate.
+    out.extend(_candidate_criteria(settings, "fee"))
     return out
 
 
@@ -1364,6 +1448,9 @@ def check_slip(settings: Settings) -> list[Criterion]:
         passed=all(c.passed for c in out),
         summary_extra={"slippage_stress": stress.to_dict()},
     )
+
+    # Phase 5: slippage stress must pass for every promoted research candidate.
+    out.extend(_candidate_criteria(settings, "slip"))
     return out
 
 
