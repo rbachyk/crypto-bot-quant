@@ -1,9 +1,10 @@
-# ML Shadow Configuration — Phase 9 (AGENTS.md Section 20).
-# ML Stage 2: Shadow Mode only. No live influence permitted (Section 20 ML Stage 2).
-# Promotion to Stage 3+ requires ML-PROMO gate PASS + manual review.
-version: 1
+# ML Configuration — Phase 10 (AGENTS.md Section 20).
+# ML Stage 4: Constrained Live Filter. Shadow gate passed in Phase 9.
+# Stage 3 (recommendation) and Stage 4 (filter) enabled; no risk increases;
+# no new candidates; no hard-blocker overrides (Section 20 ML Stage 3-4).
+version: 2
 model_version: "ml_shadow_0001"
-ml_stage: 2  # SHADOW (Section 20 ML Stage 2)
+ml_stage: 4  # CONSTRAINED_FILTER (Section 20 ML Stage 4)
 
 # --- meta-labeler (primary model) ------------------------------------------
 # Best first use per AGENTS.md Section 20: ML estimates whether to take or skip
@@ -72,8 +73,8 @@ symbol_ranker:
 
 # --- shadow mode settings ---------------------------------------------------
 shadow:
-  mode: "SHADOW"           # ML Stage 2 — observations only
-  applied_to_live: false   # NEVER true in Phase 9 (no live influence)
+  mode: "SHADOW"           # base shadow mode (shadow logs always written)
+  applied_to_live: false   # shadow logs never set applied=True
   log_context_features: true
 
 # --- kill-criteria (declared upfront per Section 16) -----------------------
@@ -82,3 +83,17 @@ kill_criteria:
   min_profit_factor_ratio: 1.0        # PF must be preserved (>= baseline PF)
   max_tail_loss_ratio: 1.0            # worst-trade severity must not worsen
   max_best_trades_removed_pct: 0.2    # at most 20% of best trades may be filtered
+
+# --- Stage 3: Recommendation Mode (Section 20 ML Stage 3) ------------------
+# Recommendations are shown in dashboard / reports. Never auto-applied.
+recommendation:
+  enabled: true
+  log_to_db: true
+
+# --- Stage 4: Constrained Live Filter (Section 20 ML Stage 4) --------------
+# May BLOCK deterministic candidates. Cannot create, increase risk, or
+# override hard blockers (data_fresh=False, strategy_enabled=False, etc.).
+filter:
+  enabled: true
+  min_confidence_to_take: 0.40  # block candidate if meta_labeler p_take < this
+  log_to_db: true

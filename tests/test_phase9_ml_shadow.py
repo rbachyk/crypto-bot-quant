@@ -431,7 +431,7 @@ def test_ml_config_loads():
     from src.ml.config import load_ml_config
 
     cfg = load_ml_config()
-    assert cfg.ml_stage == 2
+    assert cfg.ml_stage >= 2  # Phase 10 advances to Stage 4; >= 2 is valid
     assert cfg.shadow.mode == "SHADOW"
     assert not cfg.shadow.applied_to_live
 

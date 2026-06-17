@@ -46,6 +46,28 @@ class KillCriteria:
 
 
 @dataclass
+class RecommendationCfg:
+    """ML Stage 3 — Recommendation Mode config (Section 20 ML Stage 3)."""
+
+    enabled: bool = False
+    log_to_db: bool = True
+
+
+@dataclass
+class FilterCfg:
+    """ML Stage 4 — Constrained Live Filter config (Section 20 ML Stage 4).
+
+    ``min_confidence_to_take``: meta-labeler probability below which a
+    deterministic candidate is blocked. Candidates above the threshold pass
+    through unchanged; the filter NEVER creates or modifies candidates.
+    """
+
+    enabled: bool = False
+    min_confidence_to_take: float = 0.4  # block if p_take < this
+    log_to_db: bool = True
+
+
+@dataclass
 class MLConfig:
     """Root ML configuration object."""
 
@@ -58,6 +80,8 @@ class MLConfig:
     symbol_ranker: ModelCfg = field(default_factory=ModelCfg)
     shadow: ShadowCfg = field(default_factory=ShadowCfg)
     kill_criteria: KillCriteria = field(default_factory=KillCriteria)
+    recommendation: RecommendationCfg = field(default_factory=RecommendationCfg)
+    filter: FilterCfg = field(default_factory=FilterCfg)
 
 
 def _model_cfg(raw: dict) -> ModelCfg:
@@ -91,6 +115,8 @@ def load_ml_config(path: str | None = None) -> MLConfig:
     raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
     sh = raw.get("shadow", {})
     kc = raw.get("kill_criteria", {})
+    rc = raw.get("recommendation", {})
+    fc = raw.get("filter", {})
     return MLConfig(
         model_version=raw.get("model_version", "ml_shadow_0001"),
         ml_stage=int(raw.get("ml_stage", 2)),
@@ -109,5 +135,14 @@ def load_ml_config(path: str | None = None) -> MLConfig:
             min_profit_factor_ratio=float(kc.get("min_profit_factor_ratio", 1.0)),
             max_tail_loss_ratio=float(kc.get("max_tail_loss_ratio", 1.0)),
             max_best_trades_removed_pct=float(kc.get("max_best_trades_removed_pct", 0.2)),
+        ),
+        recommendation=RecommendationCfg(
+            enabled=bool(rc.get("enabled", False)),
+            log_to_db=bool(rc.get("log_to_db", True)),
+        ),
+        filter=FilterCfg(
+            enabled=bool(fc.get("enabled", False)),
+            min_confidence_to_take=float(fc.get("min_confidence_to_take", 0.4)),
+            log_to_db=bool(fc.get("log_to_db", True)),
         ),
     )

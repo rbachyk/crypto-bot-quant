@@ -459,4 +459,109 @@ def _run_ml_shadow_pass(ctx: JobContext, params: dict) -> dict:
     }
 
 
+# --------------------------------------------------------------------------- #
+# ML Phase 10 jobs — Recommendation + Constrained Filter                     #
+# --------------------------------------------------------------------------- #
+@job_handler("run_ml_recommendation_pass")
+def _run_ml_recommendation_pass(ctx: JobContext, params: dict) -> dict:
+    """Run Stage 3 Recommendation Mode over the reference dataset.
+
+    Produces structured MLRecommendation objects and logs them to shadow_logs
+    with mode=RECOMMEND, applied=False. Never affects trading behavior.
+    """
+    from src.config import get_settings
+    from src.ml import RecommendationEngine
+    from src.ml.config import load_ml_config
+    from src.ml.labels import build_reference_dataset, train_test_split
+    from src.ml.shadow import ShadowPredictor
+
+    ctx.log("running ML Stage 3 recommendation pass (applied=False on all entries)")
+    ml_cfg = load_ml_config()
+    settings = get_settings()
+    samples = build_reference_dataset(seed=42)
+    train_samples, test_samples = train_test_split(samples, seed=42)
+
+    predictor = ShadowPredictor.from_config(ml_cfg)
+    predictor.train(train_samples)
+    shadow_result = predictor.run(
+        [s.candidate for s in test_samples[:20]],
+        settings=settings,
+        write_to_db=False,
+    )
+
+    engine = RecommendationEngine(
+        model_version=ml_cfg.model_version,
+        config_version=settings.config_version,
+    )
+    result = engine.run(shadow_result.bundles, write_to_db=True)
+    assert not result.applied, "recommendation pass must never set applied=True"
+
+    n_take = sum(1 for r in result.recommendations if r.recommend_take)
+    n_skip = len(result.recommendations) - n_take
+    ctx.progress(
+        1, 1, f"{len(result.recommendations)} recommendations (take={n_take} skip={n_skip})"
+    )
+    return {
+        "message": (
+            f"Stage 3: {len(result.recommendations)} recommendations logged (applied=False)"
+        ),
+        "model_version": result.model_version,
+        "n_recommendations": len(result.recommendations),
+        "n_take": n_take,
+        "n_skip": n_skip,
+        "log_ids": len(result.log_ids),
+        "applied": result.applied,
+    }
+
+
+@job_handler("run_ml_filter_evaluation")
+def _run_ml_filter_evaluation(ctx: JobContext, params: dict) -> dict:
+    """Evaluate the Stage 4 Constrained Live Filter on the reference dataset.
+
+    Shows how many candidates would be blocked by the filter. This job is
+    for evaluation — in production the filter runs inline in the paper/live
+    loop after each candidate batch.
+    """
+    from src.config import get_settings
+    from src.ml import MLFilter
+    from src.ml.config import load_ml_config
+    from src.ml.labels import build_reference_dataset, train_test_split
+    from src.ml.shadow import ShadowPredictor
+
+    ctx.log("evaluating ML Stage 4 constrained filter (evaluation only)")
+    ml_cfg = load_ml_config()
+    settings = get_settings()
+    samples = build_reference_dataset(seed=42)
+    train_samples, test_samples = train_test_split(samples, seed=42)
+
+    predictor = ShadowPredictor.from_config(ml_cfg)
+    predictor.train(train_samples)
+    candidates = [s.candidate for s in test_samples]
+    shadow_result = predictor.run(candidates, settings=settings, write_to_db=False)
+
+    threshold = float(params.get("min_confidence_to_take", ml_cfg.filter.min_confidence_to_take))
+    ml_filter = MLFilter(
+        min_confidence_to_take=threshold,
+        model_version=ml_cfg.model_version,
+        config_version=settings.config_version,
+    )
+    result = ml_filter.apply(candidates, shadow_result.bundles, write_to_db=True)
+
+    ctx.progress(
+        1,
+        1,
+        f"filter: {result.pass_count} passed / {result.block_count} blocked "
+        f"out of {len(candidates)}",
+    )
+    return {
+        "message": (f"Stage 4 filter: {result.pass_count} passed / {result.block_count} blocked"),
+        "total": len(candidates),
+        "passed": result.pass_count,
+        "blocked": result.block_count,
+        "threshold": threshold,
+        "block_reasons": result.block_reasons(),
+        "note": "filter CANNOT create trades, increase risk, or override hard blockers",
+    }
+
+
 ensure_handlers_registered()

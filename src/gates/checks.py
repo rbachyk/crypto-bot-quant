@@ -27,7 +27,8 @@ from src.gates.phase6 import (
     check_setup,
 )
 from src.gates.phase8 import check_paper_a, check_paper_b
-from src.gates.phase9 import check_ml_promo
+from src.gates.phase9 import check_ml_promo as _check_ml_promo_phase9
+from src.gates.phase10 import check_ml_phase10
 from src.gates.result import Criterion
 from src.killswitch import KillSwitch
 from src.monitoring import Alert, AlertSeverity, check_health, get_alert_sink
@@ -1469,6 +1470,13 @@ def check_slip(settings: Settings) -> list[Criterion]:
     return out
 
 
+def check_ml_promo(settings: Settings) -> list[Criterion]:
+    """Combined ML-PROMO gate: Phase 9 shadow criteria + Phase 10 Stage 3/4 criteria."""
+    out = _check_ml_promo_phase9(settings)
+    out.extend(check_ml_phase10(settings))
+    return out
+
+
 def _write_report(settings: Settings, kind: str, payload: dict) -> str:
     """Persist a gate sub-report under reports/<kind>/ (dashboard 'View ...' actions)."""
     import json as _json
@@ -1511,7 +1519,7 @@ CHECKS: dict[str, Callable[[Settings], list[Criterion]]] = {
     # Phase 8 — Paper Trading (technical + strategy validation).
     "PAPER-A": check_paper_a,
     "PAPER-B": check_paper_b,
-    # Phase 9 — Shadow ML promotion gate.
+    # Phase 9–10 — ML promotion gate (shadow + recommendation + constrained filter).
     "ML-PROMO": check_ml_promo,
 }
 
