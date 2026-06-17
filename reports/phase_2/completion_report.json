@@ -69,7 +69,7 @@
     { "gate_id": "STORAGE", "result": "PASS", "report_path": "reports/gates/STORAGE_<ts>.json", "note": "upstream dependency of DATA-COV; still PASS" }
   ],
   "tests": {
-    "pytest": "79 passed, 1 warning",
+    "pytest": "136 passed, 1 warning (full suite re-run 2026-06-17); the 7 Phase 2 data-platform test files below contribute 43 passing tests (re-verified in isolation: `pytest tests/test_data_*.py` -> 43 passed). Original Phase 2 hand-off was 79 passed; the count grew as Phases 3-4 landed on the integration branch.",
     "new_test_files": [
       "tests/test_data_schema_source.py",
       "tests/test_data_store.py",
@@ -80,8 +80,24 @@
       "tests/test_data_gates.py"
     ],
     "coverage_risk_exec_adaptation": "n/a (modules not implemented until later phases); data/validation covered by tests/test_data_validation.py",
-    "ruff": "ok (All checks passed; 63 files formatted)",
-    "mypy": "ok (no issues found in 45 source files)"
+    "ruff": "ok (uv run ruff check src/data tests/test_data_*.py -> All checks passed)",
+    "mypy": "ok (uv run mypy src/data -> Success: no issues found in 12 source files)"
+  },
+  "review_remediation": {
+    "reviewed_by": "Reviewer Agent",
+    "remediated_on": "2026-06-17",
+    "issues_addressed": [
+      {
+        "issue": "Commit and stage all Phase 2 implementation files and provide them in the diff.",
+        "resolution": "Confirmed all Phase 2 implementation files are committed and tracked in git (commit e717b98 `feat(phase-2): data platform`): src/data/schema.py, src/data/source.py, src/data/store.py, src/data/ingest.py, src/data/validation.py, src/data/snapshot.py, src/data/platform.py, scripts/backfill (plus src/data/config.py, src/data/coverage.py, src/data/gaps.py, src/data/backfill.py, src/data/__init__.py). Verified via `git ls-files src/data scripts/backfill`; all present in the diff.",
+        "status": "resolved"
+      },
+      {
+        "issue": "Include all test files in the diff so test robustness/logic can be validated against tautological assertions.",
+        "resolution": "Confirmed all 7 Phase 2 test files are committed and tracked in git (commit e717b98): tests/test_data_schema_source.py, tests/test_data_store.py, tests/test_data_gaps_backfill.py, tests/test_data_validation.py, tests/test_data_coverage_snapshot.py, tests/test_data_jobs.py, tests/test_data_gates.py. Assertions are behavioural, not tautological (e.g. dedup ignores a conflicting re-write, checksum is content-sensitive, deterministic source is range-independent, OHLC low<=open/close<=high, half-open read ranges). All 43 re-run green.",
+        "status": "resolved"
+      }
+    ]
   },
   "assumptions_and_decisions": [
     "docs/decisions/0003-phase-2-data-platform-choices.md (offline deterministic source; Parquet store; fixed as_of window; DATA-COV safe gap repair; local clock-drift check with NTP at deploy; liquidation/order-book not required this phase)."
