@@ -4,7 +4,7 @@
   "coder": "claude-sonnet-4-6",
   "date": "2026-06-17",
   "branch": "phase/7",
-  "commit": "pending",
+  "commit": "c89b88e",
   "scope_implemented": [
     "General dashboard with dark-theme HTML, navigation, and status badges (src/api/app.py)",
     "Per-symbol stats page and endpoint (/dashboard/stats/{symbol}, /api/stats/{symbol})",
