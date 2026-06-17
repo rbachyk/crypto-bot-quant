@@ -26,6 +26,7 @@ from src.gates.phase6 import (
     check_risk,
     check_setup,
 )
+from src.gates.phase8 import check_paper_a, check_paper_b
 from src.gates.result import Criterion
 from src.killswitch import KillSwitch
 from src.monitoring import Alert, AlertSeverity, check_health, get_alert_sink
@@ -1506,6 +1507,9 @@ CHECKS: dict[str, Callable[[Settings], list[Criterion]]] = {
     "EXEC": check_exec,
     "KILL": check_kill,
     "ORDER-OWN": check_order_own,
+    # Phase 8 — Paper Trading (technical + strategy validation).
+    "PAPER-A": check_paper_a,
+    "PAPER-B": check_paper_b,
 }
 
 
