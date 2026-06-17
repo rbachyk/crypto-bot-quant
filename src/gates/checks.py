@@ -468,6 +468,12 @@ def check_mon(settings: Settings) -> list[Criterion]:
             "stale-data / failed-job / kill-switch alerts wired (skeleton; transports in P13)",
         )
     )
+
+    # Phase 7: smoke-test dashboard panels (Appendix D Phase 7).
+    from src.gates.phase7 import check_mon_dashboard_panels
+
+    out.extend(check_mon_dashboard_panels(settings))
+
     return out
 
 

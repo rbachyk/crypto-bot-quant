@@ -1,0 +1,86 @@
+{
+  "phase": 7,
+  "name": "Dashboard and Gate Workflow",
+  "coder": "claude-sonnet-4-6",
+  "date": "2026-06-17",
+  "branch": "phase/7",
+  "commit": "pending",
+  "scope_implemented": [
+    "General dashboard with dark-theme HTML, navigation, and status badges (src/api/app.py)",
+    "Per-symbol stats page and endpoint (/dashboard/stats/{symbol}, /api/stats/{symbol})",
+    "Aggregate stats with time-period filter: today/yesterday/last_7d/last_30d/current_month/prev_month/custom/all (src/api/stats.py)",
+    "Background Gate Runner UI: run single gate via POST /api/gates/{gate_id}/run, run all via /api/gates/run-all",
+    "Live progress + logs via /api/jobs/{job_id}/logs endpoint",
+    "GateResult rendering: failure reason + remediation steps + re-run button on /dashboard/gates/{gate_id}",
+    "Road to Live view (/dashboard/road-to-live, /api/gates/road-to-live) with live readiness score, blocking criteria, next actions",
+    "Approvals panel (/dashboard/approvals, /api/approvals) with approve/reject endpoints",
+    "Audit logs panel (/dashboard/audit-logs, /api/audit-logs) with audit_log table, all dashboard actions logged",
+    "Reports panel (/dashboard/reports, /api/reports) listing completion + review reports from reports/",
+    "Remediation actions panel (/dashboard/remediation, /api/remediation) with complete endpoint",
+    "MON gate Phase 7 smoke test (src/gates/phase7.py) — TestClient-based panel validation",
+    "Phase 7 test suite: 46 new tests in tests/test_phase7_dashboard.py"
+  ],
+  "acceptance_criteria": [
+    {
+      "criterion": "Aggregate and per-symbol stats with day/week/month/all-time/custom range; all metrics recompute per scope",
+      "met": true,
+      "evidence": "tests/test_phase7_dashboard.py::test_stats_all_periods (parametrized 7 periods), test_stats_custom_period, test_per_symbol_stats_scaffold, test_per_symbol_stats_with_period; src/api/stats.py resolve_window()"
+    },
+    {
+      "criterion": "Background Gate Runner UI: run single/group/all; live progress + logs; GateResult rendering with failure reason + remediation + re-run button",
+      "met": true,
+      "evidence": "POST /api/gates/{gate_id}/run enqueues job (test_gate_run_enqueues_job @requires_redis); /api/jobs/{job_id}/logs; gate detail page renders spec + remediation + run button (test_gate_detail_structure, test_gate_detail_page_renders)"
+    },
+    {
+      "criterion": "Road to Live view shows every gate, blocking criteria, and next action; approvals + audit logs; reports linked",
+      "met": true,
+      "evidence": "test_road_to_live_structure, test_road_to_live_gate_fields (gate_id/name/phase/status/blocks_live/next_action/remediation_steps), test_approvals_list, test_audit_logs_list, test_reports_list, test_road_to_live_page_renders"
+    },
+    {
+      "criterion": "Gates PASS: dashboard renders all existing gate results correctly (smoke gate MON for panels)",
+      "met": true,
+      "evidence": "src/gates/phase7.py check_mon_dashboard_panels() — 10 criteria smoke-testing all Phase 7 panels via TestClient; all 232 tests pass; MON gate includes Phase 7 panels via src/gates/checks.py"
+    }
+  ],
+  "gates": [
+    {
+      "gate_id": "MON",
+      "self_check_result": "PASS (via TestClient smoke test embedded in gate check; 10/10 panel criteria pass)",
+      "report_path": "reports/phase_7/completion_report.json",
+      "note": "MON gate uses TestClient in gate runner context; full Redis-backed run requires `make -s run-gate GATE=MON FORMAT=json`"
+    }
+  ],
+  "tests": {
+    "pytest": "232 passed, 0 failed, 1 warning (DeprecationWarning httpx starlette) — 111.37s",
+    "new_tests": 46,
+    "test_file": "tests/test_phase7_dashboard.py",
+    "ruff": "All checks passed (ruff check src tests)",
+    "ruff_format": "122 files already formatted",
+    "mypy": "Success: no issues found in 93 source files"
+  },
+  "files_created": [
+    "src/api/stats.py",
+    "src/gates/phase7.py",
+    "tests/test_phase7_dashboard.py",
+    "reports/phase_7/completion_report.json"
+  ],
+  "files_modified": [
+    "src/api/app.py",
+    "src/gates/checks.py",
+    "pyproject.toml"
+  ],
+  "assumptions_and_decisions": [
+    "Trading-level metrics (PnL, drawdown, win_rate, etc.) scaffolded as zeros for Phase 8 — schema is complete, data is not yet available until paper trading is active",
+    "HTML dashboard uses inline CSS dark-theme strings — E501 lint suppressed for src/api/app.py via pyproject.toml per-file-ignores; this is intentional per Appendix B",
+    "MON gate Phase 7 panel checks use FastAPI TestClient (no real HTTP server) — valid gate check pattern matching how test_api.py works",
+    "Custom time period URL-encoding: '+' in ISO timestamps is URL-decoded as space; fixed with ts.replace(' ', '+') in stats.py resolve_window()"
+  ],
+  "known_gaps": [
+    "Trading stats (PnL, drawdown, win_rate) return zeros until Phase 8 paper trading populates DB",
+    "Gate run-all endpoint enqueues jobs serially; parallel execution deferred to Phase 8+ infrastructure improvements",
+    "MON gate full Redis-backed run requires Redis to be running; test_mon_gate_passes_with_phase7_panels is @requires_redis decorated"
+  ],
+  "status": "Phase 7 complete",
+  "tested": "yes — 232/232 tests pass; ruff + mypy clean; MON panel smoke test embedded in gate checks",
+  "next_step": "Phase 8 — Paper Trading (PAPER-A gate)"
+}
