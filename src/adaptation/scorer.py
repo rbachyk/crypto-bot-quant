@@ -103,7 +103,7 @@ def score_shadow_decisions(
     folds_size = max(1, n_with_outcome // n_folds)
     fold_results: list[FoldScore] = []
     # Reserve the last fold as the locked hold-out.
-    train_decisions = decided[: -folds_size] if len(decided) > folds_size else []
+    train_decisions = decided[:-folds_size] if len(decided) > folds_size else []
     holdout_decisions = decided[-folds_size:]
 
     if train_decisions:

@@ -1,0 +1,32 @@
+[
+  {
+    "gate_id": "LEARN-PROMO-S",
+    "overall": "PASS",
+    "criteria": [
+      {"id": "adaptation_imports", "status": "PASS"},
+      {"id": "config_mode_shadow", "status": "PASS"},
+      {"id": "adaptation_enabled", "status": "PASS"},
+      {"id": "envelope_guard_rejects_bad", "status": "PASS"},
+      {"id": "validate_clamps_bucket", "status": "PASS"},
+      {"id": "shadow_policy_runs", "status": "PASS"},
+      {"id": "bandit_policy_runs", "status": "PASS"},
+      {"id": "rl_stub_importable", "status": "PASS"},
+      {"id": "controller_shadow_applies_false", "status": "PASS"},
+      {"id": "frozen_fallback_roundtrip", "status": "PASS"},
+      {"id": "learner_log_db", "status": "PASS"},
+      {"id": "scorer_runs", "status": "PASS"},
+      {"id": "rollback_guard_fires", "status": "PASS"},
+      {"id": "drift_monitoring_runs", "status": "PASS"},
+      {"id": "shadow_log_applied_false", "status": "PASS"}
+    ],
+    "report_path": "reports/gates/LEARN-PROMO-S_20260617T213539.json",
+    "note": "15/15 PASS — re-run after ruff format fix (2026-06-17T21:35Z)"
+  },
+  {
+    "gate_id": "QUALITY",
+    "overall": "PASS",
+    "criteria": [],
+    "report_path": "",
+    "note": "make test lint typecheck passed — 397 passed, ruff format clean (164 files), mypy clean (2026-06-17T21:35Z)"
+  }
+]

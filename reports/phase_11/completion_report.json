@@ -62,7 +62,7 @@
     {
       "criterion": "Gate LEARN-PROMO-S evaluated",
       "status": "PASS",
-      "evidence": "reports/gates/LEARN-PROMO-S_20260617T211413.json — overall=PASS 15/15"
+      "evidence": "reports/gates/LEARN-PROMO-S_20260617T213539.json — overall=PASS 15/15 (re-run after ruff format fix)"
     }
   ],
   "gates": [
@@ -71,7 +71,7 @@
       "result": "PASS",
       "criteria_passed": 15,
       "criteria_total": 15,
-      "report_path": "reports/gates/LEARN-PROMO-S_20260617T211413.json"
+      "report_path": "reports/gates/LEARN-PROMO-S_20260617T213539.json"
     }
   ],
   "tests": {
@@ -80,8 +80,11 @@
     "total_failed": 0,
     "phase11_tests_passed": 53,
     "phase11_tests_total": 53,
-    "ruff": "PASS",
-    "mypy": "PASS"
+    "ruff_check": "PASS",
+    "ruff_format": "PASS",
+    "mypy": "PASS",
+    "quality_gate": "PASS",
+    "quality_gate_note": "make test lint typecheck passed — 397 passed, 164 files formatted, mypy clean (2026-06-17T21:35Z)"
   },
   "assumptions_and_decisions": [],
   "known_gaps_risks": [

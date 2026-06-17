@@ -1,0 +1,23 @@
+{
+  "phase": 11,
+  "gate": "LEARN-PROMO-S",
+  "adaptation_config": {
+    "mode": "SHADOW",
+    "learner_id": "online_shadow_v1",
+    "learner_version": "learner_0001",
+    "min_samples_to_start": 50
+  },
+  "versions": {
+    "CONFIG_VERSION": "cfg_0001",
+    "UNIVERSE_VERSION": "univ_0001",
+    "DATA_VERSION": "data_0001",
+    "METADATA_VERSION": "meta_0001",
+    "STRATEGY_VERSION": "strat_0000",
+    "FEATURE_SET_VERSION": "feat_0001",
+    "RISK_POLICY_VERSION": "risk_0001",
+    "EXECUTION_POLICY_VERSION": "exec_0001",
+    "ONLINE_LEARNER_VERSION": "learner_0001"
+  },
+  "generated_at": "20260617T213403",
+  "note": "Phase 11 \u2014 Online Learning Shadow. Bounded learner in SHADOW mode: learner_log written; drift + calibration monitoring active; envelope_guard rejects out-of-box actions; frozen fallback round-trip verified. Promotion to RECOMMEND requires LEARN-PROMO-S gate PASS + manual approval."
+}

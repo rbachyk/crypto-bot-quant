@@ -31,9 +31,9 @@ class StrategyArm:
     """Gaussian posterior for one strategy arm."""
 
     strategy_id: str
-    mu: float = 0.0       # posterior mean of expected R
-    var: float = 1.0      # posterior variance
-    n: int = 0            # number of observations
+    mu: float = 0.0  # posterior mean of expected R
+    var: float = 1.0  # posterior variance
+    n: int = 0  # number of observations
 
 
 @dataclass
@@ -73,9 +73,7 @@ class GaussianTSBandit:
             # Sample from each arm.
             if _NP_AVAILABLE and self._rng is not None and self._arms:
                 samples = {
-                    sid: float(
-                        self._rng.normal(arm.mu, max(arm.var ** 0.5, 1e-6))
-                    )
+                    sid: float(self._rng.normal(arm.mu, max(arm.var**0.5, 1e-6)))
                     for sid, arm in self._arms.items()
                 }
                 # Weights proportional to rank (rank-1 at top, 0 for negative samples).

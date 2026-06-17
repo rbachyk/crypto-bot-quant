@@ -153,8 +153,7 @@ def enforce(
             clamped_fields=clamped,
             rejected=True,
             rejection_reason=(
-                f"param_nudges attempts to touch forbidden envelope params: "
-                f"{sorted(forbidden_hit)}"
+                f"param_nudges attempts to touch forbidden envelope params: {sorted(forbidden_hit)}"
             ),
         )
 

@@ -112,9 +112,7 @@ class RollbackGuard:
 
         # Trigger 1: underperformance vs own projection.
         window = [
-            d
-            for d in self._decisions[-self.rollback_window :]
-            if d.realized_outcome is not None
+            d for d in self._decisions[-self.rollback_window :] if d.realized_outcome is not None
         ]
         if len(window) >= self.rollback_window:
             mean_realized = sum(d.realized_outcome for d in window) / len(window)  # type: ignore[misc]
@@ -129,9 +127,7 @@ class RollbackGuard:
 
         return None
 
-    def _freeze(
-        self, controller: LearnerController, trigger: str, detail: str
-    ) -> RollbackEvent:
+    def _freeze(self, controller: LearnerController, trigger: str, detail: str) -> RollbackEvent:
         event = RollbackEvent(trigger=trigger, detail=detail)
         self._events.append(event)
         controller.freeze(reason=detail)

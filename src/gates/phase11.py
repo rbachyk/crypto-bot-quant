@@ -171,16 +171,13 @@ def check_learn_promo_s(settings: Settings) -> list[Criterion]:
             rationale="test",
         )
         over_result = enforce(oversized, envelope=_test_envelope)
-        oversized_clamped = (
-            not over_result.rejected and over_result.action.size_bucket == 1.0
-        )
+        oversized_clamped = not over_result.rejected and over_result.action.size_bucket == 1.0
 
         guard_ok = guard_rejects and strat_rejects and oversized_clamped
         out.append(
             Criterion.ok(
                 "envelope_guard_rejects_bad",
-                "forbidden param rejected; unknown strategy rejected; "
-                "oversized bucket clamped",
+                "forbidden param rejected; unknown strategy rejected; oversized bucket clamped",
             )
             if guard_ok
             else Criterion.fail(
@@ -292,8 +289,7 @@ def check_learn_promo_s(settings: Settings) -> list[Criterion]:
         out.append(
             Criterion.ok(
                 "bandit_policy_runs",
-                f"GaussianTSBandit: decide + 2 updates + decide OK; "
-                f"arms={len(bandit._arms)}",
+                f"GaussianTSBandit: decide + 2 updates + decide OK; arms={len(bandit._arms)}",
             )
             if bandit_ok
             else Criterion.fail(
@@ -446,11 +442,7 @@ def check_learn_promo_s(settings: Settings) -> list[Criterion]:
                 .order_by(LearnerLog.id.desc())
                 .first()
             )
-            db_row_ok = (
-                row is not None
-                and row.mode == "SHADOW"
-                and row.applied is False
-            )
+            db_row_ok = row is not None and row.mode == "SHADOW" and row.applied is False
 
         out.append(
             Criterion.ok(
