@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import bisect
 from dataclasses import dataclass, field
+from typing import cast
 
 from src.backtest.config import BacktestConfig
 from src.backtest.costs import BUY, SELL, FeeModel, FundingModel, SlippageModel
@@ -281,7 +282,9 @@ class BacktestEngine:
             entry_bar = row["decision_ts"] // iv
             if entry_bar >= len(sym_in.bars):
                 continue
-            sig = self.strategy.evaluate(row)
+            # Per-symbol path runs only when is_portfolio is False (see run()), so the
+            # strategy implements the plain Strategy protocol.
+            sig = cast(Strategy, self.strategy).evaluate(row)
             if sig is not None:
                 out[int(entry_bar)] = (sig, row)
         return out
@@ -315,7 +318,9 @@ class BacktestEngine:
                 if entry_bar >= n_bars_by_symbol[sym]:
                     continue
                 others = {k: v for k, v in peers.items() if k != sym}
-                sig = self.strategy.evaluate_portfolio(sym, row, others)
+                # Reached only via the is_portfolio branch in run(), so the strategy
+                # implements the PortfolioStrategy protocol.
+                sig = cast(PortfolioStrategy, self.strategy).evaluate_portfolio(sym, row, others)
                 if sig is not None:
                     out[sym][int(entry_bar)] = (sig, row)
         return out
@@ -392,7 +397,11 @@ class BacktestEngine:
             stop_price=stop_price,
             tp_price=tp_price,
             hold_until_bar=bar_idx
-            + (sig.hold_bars if sig.hold_bars is not None else self.cfg.reference_strategy.hold_bars),
+            + (
+                sig.hold_bars
+                if sig.hold_bars is not None
+                else self.cfg.reference_strategy.hold_bars
+            ),
             entry_fee=entry_fee,
             funding=0.0,
             slippage_cost=entry_slip_cost,

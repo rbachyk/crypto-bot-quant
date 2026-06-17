@@ -1,0 +1,38 @@
+# execution.yaml — Execution Engine policy (AGENTS.md Section 18, EXEC gate).
+#
+# Execution is part of edge (Section 18). Stops/TP are EXCHANGE-RESIDENT and
+# attached atomically at entry; trend trailing uses EXCHANGE-NATIVE trailing so it
+# survives bot downtime. Every order carries the ownership prefix (Section 7); the
+# bot only ever manages its own orders. No order during toxic spread / excess
+# slippage / abnormal latency (Section 18 default execution preference).
+
+version: 1
+
+execution:
+  execution_policy_version: exec_0001
+
+  # Default execution preference (Section 18): maker-first when urgency is low,
+  # taker only when the expected edge justifies the cost.
+  default_entry_style: "maker_first"   # maker_first | taker | passive_then_taker
+
+  # Hard execution blockers (Section 18) — also enforced as setup hard blockers.
+  max_spread_bps: 25.0                  # no order during toxic spread
+  max_slippage_frac: 0.01               # no order if slippage estimate exceeds cap
+  max_latency_ms: 1500.0                # no order if exchange latency is abnormal
+
+  # Exchange-resident protection (Section 2.2 / 18): every position gets an
+  # atomic exchange-side stop at entry; momentum strategies add native trailing.
+  require_exchange_side_stop: true
+  attach_take_profit: true              # attach TP when the signal declares a finite one
+
+  # Native trailing-stop offset as a fraction of price for momentum exits
+  # (Section 12: momentum has no fixed TP — the trailing/time-stop is the exit).
+  trailing_offset_frac: 0.0
+
+  # Simulated-venue fill model (paper/backtest; a real venue swaps in measured
+  # fills behind the same adapter). Slippage is always adverse to the taker.
+  simulated_latency_ms: 40.0
+  simulated_partial_fill_ratio: 0.5     # used only by the partial-fill EXEC test path
+
+  # Emergency close mode (Section 7/35) — must require explicit confirmation.
+  emergency_close_requires_confirmation: true

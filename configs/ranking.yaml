@@ -1,0 +1,43 @@
+# ranking.yaml — Candidate Ranking + Setup Quality (Section 7, Section 15).
+#
+# The ranking engine scores every candidate across the active universe with a
+# DETERMINISTIC setup-quality score (Section 15), drops anything tripping a hard
+# blocker, and ranks the survivors before risk approval (Section 7). Regime match
+# does NOT authorise a trade — it only allows setup evaluation (Section 15).
+#
+# The weight of each component is fixed by Section 15 (max points per component);
+# the pass `threshold` is a TUNABLE validated via walk-forward (SETUP gate). All
+# behaviour is config-driven and versioned (Section 4).
+
+version: 1
+
+ranking:
+  ranking_version: rank_0001
+
+  # Section 15 score components — max points (sum = 100). These are the spec's
+  # fixed maxima; do not change without a Section 15 amendment + new version.
+  components:
+    regime_alignment: 20
+    signal_strength: 20
+    cross_signal_confirmation: 15
+    expected_move_after_costs: 15
+    execution_quality: 15
+    risk_reward_quality: 10
+    session_context: 5
+
+  # Minimum total setup_quality_score to be eligible (Section 15). Justified via
+  # walk-forward (a tunable); below it a candidate is skipped, not traded.
+  threshold: 55.0
+
+  # Risk/reward target used to score the RR component (reward:risk that earns full
+  # marks). Momentum candidates with "no fixed TP" are credited at the cap.
+  rr_target: 2.0
+
+  # Execution-quality scoring references (Section 18 hard-blocker thresholds are
+  # the same caps the execution engine enforces).
+  max_spread_bps: 25.0
+  max_slippage_frac: 0.01
+
+  # Tie-break ranking key after setup_quality_score: prefer higher expected value
+  # net of costs (Section 9 "expected edge after costs is positive").
+  rank_by: ["setup_quality_score", "expected_value_after_costs"]

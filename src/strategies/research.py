@@ -84,9 +84,7 @@ class CandidateValidation:
         }
 
 
-def _decide_sides(
-    report: BacktestReport, min_side_expectancy_r: float
-) -> SideDecision:
+def _decide_sides(report: BacktestReport, min_side_expectancy_r: float) -> SideDecision:
     """Keep a side only if it traded and its expectancy_r clears the floor."""
     sb = report.payload["side_breakdown"]
     long_e = float(sb["long"]["expectancy_r"])

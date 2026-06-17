@@ -78,9 +78,7 @@ class PortfolioStrategy(Protocol):
     def strategy_version(self) -> str:
         """Versioned strategy parameters (read-only; Section 4)."""
 
-    def evaluate_portfolio(
-        self, symbol: str, row: dict, peers: dict[str, dict]
-    ) -> Signal | None:
+    def evaluate_portfolio(self, symbol: str, row: dict, peers: dict[str, dict]) -> Signal | None:
         """Return a :class:`Signal` for ``symbol`` given its row + peer rows, or None."""
 
 

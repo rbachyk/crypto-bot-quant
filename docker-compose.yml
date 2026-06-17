@@ -66,7 +66,7 @@ services:
       - "127.0.0.1:6379:6379"
 
   backend:
-    <<: [*app-build, *app-env]
+    <<: *app-build
     environment:
       <<: *app-env
       SERVICE_NAME: backend
@@ -86,7 +86,7 @@ services:
       - "8000"
 
   dashboard:
-    <<: [*app-build, *app-env]
+    <<: *app-build
     environment:
       <<: *app-env
       SERVICE_NAME: dashboard
@@ -100,7 +100,7 @@ services:
       - "8001"
 
   worker-data:
-    <<: [*app-build, *app-env]
+    <<: *app-build
     environment:
       <<: *app-env
       SERVICE_NAME: worker-data
@@ -112,7 +112,7 @@ services:
         condition: service_healthy
 
   worker-backtest:
-    <<: [*app-build, *app-env]
+    <<: *app-build
     environment:
       <<: *app-env
       SERVICE_NAME: worker-backtest
@@ -122,7 +122,7 @@ services:
         condition: service_healthy
 
   worker-ml:
-    <<: [*app-build, *app-env]
+    <<: *app-build
     environment:
       <<: *app-env
       SERVICE_NAME: worker-ml
@@ -132,7 +132,7 @@ services:
         condition: service_healthy
 
   worker-rl:
-    <<: [*app-build, *app-env]
+    <<: *app-build
     environment:
       <<: *app-env
       SERVICE_NAME: worker-rl
@@ -142,7 +142,7 @@ services:
         condition: service_healthy
 
   worker-reports:
-    <<: [*app-build, *app-env]
+    <<: *app-build
     environment:
       <<: *app-env
       SERVICE_NAME: worker-reports
@@ -152,7 +152,7 @@ services:
         condition: service_healthy
 
   scheduler:
-    <<: [*app-build, *app-env]
+    <<: *app-build
     environment:
       <<: *app-env
       SERVICE_NAME: scheduler
@@ -162,7 +162,7 @@ services:
         condition: service_healthy
 
   trading-engine-paper:
-    <<: [*app-build, *app-env]
+    <<: *app-build
     environment:
       <<: *app-env
       SERVICE_NAME: trading-engine-paper
@@ -178,7 +178,7 @@ services:
   # DISABLED BY DEFAULT — only starts with `--profile live` AND a production,
   # explicitly live-enabled config (see src.config.Settings safety validator).
   trading-engine-live:
-    <<: [*app-build, *app-env]
+    <<: *app-build
     profiles: ["live"]
     environment:
       <<: *app-env

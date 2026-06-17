@@ -24,7 +24,7 @@ from src.backtest.config import BacktestConfig, load_backtest_config
 from src.backtest.engine import BacktestEngine, BacktestResult, SymbolInput
 from src.backtest.metrics import BacktestReport, build_report
 from src.backtest.reference import ReferenceReader
-from src.backtest.strategy import ReferenceMomentumStrategy, Strategy
+from src.backtest.strategy import PortfolioStrategy, ReferenceMomentumStrategy, Strategy
 from src.config import Settings, get_settings
 from src.data.schema import SPREAD, timeframe_ms
 from src.exchange.metadata import MetadataConfig, load_metadata_config
@@ -170,7 +170,7 @@ def run_engine(
     cfg: BacktestConfig,
     meta: MetadataConfig,
     inputs: list[SymbolInput],
-    strategy: Strategy | None = None,
+    strategy: Strategy | PortfolioStrategy | None = None,
     *,
     label: str = "",
 ) -> BacktestRunResult:

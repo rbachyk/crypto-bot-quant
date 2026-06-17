@@ -51,3 +51,28 @@ def test_api_me_requires_auth() -> None:
 def test_enqueue_unknown_job_rejected() -> None:
     resp = client.post("/api/jobs/not_a_real_job", auth=AUTH)
     assert resp.status_code == 400
+
+
+def test_dashboard_killswitch_engage_and_recovery(tmp_path) -> None:
+    # Isolated kill switch (own data lake, unreachable redis ⇒ file backend) so the
+    # test never touches shared state (AGENTS.md Section 2.2, KILL gate).
+    iso = Settings(
+        _env_file=None,
+        app_env="paper",
+        dashboard_auth_mode="basic",
+        dashboard_username="admin",
+        dashboard_password="secret",
+        data_lake_path=tmp_path / "dl",
+        redis_url="redis://127.0.0.1:1/0",
+    )
+    c = TestClient(create_app(iso))
+
+    assert c.post("/api/killswitch/engage").status_code == 401  # auth required
+    engaged = c.post("/api/killswitch/engage", auth=AUTH)
+    assert engaged.status_code == 200 and engaged.json()["engaged"] is True
+
+    # Recovery requires an explicit manual confirmation (Section 35).
+    assert c.post("/api/killswitch/disengage", auth=AUTH).status_code == 400
+    assert c.get("/api/killswitch", auth=AUTH).json()["engaged"] is True
+    cleared = c.post("/api/killswitch/disengage?confirm=true", auth=AUTH)
+    assert cleared.status_code == 200 and cleared.json()["engaged"] is False

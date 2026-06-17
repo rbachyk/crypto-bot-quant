@@ -76,7 +76,9 @@ class _FixtureReader(FeatureDataReader):
         }.get(data_type, [])
 
 
-def _ohlcv_from_returns(seed: str, returns: list[float], iv: int, base: float = 100.0) -> list[dict]:
+def _ohlcv_from_returns(
+    seed: str, returns: list[float], iv: int, base: float = 100.0
+) -> list[dict]:
     """Build OHLCV bars from per-bar returns with realistic intrabar wicks.
 
     ``returns[i]`` is bar ``i``'s close-over-close return (``returns[0]`` ignored).
@@ -228,7 +230,7 @@ def _xsection_returns(cand: CandidateConfig, edge: bool) -> dict[str, list[float
     shock = float(v["idio_shock"]) if edge else 0.0
     noise = float(v["idio_noise"])
     market = [0.0] + [_sym(f.seed, "mkt", i) * msig for i in range(1, n)]
-    idio = {s: 0.0 for s in symbols}
+    idio = dict.fromkeys(symbols, 0.0)
     out: dict[str, list[float]] = {s: [0.0] for s in symbols}
     for i in range(1, n):
         for s in symbols:

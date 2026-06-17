@@ -34,6 +34,17 @@ class _BaseCandidate:
     def name(self) -> str:
         return self.candidate.id
 
+    @property
+    def hypothesis(self) -> StrategyHypothesis:
+        """Every candidate declares its full Section 13 hypothesis before it trades."""
+        raise NotImplementedError
+
+    def evaluate(self, row: dict) -> Signal | None:
+        """Per-symbol decision. Cross-asset families override evaluate_portfolio instead
+        (the engine dispatches on hasattr(evaluate_portfolio)); calling this on one is a bug.
+        Declared here so a built candidate satisfies the engine's Strategy protocol."""
+        raise NotImplementedError
+
     def _sided(self, side: int, reason: str) -> Signal | None:
         if side > 0 and not self.params.allow_long:
             return None
@@ -77,14 +88,19 @@ class BasisReversionStrategy(_BaseCandidate):
             entry="premium > +threshold ⇒ short; premium < -threshold ⇒ long",
             exit="near fixed TP (reversion) or wider SL or time-stop (mean-reversion geometry)",
             invalidation="premium widens through the SL (regime break / one-way repricing)",
-            risk_assumptions="explicit initial SL (stop_frac) anchors per-trade sizing (Section 17)",
+            risk_assumptions="explicit initial SL (stop_frac) anchors per-trade sizing",
             cost_assumptions="reversion must exceed 2×taker fee + slippage + funding over the hold",
             failure_modes=(
                 "trend repricing (premium keeps widening)",
                 "funding flips the carry against the position",
                 "thin liquidity inflates slippage past the captured reversion",
             ),
-            validation_tests=("walk-forward", "fee ×2 stress", "slippage +50% stress", "noise control"),
+            validation_tests=(
+                "walk-forward",
+                "fee ×2 stress",
+                "slippage +50% stress",
+                "noise control",
+            ),
             promotion_criteria="WF + FEE + SLIP PASS on the surviving side(s); else shelve",
             exit_profile="mean_reversion",
             notes="Funding may support or block a setup; it never creates one (Section 12.B/C).",
@@ -129,14 +145,19 @@ class LeadLagStrategy(_BaseCandidate):
             entry="|leader last-bar return| > threshold ⇒ follower in the leader's direction",
             exit="time-stop after a few bars (capture the lagged burst); no fixed TP; initial SL",
             invalidation="follower fails to follow and hits the initial SL",
-            risk_assumptions="explicit initial SL (stop_frac) anchors per-trade sizing (Section 17)",
+            risk_assumptions="explicit initial SL (stop_frac) anchors per-trade sizing",
             cost_assumptions="lagged response must exceed 2×taker fee + slippage over the hold",
             failure_modes=(
                 "lead-lag decays / reverses (followers already repriced)",
                 "leader move is noise, not signal",
                 "follower-specific shock dominates the lagged response",
             ),
-            validation_tests=("walk-forward", "fee ×2 stress", "slippage +50% stress", "noise control"),
+            validation_tests=(
+                "walk-forward",
+                "fee ×2 stress",
+                "slippage +50% stress",
+                "noise control",
+            ),
             promotion_criteria="WF + FEE + SLIP PASS on the surviving side(s); else shelve",
             exit_profile="momentum",
             notes="Cross-asset family: decided from peer rows at the same decision time (causal).",
@@ -184,20 +205,25 @@ class CrossSectionalRSStrategy(_BaseCandidate):
             market_condition="dispersed universe; market-wide impulse with idiosyncratic spread",
             edge_source="persistent cross-sectional relative strength (dispersion)",
             data_requirements=("returns across the universe",),
-            entry="relative strength vs cross-sectional mean > +threshold ⇒ long; < -threshold ⇒ short",
+            entry="rel. strength vs cross-sectional mean > +thr ⇒ long; < -thr ⇒ short",
             exit="time-stop (relative-strength continuation); no fixed TP; initial SL",
             invalidation="relative strength mean-reverts and the position hits the initial SL",
-            risk_assumptions="explicit initial SL (stop_frac) anchors per-trade sizing (Section 17)",
+            risk_assumptions="explicit initial SL (stop_frac) anchors per-trade sizing",
             cost_assumptions="dispersion spread must exceed 2×taker fee + slippage over the hold",
             failure_modes=(
                 "relative strength reverses (mean-reversion regime)",
                 "single common factor dominates (no dispersion to harvest)",
                 "illiquid laggards inflate slippage on the short leg",
             ),
-            validation_tests=("walk-forward", "fee ×2 stress", "slippage +50% stress", "noise control"),
+            validation_tests=(
+                "walk-forward",
+                "fee ×2 stress",
+                "slippage +50% stress",
+                "noise control",
+            ),
             promotion_criteria="WF + FEE + SLIP PASS on the surviving side(s); else shelve",
             exit_profile="momentum",
-            notes="Cross-asset family: ranks the symbol against its peers at the same decision time.",
+            notes="Cross-asset: ranks the symbol against its peers at the same decision time.",
         )
 
     def evaluate_portfolio(self, symbol: str, row: dict, peers: dict[str, dict]) -> Signal | None:

@@ -43,22 +43,22 @@ def test_result_persisted_to_db() -> None:
 
 @requires_redis
 def test_dependency_blocks_downstream() -> None:
-    # RISK depends on SETUP, which has no check yet (NOT_RUN, introduced in Phase 5)
-    # -> RISK is BLOCKED on the unmet dependency (Appendix A dependency rules).
-    # (BT/WF/FEE/SLIP now have checks and PASS as of Phase 4, so they no longer
-    # block their downstreams — the first unimplemented upstream is SETUP.)
+    # PAPER-B depends on PAPER-A, which has no check yet (NOT_RUN, introduced after Phase 6)
+    # -> PAPER-B is BLOCKED on the unmet dependency (Appendix A dependency rules).
+    # (SETUP/RISK/EXEC/KILL/ORDER-OWN now have checks and PASS as of Phase 6, so they no
+    # longer block their downstreams — the first unimplemented upstream is now PAPER-A.)
     runner = GateRunner()
-    risk = runner.run("RISK")
-    assert risk.overall == "BLOCKED"
-    assert "SETUP" in risk.note
+    paper_b = runner.run("PAPER-B")
+    assert paper_b.overall == "BLOCKED"
+    assert "PAPER-A" in paper_b.note
 
 
 @requires_redis
 def test_blocked_gate_creates_remediation_actions() -> None:
-    GateRunner().run("RISK")
+    GateRunner().run("PAPER-B")
     with session_scope() as session:
         actions = (
-            session.execute(select(RemediationAction).where(RemediationAction.gate_id == "RISK"))
+            session.execute(select(RemediationAction).where(RemediationAction.gate_id == "PAPER-B"))
             .scalars()
             .all()
         )

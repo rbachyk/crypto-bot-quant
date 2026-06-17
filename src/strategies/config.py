@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -43,7 +44,9 @@ class FixtureConfig:
     seed: str
     bars: int
     timeframe: str
-    values: dict[str, object]
+    # Heterogeneous per-fixture params straight from YAML (floats, ints, strings, string
+    # lists). Consumers convert explicitly at each use (float(...)/int(...)/str(...)).
+    values: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)

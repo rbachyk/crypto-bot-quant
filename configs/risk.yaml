@@ -1,0 +1,52 @@
+# risk.yaml — Risk Manager policy (AGENTS.md Section 17, RISK gate).
+#
+# The risk manager has ABSOLUTE authority and must approve every order
+# (Section 17). Sizing is deterministic in v1: size = (equity × risk_pct) /
+# |entry − stop|, with leverage a *consequence* of notional/equity capped by the
+# envelope (Section 2.2). No Kelly, no martingale, no averaging-down.
+#
+# `risk_envelope` is the IMMUTABLE box (Section 2.2): no optimizer, ML model or
+# learner may widen, disable or exceed it. The hard caps below are also enforced
+# in code (src/risk/envelope.py) regardless of what a config edit says — a config
+# can only make the policy *tighter*, never looser than the code-level ceilings.
+
+version: 1
+
+risk:
+  risk_policy_version: risk_0001
+
+  # --- Immutable risk envelope (Section 2.2) -------------------------------- #
+  # These are version-controlled constants. Learning may only act INSIDE this box.
+  risk_envelope:
+    max_leverage: 5
+    max_risk_pct_per_trade: 0.01     # 1% equity per trade (the risk_cap)
+    portfolio_heat_cap: 0.05         # 5% total open risk across positions
+    net_beta_btc_cap: 0.30           # 30% net beta-to-BTC
+    daily_loss_limit: 0.03           # 3% equity/day → halt to manual reset
+    max_drawdown_limit: 0.10         # 10% from peak → halt to manual reset
+
+  # --- Deterministic sizing (within the envelope) --------------------------- #
+  # base_risk_pct must be <= envelope.max_risk_pct_per_trade; it is clamped in
+  # code if a config edit ever sets it higher (the envelope is the ceiling).
+  base_risk_pct: 0.005               # 0.5% equity per trade (conservative default)
+
+  # --- Concurrency limits (Section 17 portfolio-level) ---------------------- #
+  max_concurrent_total: 5
+  max_concurrent_per_symbol: 1
+  max_concurrent_per_regime: 3
+
+  # --- Circuit breakers (Section 17) ---------------------------------------- #
+  breakers:
+    consecutive_loss_limit: 4        # N consecutive max-losses → cooldown
+    abnormal_slippage_cooldown: true # abnormal-slippage flag halts new entries
+    require_reconciled: true         # unreconciled exchange state → halt (Section 17)
+
+  # --- Per-symbol beta-to-BTC (Section 17 net-beta cap) --------------------- #
+  # Placeholder betas for the offline `skeleton` venue (BTC is the reference =1.0).
+  # A real deployment measures rolling beta from data (Feature Pipeline) and bumps
+  # risk_policy_version; these are deliberately conservative round numbers.
+  symbol_beta_to_btc:
+    "BTC/USDT:USDT": 1.0
+    "ETH/USDT:USDT": 0.85
+    "SOL/USDT:USDT": 1.15
+  default_beta_to_btc: 1.0

@@ -19,6 +19,13 @@ from src.config import Settings, get_settings
 from src.config.settings import REPO_ROOT
 from src.db.base import get_engine
 from src.db.models import JobStatus
+from src.gates.phase6 import (
+    check_exec,
+    check_kill,
+    check_order_own,
+    check_risk,
+    check_setup,
+)
 from src.gates.result import Criterion
 from src.killswitch import KillSwitch
 from src.monitoring import Alert, AlertSeverity, check_health, get_alert_sink
@@ -1487,6 +1494,12 @@ CHECKS: dict[str, Callable[[Settings], list[Criterion]]] = {
     "SLIP": check_slip,
     "MON": check_mon,
     "BACKUP": check_backup,
+    # Phase 6 — Ranking, Risk, Execution core.
+    "SETUP": check_setup,
+    "RISK": check_risk,
+    "EXEC": check_exec,
+    "KILL": check_kill,
+    "ORDER-OWN": check_order_own,
 }
 
 

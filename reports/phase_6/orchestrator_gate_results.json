@@ -1,0 +1,460 @@
+[
+  {
+    "gate_id": "SETUP",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "deterministic_reproducible",
+        "title": "deterministic_reproducible",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "score=89.3250 reproduced exactly"
+      },
+      {
+        "id": "components_documented",
+        "title": "components_documented",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "7/7 components, each within max; sum==89.3250"
+      },
+      {
+        "id": "threshold_validated",
+        "title": "threshold_validated",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "threshold=55.0 of 100.0"
+      },
+      {
+        "id": "good_setup_approved",
+        "title": "good_setup_approved",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "score=89.3 >= 55.0, approved"
+      },
+      {
+        "id": "hard_blockers_enforced",
+        "title": "hard_blockers_enforced",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "toxic-spread / no-trade-regime / negative-EV / stale-data all rejected despite passing score"
+      },
+      {
+        "id": "ranking_attributes_decision",
+        "title": "ranking_attributes_decision",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "winner score=91.8; 2 rejected alternatives recorded"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/SETUP_20260617T144804.json",
+    "note": ""
+  },
+  {
+    "gate_id": "RISK",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "sizing_formula_correct",
+        "title": "sizing_formula_correct",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "risk_amount=500.00 \u2248 equity\u00d7risk_pct=500.00 (qty=0.5, lev=0.250)"
+      },
+      {
+        "id": "risk_pct_within_envelope",
+        "title": "risk_pct_within_envelope",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "risk_pct_used=0.0050 <= cap 0.01; config clamps to code ceilings"
+      },
+      {
+        "id": "leverage_capped",
+        "title": "leverage_capped",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "tiny-stop candidate resized: leverage=0.30 <= 5.0"
+      },
+      {
+        "id": "min_notional_gate",
+        "title": "min_notional_gate",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "sub-minimum order rejected: ('below_min_order_size(qty=0<0.1)',)"
+      },
+      {
+        "id": "portfolio_heat_cap_enforced",
+        "title": "portfolio_heat_cap_enforced",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "resized to fit heat: total heat=0.0500 <= 0.05"
+      },
+      {
+        "id": "net_beta_cap_enforced",
+        "title": "net_beta_cap_enforced",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "over-cap book rejects (('net_beta_cap_full(net=0.3060, cap=0.3)',)); partial book resizes to net=0.300 <= 0.3"
+      },
+      {
+        "id": "max_positions_enforced",
+        "title": "max_positions_enforced",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "full book rejects new entry: ('max_concurrent_total',)"
+      },
+      {
+        "id": "daily_loss_breaker",
+        "title": "daily_loss_breaker",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "halted: daily_loss_limit(0.0350>=0.03)"
+      },
+      {
+        "id": "drawdown_breaker",
+        "title": "drawdown_breaker",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "halted: max_drawdown_limit(0.1200>=0.1)"
+      },
+      {
+        "id": "reconciliation_halts",
+        "title": "reconciliation_halts",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "unreconciled state and unknown order both halt"
+      },
+      {
+        "id": "kill_switch_blocks",
+        "title": "kill_switch_blocks",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "kill switch halts new entries; clears on reset"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/RISK_20260617T144812.json",
+    "note": ""
+  },
+  {
+    "gate_id": "EXEC",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "order_types_supported",
+        "title": "order_types_supported",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "all 5 types implemented"
+      },
+      {
+        "id": "builder_respects_constraints",
+        "title": "builder_respects_constraints",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "tick/lot/min-notional respected; bad size rejected"
+      },
+      {
+        "id": "atomic_exchange_side_sl_tp",
+        "title": "atomic_exchange_side_sl_tp",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "entry attaches exchange-resident SL + TP atomically"
+      },
+      {
+        "id": "native_trailing_stop",
+        "title": "native_trailing_stop",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "momentum exit uses an exchange-native trailing stop"
+      },
+      {
+        "id": "cancel_and_replace",
+        "title": "cancel_and_replace",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "cancel + atomic cancel/replace work on own orders"
+      },
+      {
+        "id": "partial_fill_handled",
+        "title": "partial_fill_handled",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "partial fill 0.5: filled=0.3, remaining=0.3"
+      },
+      {
+        "id": "slippage_measured",
+        "title": "slippage_measured",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "taker fill expected=50000.00 actual=50040.00 slippage_frac=0.00080"
+      },
+      {
+        "id": "reconciliation_works",
+        "title": "reconciliation_works",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "own-only book reconciles cleanly (no false halt)"
+      },
+      {
+        "id": "revalidate_before_execute",
+        "title": "revalidate_before_execute",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "toxic-spread signal not placed: toxic_spread(80.0bps)"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/EXEC_20260617T144818.json",
+    "note": ""
+  },
+  {
+    "gate_id": "KILL",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "cli_kill_independent",
+        "title": "cli_kill_independent",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "CLI/file kill switch toggles with no web process"
+      },
+      {
+        "id": "halts_trading",
+        "title": "halts_trading",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "risk blocks + execution refuses while engaged"
+      },
+      {
+        "id": "dashboard_kill_works",
+        "title": "dashboard_kill_works",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "dashboard engage halts and reflects engaged state"
+      },
+      {
+        "id": "alert_on_activation",
+        "title": "alert_on_activation",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "kill-switch activation fires a critical alert"
+      },
+      {
+        "id": "recovery_requires_manual_review",
+        "title": "recovery_requires_manual_review",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "disengage refused without confirm; cleared only on explicit manual confirm"
+      },
+      {
+        "id": "tested_in_paper",
+        "title": "tested_in_paper",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "deliberate trip in mode=PAPER"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/KILL_20260617T144826.json",
+    "note": ""
+  },
+  {
+    "gate_id": "ORDER-OWN",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "ownership_configured",
+        "title": "ownership_configured",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "prefix='QBOT_LOCAL_v1_' instance='QBOT_LOCAL'"
+      },
+      {
+        "id": "all_orders_prefixed",
+        "title": "all_orders_prefixed",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "3 legs carry the prefix + provenance tags"
+      },
+      {
+        "id": "unknown_order_detected",
+        "title": "unknown_order_detected",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "foreign order flagged + halt: ('MANUAL_humantrader_42',); alert fired=True"
+      },
+      {
+        "id": "unknown_position_detected",
+        "title": "unknown_position_detected",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "foreign position flagged + halt: ('XRP/USDT:USDT',)"
+      },
+      {
+        "id": "cleanup_touches_only_own",
+        "title": "cleanup_touches_only_own",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "refuses to cancel the foreign order; cancels its own"
+      },
+      {
+        "id": "emergency_close_requires_confirmation",
+        "title": "emergency_close_requires_confirmation",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "refused without confirm; ran with confirm"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/ORDER-OWN_20260617T144835.json",
+    "note": ""
+  }
+]

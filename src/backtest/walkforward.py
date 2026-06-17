@@ -127,7 +127,9 @@ def run_walk_forward(
     holdout_report: BacktestReport | None = None
     if holdout_bars > 0:
         windowed = rebase_window(inputs, test_end_ts, span_ts)
-        holdout_report = run_engine(cfg, meta, windowed, strategy=strategy, label="wf_holdout").report
+        holdout_report = run_engine(
+            cfg, meta, windowed, strategy=strategy, label="wf_holdout"
+        ).report
         holdout_passed = holdout_report.expectancy_r > 0 and holdout_report.net_pnl > 0
         out.holdout = FoldResult(-1, test_end_ts, span_ts, holdout_passed, [], holdout_report)
 

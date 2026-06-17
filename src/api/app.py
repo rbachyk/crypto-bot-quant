@@ -18,7 +18,7 @@ from src.api.auth import require_dashboard_auth
 from src.config import Settings, get_settings
 from src.db.base import session_scope
 from src.db.models import GateResult, Job
-from src.monitoring import check_health, get_alert_sink
+from src.monitoring import Alert, AlertSeverity, check_health, get_alert_sink
 from src.observability import configure_logging
 
 DASHBOARD_PAGES = [
@@ -177,6 +177,61 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from src.killswitch import KillSwitch
 
         return KillSwitch(settings).status()
+
+    @app.post("/api/killswitch/engage")
+    def killswitch_engage(
+        reason: str = "dashboard manual kill",
+        user: str = Depends(require_dashboard_auth),
+    ) -> dict:
+        # The dashboard kill switch halts trading; it shares the redundant backend
+        # with the CLI so either path halts the bot (Section 2.2, KILL gate).
+        from src.killswitch import KillSwitch
+
+        KillSwitch(settings).engage(reason=reason, actor=f"dashboard:{user}")
+        get_alert_sink().send(
+            Alert(
+                title="kill switch engaged",
+                severity=AlertSeverity.CRITICAL,
+                component="safety",
+                environment=settings.app_env.value,
+                recommended_action=("Trading halted. Resume requires manual review (Section 35)."),
+            )
+        )
+        _audit("killswitch_engage", target="killswitch", actor=user, detail={"reason": reason})
+        return KillSwitch(settings).status()
+
+    @app.post("/api/killswitch/disengage")
+    def killswitch_disengage(
+        confirm: bool = False,
+        user: str = Depends(require_dashboard_auth),
+    ) -> dict:
+        # Recovery is a deliberate manual action (Section 35): refuse without confirm.
+        from src.killswitch import KillSwitch
+
+        if not confirm:
+            raise HTTPException(
+                status_code=400, detail="disengage requires confirm=true (manual review)"
+            )
+        KillSwitch(settings).disengage(actor=f"dashboard:{user}")
+        _audit("killswitch_disengage", target="killswitch", actor=user, detail={})
+        return KillSwitch(settings).status()
+
+    def _audit(action: str, *, target: str, actor: str, detail: dict) -> None:
+        from src.db.models import AuditLog
+
+        try:
+            with session_scope() as session:
+                session.add(
+                    AuditLog(
+                        actor=actor,
+                        action=action,
+                        target=target,
+                        environment=settings.app_env.value,
+                        detail=detail,
+                    )
+                )
+        except Exception:  # noqa: BLE001 - auditing must never break the safety action
+            pass
 
     return app
 
