@@ -1,0 +1,116 @@
+{
+  "phase": 4,
+  "name": "Backtest Engine",
+  "coder": "Claude Opus 4.8 (Coding Agent)",
+  "date": "2026-06-17",
+  "branch": "phase/4",
+  "base_commit": "0bccbca",
+  "config_version": "cfg_0001",
+  "backtest_version": "bt_0001",
+  "data_version": "data_0001",
+  "metadata_version": "meta_0001",
+  "universe_version": "univ_0001",
+  "feature_set_version": "feat_0001",
+  "strategy_version": "ref_bt_0001 (reference engine self-test only; real candidates are Phase 5)",
+  "scope_implemented": [
+    "Event-based backtest engine (Section 19): src/backtest/engine.py walks one chronological bar grid; per bar it charges funding on open positions, manages stops/take-profits/time-stops against the bar's own high/low, then opens positions from signals decided on the PREVIOUS bar's close. Look-ahead prevention is STRUCTURAL: a signal for bar k (decision_ts=(k+1)*iv) can only fill at bar k+1's open, so no decision reads its own close or any future bar.",
+    "Fee/slippage/funding cost models tied to VERIFIED metadata (src/backtest/costs.py): maker/taker fees from configs/metadata.yaml ([VERIFIED], META gate); slippage = half-spread + notional-vs-liquidity impact, always adverse to the taker; funding charged to open positions at each funding timestamp (longs pay positive funding). fee_/slippage_/funding_multiplier are the single stress knobs.",
+    "Risk simulation (src/backtest/risk.py, Section 17): per-trade sizing size=(equity*risk_pct)/|entry-stop|, leverage-as-consequence cap, metadata min-notional/min-order-size/lot-step gate; rejects candidates the real risk manager would (portfolio heat/net-beta caps deliberately deferred to the Phase 6 risk manager, not faked).",
+    "Execution simulation + rejected-candidate logging (Section 18/19): next-bar-open fills, taker entry/exit with adverse slippage, toxic-spread + slippage-estimate hard-blockers, concurrency caps; every blocked candidate logged with reason (src/backtest/engine.py RejectedCandidate).",
+    "Report generator (src/backtest/metrics.py): all Section 19 required outputs - total return, net PnL, expectancy (R), profit factor, max drawdown, trade count; symbol/strategy/regime/session/long-short breakdowns; cost/slippage/funding breakdowns; rejected-candidate breakdown; worst trades; stability metrics. Capital-agnostic (returns + R-multiples).",
+    "Integrity guards (src/backtest/guards.py, Section 19): noise_expectancy runs the SAME engine on a structureless series and requires ~0 expectancy (engine-level look-ahead/leakage guard); future_universe_violations proves no symbol is traded before its activation_ts (survivorship/future-universe guard; SOL activates partway through to exercise it).",
+    "Walk-forward harness (src/backtest/walkforward.py, Section 16): >=K disjoint time-ordered OOS folds judged against up-front kill-criteria, plus a LOCKED hold-out evaluated exactly once; passes only when >=min_folds_passed folds clear all kill-criteria AND the hold-out is positive net of costs.",
+    "Fee/slippage stress runners (src/backtest/stress.py, Section 16): re-run the same backtest with x2 fees / +50% slippage and require the edge survives net of costs.",
+    "Deterministic reference fixture (src/backtest/reference.py): offline, reproducible series with a planted causal momentum edge (edge=trend) and a no-structure mode (edge=noise) for the look-ahead guard; reused via build_reference_inputs (memoized) through the single feature pipeline (Parity Rule).",
+    "Config + persistence: configs/backtest.yaml (backtest_version bt_0001 + cost/fold/kill-criteria/stress knobs, all version-bumpable); BacktestRun relational index + Alembic migration 0004 (idempotent create_all checkfirst); full reports written to the regenerable reports lake as JSON.",
+    "Gate checks wired into the Gate Runner: BT, WF, FEE, SLIP (src/gates/checks.py) + dependency graph in configs/gates.yaml (BT<-DATA-COV,DQ,UNIV,META,FEAT; WF<-BT; FEE/SLIP<-BT,WF)."
+  ],
+  "acceptance_criteria": [
+    {
+      "criterion": "Event-based engine with fee/slippage/funding models tied to verified metadata; rejected-candidate logging; risk+execution simulation; report generator",
+      "met": true,
+      "evidence": "src/backtest/{engine,costs,risk,metrics}.py; BT gate PASS (engine_completes=306 trades/2678 rejected, realistic_costs_modeled fees=20020.85 slippage=6308.44 funding=-97.06, fees_from_verified_metadata, all_required_outputs_present=17 metrics); tests/test_backtest.py (cost adverse-to-taker, Section 17 sizing identity, leverage cap, min-notional gate, costs charged per trade, rejected-candidate logging, all required outputs)."
+    },
+    {
+      "criterion": "Look-ahead / survivorship / future-universe guards enforced and tested",
+      "met": true,
+      "evidence": "Structural next-bar-open fill asserted in tests/test_backtest.py::test_engine_fills_signal_at_next_bar_open_not_own_close; noise series ~0 expectancy (BT no_lookahead_noise: expectancy_r=-0.1059 <= 0.05); future_universe_violations == [] with a late-activating symbol exercised (BT no_future_universe_leakage). docs/decisions/0005."
+    },
+    {
+      "criterion": "Gates PASS: BT, WF, FEE, SLIP",
+      "met": true,
+      "evidence": "uv run python -m src.gates.runner --gate {BT|WF|FEE|SLIP} -> PASS; WF 5/5 folds clear kill-criteria (need 4), locked hold-out expectancy_r=0.252 net_pnl=9753.33 evaluated once; FEE x2 -> expectancy_r=0.120 net_pnl=20069.26 survives; SLIP +50% -> expectancy_r=0.213 net_pnl=38324.11 survives; reports/phase_4/orchestrator_gate_results.json; tests/test_phase4_gates.py."
+    },
+    {
+      "criterion": "New/changed code has tests; pytest, ruff, mypy green; coverage thresholds met on critical modules",
+      "met": true,
+      "evidence": "136 passed (was 101); 32 new tests (tests/test_backtest.py 29 offline engine/cost/risk/guard/wf/stress tests + tests/test_phase4_gates.py 3 gate-integration tests/7 cases). ruff check + format clean (90 files); mypy Success (66 source files). Risk simulation, cost models, engine, guards, walk-forward and stress covered by direct unit tests."
+    },
+    {
+      "criterion": "No forbidden shortcut; no live-mode default; no secrets committed (Appendix B.17 / Section 30)",
+      "met": true,
+      "evidence": "No live trading path; reference series is a labelled offline fixture never used for a live decision; runs are versioned (backtest_runs + content-addressed run_id), full reports in the git-ignored regenerable reports lake; TRADING_MODE=PAPER + live disabled unchanged; no keys added; vectorized shortcut avoided (engine is strictly event-based)."
+    },
+    {
+      "criterion": "All new runtime behavior is config-driven and versioned (Section 4)",
+      "met": true,
+      "evidence": "configs/backtest.yaml pins backtest_version bt_0001 and every cost assumption, fold layout, kill-criterion and stress multiplier; with_cost_overrides keeps stress runs on the same code path; BacktestRun rows carry related_versions; reports embed settings.versions()."
+    },
+    {
+      "criterion": "Completion Report filled; docs/decisions updated for assumptions",
+      "met": true,
+      "evidence": "this file; docs/decisions/0005-phase-4-backtest-engine.md."
+    }
+  ],
+  "gates_run": [
+    {
+      "gate_id": "BT",
+      "result": "PASS",
+      "report_path": "reports/gates/BT_<ts>.json",
+      "criteria": ["engine_completes", "parity_rule_single_pipeline", "realistic_costs_modeled", "fees_from_verified_metadata", "all_required_outputs_present", "no_lookahead_noise", "no_future_universe_leakage", "sane_results"]
+    },
+    {
+      "gate_id": "WF",
+      "result": "PASS",
+      "report_path": "reports/gates/WF_<ts>.json",
+      "criteria": ["walk_forward_completes", "min_folds_passed", "edge_not_isolated", "locked_holdout_positive"]
+    },
+    {
+      "gate_id": "FEE",
+      "result": "PASS",
+      "report_path": "reports/gates/FEE_<ts>.json",
+      "criteria": ["baseline_positive", "survives_fee_stress", "edge_not_fee_dependent"]
+    },
+    {
+      "gate_id": "SLIP",
+      "result": "PASS",
+      "report_path": "reports/gates/SLIP_<ts>.json",
+      "criteria": ["baseline_positive", "survives_slippage_stress", "edge_not_slippage_dependent"]
+    }
+  ],
+  "tests": {
+    "pytest": "136 passed, 1 warning",
+    "new_test_files": [
+      "tests/test_backtest.py",
+      "tests/test_phase4_gates.py"
+    ],
+    "updated_test_files": [
+      "tests/test_gates.py (BT/WF now PASS as of Phase 4; the dependency-blocking + remediation invariants are now exercised via RISK<-SETUP, still NOT_RUN until Phase 5)"
+    ],
+    "coverage_risk_exec_adaptation": "backtest risk simulation + execution simulation covered by tests/test_backtest.py; the full Phase 6 risk/exec modules are not implemented yet (adaptation is later).",
+    "ruff": "ok (All checks passed; 90 files formatted)",
+    "mypy": "ok (no issues found in 66 source files)"
+  },
+  "assumptions_and_decisions": [
+    "docs/decisions/0005-phase-4-backtest-engine.md (deterministic reference strategy+series as the engine self-test until Phase 5 ships real candidates; structural next-bar-open look-ahead prevention; cost models tied to VERIFIED metadata with multipliers as the only stress knobs; risk simulation deliberately under-promises portfolio heat/net-beta until the Phase 6 risk manager; notional-train walk-forward with a once-only locked hold-out; config-pinned backtest_version + content-addressed indexed runs; capital-agnostic reporting)."
+  ],
+  "known_gaps_risks": [
+    "The reference strategy and series are a deterministic offline self-test fixture with a PLANTED causal edge - they exercise and prove the engine/walk-forward/stress machinery and gates, not a real tradable edge. Real research candidates (Section 12 families) flow through the identical engine in Phase 5.",
+    "Risk simulation enforces per-trade sizing, leverage-as-consequence and the min-notional/lot-step gate; portfolio heat, net-beta-to-BTC and correlation caps are deferred to the Phase 6 risk manager (RISK gate) rather than faked.",
+    "Spread/impact slippage uses modelled spread samples from the reference fixture and a configurable impact_coeff (0 by default); a real venue swaps in measured spreads/liquidity behind the same SlippageModel.",
+    "Per-run reports/backtest/ dumps are git-ignored (regenerable from configs/backtest.yaml + the deterministic fixture); committed provenance is the backtest_runs index row + completion/orchestrator reports."
+  ],
+  "status": "Phase 4 - Backtest Engine: complete",
+  "tested": "yes",
+  "next_step": "Hand off to Reviewer Agent (re-run BT/WF/FEE/SLIP); do not begin Phase 5."
+}

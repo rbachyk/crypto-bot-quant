@@ -1,0 +1,124 @@
+[
+  {
+    "gate_id": "BT",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "engine_completes",
+        "status": "PASS",
+        "detail": "306 trades, 2678 rejected"
+      },
+      {
+        "id": "parity_rule_single_pipeline",
+        "status": "PASS",
+        "detail": "engine uses the live feature pipeline"
+      },
+      {
+        "id": "realistic_costs_modeled",
+        "status": "PASS",
+        "detail": "fees=20020.85 slippage=6308.44 funding=-97.06"
+      },
+      {
+        "id": "fees_from_verified_metadata",
+        "status": "PASS",
+        "detail": "maker/taker fees sourced from metadata"
+      },
+      {
+        "id": "all_required_outputs_present",
+        "status": "PASS",
+        "detail": "17 metrics emitted"
+      },
+      {
+        "id": "no_lookahead_noise",
+        "status": "PASS",
+        "detail": "noise expectancy_r=-0.1059 <= 0.05 (n=251)"
+      },
+      {
+        "id": "no_future_universe_leakage",
+        "status": "PASS",
+        "detail": "0 pre-activation trades; point-in-time universe exercised (True)"
+      },
+      {
+        "id": "sane_results",
+        "status": "PASS",
+        "detail": "total_return=0.4201, max|pnl_R| bounded"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/BT_20260617T120150.json",
+    "note": ""
+  },
+  {
+    "gate_id": "WF",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "walk_forward_completes",
+        "status": "PASS",
+        "detail": "5 folds evaluated"
+      },
+      {
+        "id": "min_folds_passed",
+        "status": "PASS",
+        "detail": "5/5 folds clear kill-criteria (need 4)"
+      },
+      {
+        "id": "edge_not_isolated",
+        "status": "PASS",
+        "detail": "5/5 folds positive expectancy"
+      },
+      {
+        "id": "locked_holdout_positive",
+        "status": "PASS",
+        "detail": "hold-out expectancy_r=0.252, net_pnl=9753.33 (evaluated once)"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/WF_20260617T120157.json",
+    "note": ""
+  },
+  {
+    "gate_id": "FEE",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "baseline_positive",
+        "status": "PASS",
+        "detail": "baseline expectancy_r=0.230"
+      },
+      {
+        "id": "survives_fee_stress",
+        "status": "PASS",
+        "detail": "\u00d72.0 fees \u21d2 expectancy_r=0.120, net_pnl=20069.26"
+      },
+      {
+        "id": "edge_not_fee_dependent",
+        "status": "PASS",
+        "detail": "edge persists net of doubled fees"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/FEE_20260617T120203.json",
+    "note": ""
+  },
+  {
+    "gate_id": "SLIP",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "baseline_positive",
+        "status": "PASS",
+        "detail": "baseline expectancy_r=0.230"
+      },
+      {
+        "id": "survives_slippage_stress",
+        "status": "PASS",
+        "detail": "\u00d71.5 slippage \u21d2 expectancy_r=0.213, net_pnl=38324.11"
+      },
+      {
+        "id": "edge_not_slippage_dependent",
+        "status": "PASS",
+        "detail": "edge persists under harsher slippage"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/SLIP_20260617T120209.json",
+    "note": ""
+  }
+]

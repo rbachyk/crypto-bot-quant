@@ -43,20 +43,22 @@ def test_result_persisted_to_db() -> None:
 
 @requires_redis
 def test_dependency_blocks_downstream() -> None:
-    # WF depends on BT, which has no check yet (NOT_RUN, introduced in Phase 4)
-    # -> WF is BLOCKED on the unmet dependency (Appendix A dependency rules).
+    # RISK depends on SETUP, which has no check yet (NOT_RUN, introduced in Phase 5)
+    # -> RISK is BLOCKED on the unmet dependency (Appendix A dependency rules).
+    # (BT/WF/FEE/SLIP now have checks and PASS as of Phase 4, so they no longer
+    # block their downstreams — the first unimplemented upstream is SETUP.)
     runner = GateRunner()
-    wf = runner.run("WF")
-    assert wf.overall == "BLOCKED"
-    assert "BT" in wf.note
+    risk = runner.run("RISK")
+    assert risk.overall == "BLOCKED"
+    assert "SETUP" in risk.note
 
 
 @requires_redis
 def test_blocked_gate_creates_remediation_actions() -> None:
-    GateRunner().run("WF")
+    GateRunner().run("RISK")
     with session_scope() as session:
         actions = (
-            session.execute(select(RemediationAction).where(RemediationAction.gate_id == "WF"))
+            session.execute(select(RemediationAction).where(RemediationAction.gate_id == "RISK"))
             .scalars()
             .all()
         )

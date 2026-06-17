@@ -1,0 +1,127 @@
+# backtest.yaml — single source of truth for the Phase 4 Backtest Engine.
+#
+# Read by the event-based backtest engine, the cost models (fee/slippage/funding),
+# the risk + execution simulation, the walk-forward harness, the fee/slippage
+# stress runners, and the BT / WF / FEE / SLIP gates. All runtime behaviour is
+# config-driven and versioned (Section 4): changing a cost assumption, a fold
+# layout, the kill-criteria, or a stress multiplier is a new BACKTEST_VERSION.
+#
+# The engine is strictly event-based (Section 19): at each decision time (the
+# close of a fully-closed bar) the strategy sees ONLY the feature row for that
+# bar (the single feature pipeline — the Parity Rule, Section 10) and orders FILL
+# AT THE NEXT BAR OPEN. There is no path by which a decision can read its own bar
+# close or any future bar — the structural look-ahead guard.
+#
+# Phase 4 ships the *engine*, not a validated strategy (strategies arrive in
+# Phase 5). To exercise + prove the engine, walk-forward and stress machinery,
+# the gates run a deterministic REFERENCE strategy on a deterministic REFERENCE
+# series carrying a known, causal momentum edge (`reference.edge: trend`). The
+# same engine + strategy on a NO-STRUCTURE series (`edge: noise`) must yield ~0
+# expectancy — the engine-level look-ahead/leakage guard (mirrors the FEAT gate).
+
+version: 1
+
+backtest:
+  backtest_version: bt_0001
+
+  # --- Account / risk simulation (Section 17, capital-agnostic) -------------
+  # Sizing is capital-agnostic: results are reported as returns and R-multiples,
+  # never as an absolute profit claim. initial_equity is only a numeraire.
+  account:
+    initial_equity: 100000.0
+    risk_pct: 0.005            # 0.5% of equity risked per trade (size = equity*risk/|entry-stop|)
+    max_leverage: 10.0         # leverage-as-consequence cap; size reduced/rejected if exceeded
+    max_concurrent_per_symbol: 1
+    max_concurrent_total: 5
+
+  # --- Execution simulation (Section 18) ------------------------------------
+  execution:
+    fill: next_bar_open        # decisions fill at the NEXT bar open (no same-bar look-ahead)
+    entry_order_type: market   # taker entry; exits (stop/tp/time) are taker too
+    # Toxic-spread blocker (Section 15 hard blocker / Section 18): reject when the
+    # spread at decision time exceeds this; the candidate is logged as rejected.
+    max_spread_bps: 25.0
+    # Reject when the modelled slippage estimate exceeds this fraction of price.
+    max_slippage_frac: 0.01
+
+  # --- Cost models (Section 19 "realistic fees/slippage/funding") -----------
+  costs:
+    # Fees come from VERIFIED exchange metadata (configs/metadata.yaml); these are
+    # only fallbacks if a symbol lacks a verified fee. fee_multiplier is the FEE
+    # stress knob (×2 by default in the FEE gate).
+    fee_multiplier: 1.0
+    fallback_maker_fee: 0.0002
+    fallback_taker_fee: 0.00055
+    # Slippage = half-spread + impact_coeff × (notional / bar_volume_notional),
+    # in fraction of price, always adverse to the taker. slippage_multiplier is the
+    # SLIP stress knob (+50% ⇒ 1.5 by default in the SLIP gate).
+    slippage_multiplier: 1.0
+    impact_coeff: 0.0
+    min_half_spread_frac: 0.0001   # floor on modelled half-spread (1 bp)
+    # Funding is applied to OPEN positions at each funding timestamp (longs pay
+    # positive funding). funding_multiplier scales it for sensitivity runs.
+    funding_multiplier: 1.0
+
+  # --- Reference strategy (Phase 4 engine self-test; Section 19) ------------
+  # A deterministic, fully causal momentum rule used ONLY to exercise the engine
+  # and gates until Phase 5 ships real research candidates. It reads `ret_short`
+  # (a decision-time feature) and sizes its stop from `atr_pct`.
+  reference_strategy:
+    name: reference_momentum
+    strategy_version: ref_bt_0001
+    signal_threshold: 0.004      # |ret_short| must exceed this to fire (trade strong trends)
+    stop_atr_mult: 2.0           # stop distance = stop_atr_mult × atr_pct (fraction of price)
+    tp_atr_mult: 6.0             # take-profit distance = tp_atr_mult × atr_pct
+    min_stop_frac: 0.01          # floor on stop distance (fraction of price)
+    hold_bars: 18                # time-stop: exit after this many bars if no stop/tp
+    allow_long: true
+    allow_short: true
+
+  # --- Reference data (deterministic; offline; no network) ------------------
+  # The engine self-test fixture. `trend` plants a causal, regime-switching trend
+  # (slow sinusoidal drift + small noise) a momentum strategy can capture on both
+  # sides; `noise` has NO drift and no structure (the look-ahead guard).
+  reference:
+    edge: trend
+    symbols: ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
+    bars: 3000
+    timeframe: "5m"
+    trend_drift: 0.0004          # peak per-bar drift of the planted trend (the edge)
+    trend_period_bars: 180       # half-cycle length: ~15h up then ~15h down at 5m
+    base_sigma: 0.0016           # per-bar noise (>> drift, so wins are realistic, not certain)
+    seed: reference_bt
+    # Point-in-time universe schedule (survivorship / future-universe guard,
+    # Section 19): a symbol may be traded ONLY at decision times >= its activation
+    # bar index. SOL activates partway through to prove the engine never trades a
+    # symbol before it was in-universe.
+    activation_bar:
+      "BTC/USDT:USDT": 0
+      "ETH/USDT:USDT": 0
+      "SOL/USDT:USDT": 1500
+
+  # --- Walk-forward validation (Section 16) ---------------------------------
+  walk_forward:
+    folds: 5                     # number of out-of-sample test folds
+    train_frac: 0.5              # fraction of each window used for (notional) training
+    # Locked hold-out: the most-recent fraction is untouched during all folds and
+    # is evaluated EXACTLY ONCE at the end (Section 16).
+    holdout_frac: 0.2
+    # Kill-criteria, declared up front (Section 16). A fold "passes" when it clears
+    # ALL of these; WF passes when >= min_folds_passed folds pass AND the locked
+    # hold-out is positive net of costs.
+    kill_criteria:
+      min_oos_expectancy_r: 0.03
+      min_oos_profit_factor: 1.10
+      max_oos_drawdown: 0.25
+      min_folds_passed: 4
+      min_trades_per_fold: 20
+
+  # --- Stress tests (Section 16 / FEE + SLIP gates) -------------------------
+  stress:
+    fee_multiplier: 2.0          # FEE gate: survive ×2 fees with positive net expectancy
+    slippage_multiplier: 1.5     # SLIP gate: survive +50% slippage with positive expectancy
+
+  # --- Sanity bounds (BT gate basic checks; Section 19 "no impossible results")
+  sanity:
+    max_abs_total_return: 100.0  # |total return| must be < 10,000% (catches runaway/blowup bugs)
+    max_abs_bar_return: 0.5      # any single modelled bar move >50% ⇒ corrupt input

@@ -1,0 +1,194 @@
+[
+  {
+    "gate_id": "DATA-COV",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "required_series_present",
+        "title": "required_series_present",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "24/24 series across 3 symbols"
+      },
+      {
+        "id": "zero_unfilled_gaps",
+        "title": "zero_unfilled_gaps",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "0 unfilled gaps over the window"
+      },
+      {
+        "id": "immutable_snapshot_produced",
+        "title": "immutable_snapshot_produced",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "data_0001_3dce2575cf890334 (checksum=14dd0d13301977e3, 8721 rows)"
+      },
+      {
+        "id": "manifest_complete",
+        "title": "manifest_complete",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "symbols/time_range/data_types/row_counts present"
+      },
+      {
+        "id": "dataset_version_recorded",
+        "title": "dataset_version_recorded",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "dataset_versions[data_0001_3dce2575cf890334]"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/DATA-COV_20260617T092124.json",
+    "note": ""
+  },
+  {
+    "gate_id": "DQ",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "missing_candles",
+        "title": "missing_candles",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "no critical violation"
+      },
+      {
+        "id": "duplicates",
+        "title": "duplicates",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "no critical violation"
+      },
+      {
+        "id": "ordering",
+        "title": "ordering",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "no critical violation"
+      },
+      {
+        "id": "future_timestamps",
+        "title": "future_timestamps",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "no critical violation"
+      },
+      {
+        "id": "impossible_prices",
+        "title": "impossible_prices",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "no critical violation"
+      },
+      {
+        "id": "extreme_gaps",
+        "title": "extreme_gaps",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "no critical violation"
+      },
+      {
+        "id": "funding_alignment",
+        "title": "funding_alignment",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "no critical violation"
+      },
+      {
+        "id": "markindex_alignment",
+        "title": "markindex_alignment",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "no critical violation"
+      },
+      {
+        "id": "abnormal_spread",
+        "title": "abnormal_spread",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "no critical violation"
+      },
+      {
+        "id": "clock_drift",
+        "title": "clock_drift",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "no critical violation"
+      },
+      {
+        "id": "validation_report_written",
+        "title": "validation_report_written",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/data/quality_20260617T092126.json"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/DQ_20260617T092126.json",
+    "note": ""
+  }
+]

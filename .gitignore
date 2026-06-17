@@ -21,6 +21,7 @@ KILL_SWITCH
 
 # Gate run artifacts (keep phase completion reports, ignore per-run dumps)
 reports/gates/
+reports/backtest/
 reports/backup/
 reports/data/
 reports/universe/

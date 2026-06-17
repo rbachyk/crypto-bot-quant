@@ -1008,6 +1008,365 @@ def check_feat(settings: Settings) -> list[Criterion]:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# BT — Backtest Gate (Phase 4)                                                 #
+# --------------------------------------------------------------------------- #
+# Section 19 "Backtest output must include" — every key the report must carry.
+_REQUIRED_BT_OUTPUTS: tuple[str, ...] = (
+    "total_return",
+    "net_pnl",
+    "expectancy_r",
+    "profit_factor",
+    "max_drawdown",
+    "trade_count",
+    "symbol_breakdown",
+    "strategy_breakdown",
+    "regime_breakdown",
+    "session_breakdown",
+    "side_breakdown",
+    "cost_breakdown",
+    "slippage_breakdown",
+    "funding_breakdown",
+    "rejected_candidates",
+    "worst_trades",
+    "stability",
+)
+
+
+def check_bt(settings: Settings) -> list[Criterion]:
+    """Backtest Gate (Appendix A BT).
+
+    Runs the event-based engine on the deterministic reference fixture through
+    the SAME feature pipeline as live (the Parity Rule), then proves: it completes
+    without errors; fees/slippage/funding are modelled (fees from VERIFIED
+    metadata); all Section 19 outputs are present; there is no look-ahead (the
+    strategy is not profitable on a structureless series); no future-universe /
+    survivorship leakage (a symbol is never traded before it joined the universe);
+    and results are sane (no impossible returns).
+    """
+    from src.backtest import (
+        build_reference_inputs,
+        future_universe_violations,
+        load_backtest_config,
+        noise_expectancy,
+        run_engine,
+    )
+    from src.backtest.service import persist_backtest_run, write_report
+    from src.exchange.metadata import load_metadata_config
+    from src.features.pipeline import FEATURE_NAMES
+
+    out: list[Criterion] = []
+    cfg = load_backtest_config()
+    meta = load_metadata_config()
+    inputs = build_reference_inputs(cfg)
+    run = run_engine(cfg, meta, inputs, label="bt_gate")
+    report = run.report
+    payload = report.payload
+
+    out.append(
+        Criterion.ok(
+            "engine_completes",
+            f"{report.trade_count} trades, {len(run.result.rejected)} rejected",
+        )
+        if report.trade_count > 0
+        else Criterion.fail("engine_completes", "engine produced no trades")
+    )
+
+    # Parity Rule: the engine reads the single feature pipeline's columns.
+    parity_ok = all(
+        set(FEATURE_NAMES).issubset(set(s.frame.rows[0])) for s in inputs if s.frame.rows
+    )
+    out.append(
+        Criterion.ok("parity_rule_single_pipeline", "engine uses the live feature pipeline")
+        if parity_ok
+        else Criterion.fail("parity_rule_single_pipeline", "features not from the shared pipeline")
+    )
+
+    costs = payload["cost_breakdown"]
+    costs_ok = costs["total_fees"] > 0 and costs["total_slippage"] > 0
+    out.append(
+        Criterion.ok(
+            "realistic_costs_modeled",
+            f"fees={costs['total_fees']:.2f} slippage={costs['total_slippage']:.2f} "
+            f"funding={costs['total_funding']:.2f}",
+        )
+        if costs_ok
+        else Criterion.fail("realistic_costs_modeled", f"missing cost components: {costs}")
+    )
+
+    # Fees come from VERIFIED metadata (META gate guarantees they exist).
+    ref_specs = [(s, meta.spec(s)) for s in cfg.reference.symbols]
+    fees_ok = all(
+        isinstance(spec.fields.get("taker_fee"), (int, float))
+        for _, spec in ref_specs
+        if spec is not None
+    )
+    out.append(
+        Criterion.ok("fees_from_verified_metadata", "maker/taker fees sourced from metadata")
+        if fees_ok
+        else Criterion.fail("fees_from_verified_metadata", "symbol lacks verified fees")
+    )
+
+    missing = [k for k in _REQUIRED_BT_OUTPUTS if k not in payload]
+    empty = [
+        k for k in ("symbol_breakdown", "regime_breakdown", "side_breakdown") if not payload.get(k)
+    ]
+    out.append(
+        Criterion.ok("all_required_outputs_present", f"{len(_REQUIRED_BT_OUTPUTS)} metrics emitted")
+        if not missing and not empty
+        else Criterion.fail("all_required_outputs_present", f"missing={missing} empty={empty}")
+    )
+
+    # No look-ahead: the same engine on a structureless series is not profitable.
+    noise = noise_expectancy(cfg, meta)
+    out.append(
+        Criterion.ok(
+            "no_lookahead_noise",
+            f"noise expectancy_r={noise['expectancy_r']:.4f} <= {noise['tolerance_r']} "
+            f"(n={noise['trade_count']})",
+        )
+        if noise["passed"]
+        else Criterion.fail(
+            "no_lookahead_noise",
+            f"profitable on noise (expectancy_r={noise['expectancy_r']:.4f}) ⇒ look-ahead",
+        )
+    )
+
+    # Survivorship / future-universe: no trade before its symbol joined the universe.
+    violations = future_universe_violations(run.result, inputs)
+    activated_late = [s for s in inputs if s.activation_ts > 0]
+    exercised = any(
+        any(t.symbol == s.symbol and t.entry_ts >= s.activation_ts for t in run.result.trades)
+        for s in activated_late
+    )
+    out.append(
+        Criterion.ok(
+            "no_future_universe_leakage",
+            f"0 pre-activation trades; point-in-time universe exercised ({exercised})",
+        )
+        if not violations
+        else Criterion.fail(
+            "no_future_universe_leakage", f"pre-activation trades: {violations[:3]}"
+        )
+    )
+
+    # Sanity: no impossible returns/trades (Section 19 "no impossible results").
+    sane = abs(report.total_return) < cfg.sanity.max_abs_total_return and all(
+        abs(t.pnl_r) < 1000 for t in run.result.trades
+    )
+    out.append(
+        Criterion.ok(
+            "sane_results",
+            f"total_return={report.total_return:.4f}, max|pnl_R| bounded",
+        )
+        if sane
+        else Criterion.fail(
+            "sane_results", f"impossible result: total_return={report.total_return}"
+        )
+    )
+
+    rpath = write_report(settings, payload, kind="backtest")
+    all_pass = all(c.passed for c in out)
+    persist_backtest_run(
+        cfg, report, kind="backtest", report_path=rpath, settings=settings, passed=all_pass
+    )
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# WF — Walk-Forward Gate (Phase 4)                                             #
+# --------------------------------------------------------------------------- #
+def check_wf(settings: Settings) -> list[Criterion]:
+    """Walk-Forward Gate (Appendix A WF).
+
+    Runs the walk-forward harness: >= K folds must clear the up-front
+    kill-criteria, the edge must not be isolated to one period, and the locked
+    hold-out (evaluated exactly once) must be positive net of costs (Section 16).
+    """
+    from src.backtest import build_reference_inputs, load_backtest_config, run_walk_forward
+    from src.backtest.service import persist_backtest_run, run_engine, write_report
+    from src.exchange.metadata import load_metadata_config
+
+    out: list[Criterion] = []
+    cfg = load_backtest_config()
+    meta = load_metadata_config()
+    kc = cfg.walk_forward.kill_criteria
+    inputs = build_reference_inputs(cfg)
+    wf = run_walk_forward(cfg, meta, inputs)
+
+    out.append(
+        Criterion.ok("walk_forward_completes", f"{len(wf.folds)} folds evaluated")
+        if len(wf.folds) == cfg.walk_forward.folds
+        else Criterion.fail("walk_forward_completes", f"only {len(wf.folds)} folds")
+    )
+
+    out.append(
+        Criterion.ok(
+            "min_folds_passed",
+            f"{wf.folds_passed}/{len(wf.folds)} folds clear kill-criteria "
+            f"(need {kc.min_folds_passed})",
+        )
+        if wf.folds_passed >= kc.min_folds_passed
+        else Criterion.fail(
+            "min_folds_passed", f"{wf.folds_passed}/{len(wf.folds)} < {kc.min_folds_passed}"
+        )
+    )
+
+    positive = sum(1 for f in wf.folds if f.report.expectancy_r > 0)
+    not_isolated = positive >= max(2, (len(wf.folds) + 1) // 2)
+    out.append(
+        Criterion.ok("edge_not_isolated", f"{positive}/{len(wf.folds)} folds positive expectancy")
+        if not_isolated
+        else Criterion.fail("edge_not_isolated", f"edge isolated: only {positive} positive folds")
+    )
+
+    if wf.holdout is not None:
+        out.append(
+            Criterion.ok(
+                "locked_holdout_positive",
+                f"hold-out expectancy_r={wf.holdout.report.expectancy_r:.3f}, "
+                f"net_pnl={wf.holdout.report.net_pnl:.2f} (evaluated once)",
+            )
+            if wf.holdout.passed
+            else Criterion.fail(
+                "locked_holdout_positive",
+                f"hold-out not positive (expectancy_r={wf.holdout.report.expectancy_r:.3f})",
+            )
+        )
+    else:
+        out.append(Criterion.fail("locked_holdout_positive", "no locked hold-out evaluated"))
+
+    rpath = write_report(settings, wf.to_dict(), kind="walk_forward")
+    # Persist a summary indexed row using the full-window report for context.
+    full = run_engine(cfg, meta, inputs, label="wf_full").report
+    persist_backtest_run(
+        cfg,
+        full,
+        kind="walk_forward",
+        report_path=rpath,
+        settings=settings,
+        passed=wf.passed,
+        summary_extra={"walk_forward": wf.to_dict()},
+    )
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# FEE — Fee Stress Gate (Phase 4)                                              #
+# --------------------------------------------------------------------------- #
+def check_fee(settings: Settings) -> list[Criterion]:
+    """Fee Stress Gate (Appendix A FEE): survive ×2 fees with positive expectancy."""
+    from src.backtest import build_reference_inputs, fee_stress, load_backtest_config, run_engine
+    from src.backtest.service import persist_backtest_run, write_report
+    from src.exchange.metadata import load_metadata_config
+
+    out: list[Criterion] = []
+    cfg = load_backtest_config()
+    meta = load_metadata_config()
+    inputs = build_reference_inputs(cfg)
+    base = run_engine(cfg, meta, inputs, label="fee_baseline").report
+    stress = fee_stress(cfg, meta, inputs, baseline_expectancy_r=base.expectancy_r)
+
+    out.append(
+        Criterion.ok("baseline_positive", f"baseline expectancy_r={base.expectancy_r:.3f}")
+        if base.expectancy_r > 0
+        else Criterion.fail("baseline_positive", "baseline expectancy not positive")
+    )
+    out.append(
+        Criterion.ok(
+            "survives_fee_stress",
+            f"×{stress.multiplier} fees ⇒ expectancy_r={stress.stressed_expectancy_r:.3f}, "
+            f"net_pnl={stress.stressed_net_pnl:.2f}",
+        )
+        if stress.survives
+        else Criterion.fail(
+            "survives_fee_stress",
+            f"expectancy turns non-positive under ×{stress.multiplier} fees "
+            f"(expectancy_r={stress.stressed_expectancy_r:.3f})",
+        )
+    )
+    out.append(
+        Criterion.ok("edge_not_fee_dependent", "edge persists net of doubled fees")
+        if stress.stressed_profit_factor > 1.0
+        else Criterion.fail(
+            "edge_not_fee_dependent", f"profit_factor {stress.stressed_profit_factor:.2f} <= 1"
+        )
+    )
+
+    rpath = write_report(settings, stress.to_dict(), kind="fee_stress")
+    persist_backtest_run(
+        cfg,
+        base,
+        kind="fee_stress",
+        report_path=rpath,
+        settings=settings,
+        passed=all(c.passed for c in out),
+        summary_extra={"fee_stress": stress.to_dict()},
+    )
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# SLIP — Slippage Stress Gate (Phase 4)                                        #
+# --------------------------------------------------------------------------- #
+def check_slip(settings: Settings) -> list[Criterion]:
+    """Slippage Stress Gate (Appendix A SLIP): survive +50% slippage."""
+    from src.backtest import (
+        build_reference_inputs,
+        load_backtest_config,
+        run_engine,
+        slippage_stress,
+    )
+    from src.backtest.service import persist_backtest_run, write_report
+    from src.exchange.metadata import load_metadata_config
+
+    out: list[Criterion] = []
+    cfg = load_backtest_config()
+    meta = load_metadata_config()
+    inputs = build_reference_inputs(cfg)
+    base = run_engine(cfg, meta, inputs, label="slip_baseline").report
+    stress = slippage_stress(cfg, meta, inputs, baseline_expectancy_r=base.expectancy_r)
+
+    out.append(
+        Criterion.ok("baseline_positive", f"baseline expectancy_r={base.expectancy_r:.3f}")
+        if base.expectancy_r > 0
+        else Criterion.fail("baseline_positive", "baseline expectancy not positive")
+    )
+    out.append(
+        Criterion.ok(
+            "survives_slippage_stress",
+            f"×{stress.multiplier} slippage ⇒ expectancy_r={stress.stressed_expectancy_r:.3f}, "
+            f"net_pnl={stress.stressed_net_pnl:.2f}",
+        )
+        if stress.survives
+        else Criterion.fail(
+            "survives_slippage_stress",
+            f"expectancy turns non-positive under +50% slippage "
+            f"(expectancy_r={stress.stressed_expectancy_r:.3f})",
+        )
+    )
+    out.append(
+        Criterion.ok("edge_not_slippage_dependent", "edge persists under harsher slippage")
+        if stress.stressed_profit_factor > 1.0
+        else Criterion.fail(
+            "edge_not_slippage_dependent",
+            f"profit_factor {stress.stressed_profit_factor:.2f} <= 1",
+        )
+    )
+
+    rpath = write_report(settings, stress.to_dict(), kind="slippage_stress")
+    persist_backtest_run(
+        cfg,
+        base,
+        kind="slippage_stress",
+        report_path=rpath,
+        settings=settings,
+        passed=all(c.passed for c in out),
+        summary_extra={"slippage_stress": stress.to_dict()},
+    )
+    return out
+
+
 def _write_report(settings: Settings, kind: str, payload: dict) -> str:
     """Persist a gate sub-report under reports/<kind>/ (dashboard 'View ...' actions)."""
     import json as _json
@@ -1035,6 +1394,10 @@ CHECKS: dict[str, Callable[[Settings], list[Criterion]]] = {
     "UNIV": check_univ,
     "META": check_meta,
     "FEAT": check_feat,
+    "BT": check_bt,
+    "WF": check_wf,
+    "FEE": check_fee,
+    "SLIP": check_slip,
     "MON": check_mon,
     "BACKUP": check_backup,
 }

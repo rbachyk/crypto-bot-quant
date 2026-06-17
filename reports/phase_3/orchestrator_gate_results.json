@@ -1,0 +1,257 @@
+[
+  {
+    "gate_id": "UNIV",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "universe_versioned",
+        "title": "universe_versioned",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "univ_0001_a7c0ed0d0aff67ab"
+      },
+      {
+        "id": "filters_applied",
+        "title": "filters_applied",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "3/3 evaluated"
+      },
+      {
+        "id": "at_least_one_active",
+        "title": "at_least_one_active",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "3 active symbols"
+      },
+      {
+        "id": "selected_pass_all_filters",
+        "title": "selected_pass_all_filters",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "every active symbol passes all filters"
+      },
+      {
+        "id": "metadata_stable",
+        "title": "metadata_stable",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "active symbols [VERIFIED] + status=trading"
+      },
+      {
+        "id": "data_availability",
+        "title": "data_availability",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "active symbols have all required series"
+      },
+      {
+        "id": "membership_changes_logged",
+        "title": "membership_changes_logged",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "3 change rows for univ_0001_a7c0ed0d0aff67ab"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/UNIV_20260617T103026.json",
+    "note": ""
+  },
+  {
+    "gate_id": "FEAT",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "feature_store_builds_from_snapshot",
+        "title": "feature_store_builds_from_snapshot",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "feat_0001_data_0001_3dce2575cf890334_8ffd68e65c498778 (717 rows, 3 symbols)"
+      },
+      {
+        "id": "reproducible_checksum",
+        "title": "reproducible_checksum",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "checksum=8ffd68e65c498778"
+      },
+      {
+        "id": "no_lookahead_causal",
+        "title": "no_lookahead_causal",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "features invariant to future truncation"
+      },
+      {
+        "id": "leakage_zero_expectancy",
+        "title": "leakage_zero_expectancy",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "|z|=2.09 <= 4.0 (n=3939)"
+      },
+      {
+        "id": "timestamp_alignment",
+        "title": "timestamp_alignment",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "all rows on the decision-time grid"
+      },
+      {
+        "id": "no_unavailable_features",
+        "title": "no_unavailable_features",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "finite features for every active symbol"
+      },
+      {
+        "id": "feature_set_version_recorded",
+        "title": "feature_set_version_recorded",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "feat_0001_data_0001_3dce2575cf890334_8ffd68e65c498778"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/FEAT_20260617T103034.json",
+    "note": ""
+  },
+  {
+    "gate_id": "META",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "metadata_synced",
+        "title": "metadata_synced",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "3 symbols at meta_0001"
+      },
+      {
+        "id": "all_active_have_metadata",
+        "title": "all_active_have_metadata",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "3 symbols"
+      },
+      {
+        "id": "all_verified",
+        "title": "all_verified",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "no [UNVERIFIED] active symbols"
+      },
+      {
+        "id": "complete_fields",
+        "title": "complete_fields",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "all required fields present"
+      },
+      {
+        "id": "no_contradictions",
+        "title": "no_contradictions",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "metadata internally consistent"
+      },
+      {
+        "id": "order_types_present",
+        "title": "order_types_present",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "order types declared for all symbols"
+      },
+      {
+        "id": "not_stale",
+        "title": "not_stale",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "all metadata at current version meta_0001"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/META_20260617T103035.json",
+    "note": ""
+  }
+]

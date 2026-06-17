@@ -399,6 +399,40 @@ class DatasetVersion(Base):
     source_jobs: Mapped[list] = mapped_column(JSON, default=list)
 
 
+class BacktestRun(Base):
+    """An immutable record of one backtest / walk-forward / stress run (Phase 4).
+
+    The full report (all Section 19 metrics + breakdowns) is written to the
+    reports lake as JSON; this row is the relational index/summary the dashboard
+    Backtests page and the BT/WF/FEE/SLIP gates read. ``kind`` distinguishes a
+    plain backtest from a walk-forward or a fee/slippage stress run."""
+
+    __tablename__ = "backtest_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    kind: Mapped[str] = mapped_column(String(24), default="backtest", index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, index=True
+    )
+    backtest_version: Mapped[str] = mapped_column(String(32), default="bt_0001", index=True)
+    strategy_id: Mapped[str] = mapped_column(String(64), default="")
+    strategy_version: Mapped[str] = mapped_column(String(32), default="")
+    dataset_version: Mapped[str | None] = mapped_column(String(64))
+    feature_set_version: Mapped[str | None] = mapped_column(String(80))
+    universe_version: Mapped[str | None] = mapped_column(String(64))
+    symbols: Mapped[list] = mapped_column(JSON, default=list)
+    passed: Mapped[bool] = mapped_column(Boolean, default=False)
+    trade_count: Mapped[int] = mapped_column(Integer, default=0)
+    expectancy_r: Mapped[float] = mapped_column(default=0.0)
+    profit_factor: Mapped[float] = mapped_column(default=0.0)
+    total_return: Mapped[float] = mapped_column(default=0.0)
+    max_drawdown: Mapped[float] = mapped_column(default=0.0)
+    summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    report_path: Mapped[str | None] = mapped_column(Text)
+    related_versions: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
 class DataQualityReportRow(Base):
     """Persisted data-validation report (Section 8/23/34). A report is generated
     before every research/paper/live run; the DQ gate reads the latest."""
