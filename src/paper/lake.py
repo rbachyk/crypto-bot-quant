@@ -25,12 +25,10 @@ from src.paper.report import PaperReport, build_paper_report
 from src.paper.run import persist_paper_session
 from src.paper.session import PaperSession
 from src.ranking import Candidate
+from src.regime import detect_regime
 from src.strategies.promotion import is_strategy_promoted
 
 _DEFAULT_HOLD_BARS = 12  # forward horizon for the realized move when a signal omits one
-
-
-from src.regime import detect_regime
 
 
 def build_lake_paper_inputs(
