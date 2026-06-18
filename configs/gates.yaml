@@ -316,6 +316,57 @@ gates:
     dashboard_actions: ["View Learner Shadow Score", "Test Envelope Guard", "Re-run Gate"]
     rerun_job: "gate:learn-promo-s"
 
+  - id: RL-SIM
+    name: RL Simulation
+    phase: 12
+    blocks_live: "if_rl_enabled"
+    depends_on: [LEARN-PROMO-S]
+    pass_condition: >
+      RL environment (TradingEnv) loads without error; full episode runs without crash;
+      reward function is risk-adjusted and cost-net; all actions pass envelope_guard;
+      stress tests (normal, no_edge, high_vol, toxic) produce finite bounded rewards;
+      simulation training completes; trained policy produces valid BoundedActions in SHADOW mode.
+    failure_signals:
+      - "environment import error"
+      - "episode crash"
+      - "non-finite reward"
+      - "reward outside [-10, 10]"
+      - "action violates envelope"
+      - "training failure"
+    remediation_steps:
+      - "Check TradingEnv import; fix any missing gymnasium dependency."
+      - "Run a single episode manually and check for exceptions."
+      - "Verify reward function clips to ±10 and is cost-net."
+      - "Confirm all BoundedActions pass action_space.validate() + envelope_guard.enforce()."
+      - "Run trainer.run_stress_tests() and fix any non-finite rewards."
+      - "Re-run gate:rl-sim."
+    dashboard_actions: ["View RL Environment", "Run Stress Test", "Re-run Gate"]
+    rerun_job: "gate:rl-sim"
+
+  - id: RL-SHADOW
+    name: RL Shadow Policy
+    phase: 12
+    blocks_live: "if_rl_enabled"
+    depends_on: [RL-SIM]
+    pass_condition: >
+      RL policy runs in SHADOW mode; all decisions logged with applied=False;
+      no live trading influence; envelope_guard enforced on all RL actions;
+      shadow policy produces valid bounded actions; recommendation mode available;
+      no RL action can modify the risk envelope.
+    failure_signals:
+      - "rl policy not in SHADOW mode"
+      - "applied=True in shadow log"
+      - "envelope violation"
+      - "live trading influence detected"
+    remediation_steps:
+      - "Verify RLPolicy.decide() always returns mode=SHADOW."
+      - "Check learner_log: all RL entries must have applied=False."
+      - "Confirm envelope_guard rejects any RL action that touches envelope params."
+      - "Extend shadow observation window before considering RECOMMEND mode."
+      - "Re-run gate:rl-shadow."
+    dashboard_actions: ["View RL Shadow Log", "Check Envelope Guard", "Re-run Gate"]
+    rerun_job: "gate:rl-shadow"
+
   - id: LEARN-PROMO-L
     name: Learner Recommend -> Bounded Live
     phase: 13

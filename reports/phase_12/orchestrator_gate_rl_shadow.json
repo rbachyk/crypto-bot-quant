@@ -1,0 +1,38 @@
+{
+  "gate_id": "RL-SHADOW",
+  "overall": "PASS",
+  "criteria": [
+    {
+      "id": "rl_policy_importable",
+      "status": "PASS",
+      "detail": "RLPolicy importable; snapshot/load round-trip OK; frozen-fallback round-trip OK"
+    },
+    {
+      "id": "rl_policy_shadow_mode",
+      "status": "PASS",
+      "detail": "all 5 RL decisions have mode=SHADOW; update() no-op verified"
+    },
+    {
+      "id": "rl_shadow_applied_false",
+      "status": "PASS",
+      "detail": "wrote 5 RL learner_log entries; total=30 applied=True=0 (must be 0)"
+    },
+    {
+      "id": "rl_no_live_influence",
+      "status": "PASS",
+      "detail": "10 RL controller decisions: applied=False always; mode != LIVE_BOUNDED"
+    },
+    {
+      "id": "rl_envelope_enforced",
+      "status": "PASS",
+      "detail": "normal RL actions pass guard; envelope-touching action rejected"
+    },
+    {
+      "id": "rl_recommend_mode_ready",
+      "status": "PASS",
+      "detail": "RECOMMEND mode validated; RL policy can be promoted to RECOMMEND by operator"
+    }
+  ],
+  "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/RL-SHADOW_20260618T090039.json",
+  "note": ""
+}

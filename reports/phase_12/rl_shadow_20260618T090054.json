@@ -1,0 +1,17 @@
+{
+  "phase": 12,
+  "gate": "RL-SHADOW",
+  "versions": {
+    "CONFIG_VERSION": "cfg_0001",
+    "UNIVERSE_VERSION": "univ_0001",
+    "DATA_VERSION": "data_0001",
+    "METADATA_VERSION": "meta_0001",
+    "STRATEGY_VERSION": "strat_0000",
+    "FEATURE_SET_VERSION": "feat_0001",
+    "RISK_POLICY_VERSION": "risk_0001",
+    "EXECUTION_POLICY_VERSION": "exec_0001",
+    "ONLINE_LEARNER_VERSION": "learner_0001"
+  },
+  "generated_at": "20260618T090054",
+  "note": "Phase 12 \u2014 RL Research and Shadow Policy. TradingEnv (gymnasium), risk-adjusted cost-net reward, LinearRLTrainer (CEM), RLPolicy in SHADOW mode. No live trading influence. Gates: RL-SIM + RL-SHADOW."
+}

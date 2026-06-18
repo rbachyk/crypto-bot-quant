@@ -1,6 +1,7 @@
-"""Online Learning / Adaptation layer — Phase 11 (AGENTS.md Section 21).
+"""Online Learning / Adaptation layer — Phase 11–12 (AGENTS.md Section 21).
 
-Phase 11 delivers the bounded learner in SHADOW mode:
+Phase 11 delivers the bounded learner in SHADOW mode.
+Phase 12 upgrades the RL policy stub to a full simulation-trained policy:
 
   * ``src/adaptation/action_space.py``   — BoundedAction + validation
   * ``src/adaptation/envelope_guard.py`` — immutable-envelope enforcement
@@ -25,7 +26,7 @@ from src.adaptation.controller import ControllerDecision, LearnerController, Lea
 from src.adaptation.envelope_guard import GuardResult, RiskEnvelope, enforce
 from src.adaptation.policies.bandit import GaussianTSBandit
 from src.adaptation.policies.online_logreg import OnlineLogRegPolicy
-from src.adaptation.policies.rl_policy import RLPolicyStub
+from src.adaptation.policies.rl_policy import RLPolicy, RLPolicyStub
 from src.adaptation.policy_base import Context, Outcome, Policy
 from src.adaptation.rollback import RollbackEvent, RollbackGuard
 from src.adaptation.scorer import ScorerResult, ShadowDecision, score_shadow_decisions
@@ -68,6 +69,7 @@ __all__ = [
     # policies
     "GaussianTSBandit",
     "OnlineLogRegPolicy",
+    "RLPolicy",
     "RLPolicyStub",
     # rollback
     "RollbackEvent",

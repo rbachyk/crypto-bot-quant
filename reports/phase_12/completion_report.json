@@ -1,0 +1,100 @@
+{
+  "phase": 12,
+  "name": "RL Research and Shadow Policy",
+  "coder": "claude-sonnet-4-6",
+  "date": "2026-06-18",
+  "branch": "phase/12",
+  "commit": "TBD (committed after this report)",
+  "config_version": "cfg_0001",
+  "data_version": "dv_0001",
+  "model_version": "rl_policy_v1/learner_0002",
+  "scope_implemented": [
+    "src/rl/__init__.py — RL module package",
+    "src/rl/environment.py — TradingEnv (gymnasium.Env); MultiDiscrete action space [4,2,3]; Box obs space (6 features); risk-adjusted cost-net reward; 4 stress modes (normal/no_edge/high_vol/toxic)",
+    "src/rl/reward.py — RiskAdjustedReward; RewardConfig; RewardState; fee/slippage/funding-net; drawdown/tail-loss/envelope-proximity penalties; bounded to [-10,10]",
+    "src/rl/trainer.py — LinearRLTrainer (cross-entropy method CEM); simulation training without PyTorch/GPU; stress test runner; snapshot/load",
+    "src/adaptation/policies/rl_policy.py — full RLPolicy replacing stub; trained via simulation; heuristic fallback; shadow mode only; RLPolicyStub backward-compat alias",
+    "src/adaptation/__init__.py + src/adaptation/policies/__init__.py — exports RLPolicy",
+    "configs/gates.yaml — RL-SIM gate (phase 12, depends_on LEARN-PROMO-S) + RL-SHADOW gate (phase 12, depends_on RL-SIM)",
+    "src/gates/phase12.py — check_rl_sim (7 criteria) + check_rl_shadow (6 criteria)",
+    "src/gates/checks.py — RL-SIM and RL-SHADOW registered in CHECKS registry",
+    "tests/test_phase12_rl.py — 50 tests across TradingEnv, RiskAdjustedReward, LinearRLTrainer, RLPolicy, envelope guard, controller, gate integration"
+  ],
+  "acceptance_criteria": {
+    "rl_env_risk_adjusted_reward": {
+      "met": true,
+      "evidence": "src/rl/environment.py + src/rl/reward.py; reward is fee/slippage/funding-net with drawdown/tail/proximity penalties; verified in test_reward_bounded, test_skip_yields_zero, test_maker_cheaper_than_taker"
+    },
+    "bounded_action_head": {
+      "met": true,
+      "evidence": "TradingEnv.bounded_action_from() validates via action_space.validate(); RLPolicy.decide() always returns valid BoundedAction; envelope_guard.enforce() enforced on all RL actions; verified in TestRLEnvelopeGuard"
+    },
+    "simulation_training": {
+      "met": true,
+      "evidence": "LinearRLTrainer.train() (CEM, numpy only, no GPU); runs in 5 generations, 40 individuals by default; completes in <10s; gate check rl_simulation_training PASS"
+    },
+    "stress_tests_pass": {
+      "met": true,
+      "evidence": "trainer.run_stress_tests() covers normal/no_edge/high_vol/toxic; all rewards finite and bounded; verified in test_stress_tests_finite_bounded + rl_stress_tests_pass gate criterion"
+    },
+    "shadow_policy_logged": {
+      "met": true,
+      "evidence": "RLPolicy.decide() returns mode=SHADOW always; learner_log entries written with applied=False; verified in TestPhase12Gates.test_rl_shadow_gate_passes + rl_shadow_applied_false criterion"
+    },
+    "no_live_influence": {
+      "met": true,
+      "evidence": "RLPolicy has no LIVE_BOUNDED mode; controller SHADOW runs produce applied=False; rl_no_live_influence criterion PASS"
+    },
+    "rl_sim_gate_evaluated": {
+      "met": true,
+      "evidence": "RL-SIM gate: PASS (7/7 criteria); report_path=reports/phase_12/orchestrator_gate_rl_sim.json"
+    },
+    "rl_shadow_gate_evaluated": {
+      "met": true,
+      "evidence": "RL-SHADOW gate: PASS (6/6 criteria); report_path=reports/phase_12/orchestrator_gate_rl_shadow.json"
+    },
+    "no_forbidden_shortcuts": {
+      "met": true,
+      "evidence": "No live trading mode; no real exchange calls; no hardcoded secrets; no unversioned artifacts; gymnasium dep added, not SB3 (too heavy for runtime dep)"
+    },
+    "config_driven": {
+      "met": true,
+      "evidence": "EnvConfig, RewardConfig, TrainingConfig all dataclass configs; ENABLE_RL_SHADOW env var already in .env.example from Phase 1"
+    }
+  },
+  "gates_run": [
+    {
+      "gate_id": "RL-SIM",
+      "result": "PASS",
+      "criteria_count": 7,
+      "report_path": "reports/phase_12/orchestrator_gate_rl_sim.json"
+    },
+    {
+      "gate_id": "RL-SHADOW",
+      "result": "PASS",
+      "criteria_count": 6,
+      "report_path": "reports/phase_12/orchestrator_gate_rl_shadow.json"
+    }
+  ],
+  "tests": {
+    "pytest": "50 passed (test_phase12_rl.py); 447 passed (full suite, no regressions)",
+    "coverage_adaptation": "adaptation/ module covered by phase12 + phase11 tests",
+    "ruff": "all checks passed",
+    "mypy": "no issues in 136 source files"
+  },
+  "assumptions_and_decisions": [
+    "docs/decisions/phase12_rl_trainer_choice.md: Used cross-entropy method (CEM) with numpy instead of Stable-Baselines3. Reason: SB3 requires PyTorch (~1GB); AGENTS.md says SB3 'for prototyping' — CEM achieves the same gate-verification goals (environment, reward, training loop, shadow policy) without the dependency. SB3 can be wired in later via trainer.py if needed for production research.",
+    "docs/decisions/phase12_gymnasium_dep.md: Added gymnasium>=0.29 as main dependency (lightweight, no GPU). The TradingEnv is always available; heavy RL training runs in the worker-rl service.",
+    "RLPolicyStub backward-compat: kept as a subclass of RLPolicy with learner_id='rl_policy_stub_v1' so Phase 11 gate checks (which import RLPolicyStub) continue to work without modification.",
+    "RL gates marked blocks_live='if_rl_enabled' (not always blocking) because RL is research/shadow; live readiness only requires RL gates if ENABLE_RL_SHADOW=true."
+  ],
+  "known_gaps_risks": [
+    "No SB3/PyTorch integration yet — the LinearRLTrainer (CEM) is prototype-grade. For production research, replace trainer._rollout() with SB3's PPO.learn() if SB3 is added as a dev dep.",
+    "TradingEnv uses synthetic observations only — real feature-pipeline data integration is a future step (Phase 13 or research extension).",
+    "RL policy training time scales with generations/population; gate checks use fast configs (3-5 gen, 8-10 pop) — longer production runs need a dedicated worker-rl process.",
+    "No online update in shadow mode (update() is a no-op) — consistent with AGENTS.md §21.4 which says RL trains offline only."
+  ],
+  "status": "COMPLETE",
+  "tested": "yes — 50/50 phase12 tests pass; RL-SIM 7/7 PASS; RL-SHADOW 6/6 PASS; 447/447 full suite pass",
+  "next_step": "Phase 13 — Controlled Live Readiness (SEC, DEPLOY, BACKUP, MON, CONFIG-FREEZE, LIVE gates)"
+}
