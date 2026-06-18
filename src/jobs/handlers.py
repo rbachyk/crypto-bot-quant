@@ -661,6 +661,87 @@ def _run_backtest(ctx: JobContext, params: dict) -> dict:
     }
 
 
+@job_handler("run_lake_ml_shadow_pass")
+def _run_lake_ml_shadow_pass(ctx: JobContext, params: dict) -> dict:
+    """Run the shadow ML meta-labeler over REAL lake candidates (shadow-only, applied=False).
+
+    Builds the candidate stream from a downloaded snapshot (the same real candidates the
+    lake paper session uses) and scores them with the shadow predictor, logging every
+    prediction with applied=False. The models themselves are trained on the reference
+    dataset (training data is a separate concern); this proves the meta-labeler scores
+    REAL setups in shadow mode without ever influencing trading."""
+    from src.config import get_settings
+    from src.data.config import load_data_config
+    from src.ml import ShadowPredictor
+    from src.ml.config import load_ml_config
+    from src.ml.labels import build_reference_dataset, train_test_split
+    from src.paper.lake import build_lake_paper_inputs
+
+    config_path = str(params.get("config_path") or "configs/data.bybit.yaml")
+    data_cfg = load_data_config(config_path)
+    tf = params.get("timeframe") or data_cfg.base_timeframe
+    symbols = params.get("symbols") or data_cfg.active_symbols()
+    candidate_id = params.get("candidate_id") or params.get("strategy") or None
+    settings = get_settings()
+    ml_cfg = load_ml_config()
+
+    ctx.log("training shadow models (reference dataset) then scoring REAL lake candidates")
+    predictor = ShadowPredictor.from_config(ml_cfg)
+    train_samples, _ = train_test_split(build_reference_dataset(seed=42), seed=42)
+    predictor.train(train_samples)
+    inputs, _, _ = build_lake_paper_inputs(
+        data_cfg, timeframe=tf, symbols=symbols, candidate_id=candidate_id, settings=settings
+    )
+    candidates = [pin.candidate for pin in inputs]
+    ctx.progress(0, 1, f"scoring {len(candidates)} real candidates (applied=False)")
+    result = predictor.run(candidates, settings=settings, write_to_db=True)
+    assert not result.applied, "shadow pass must never set applied=True"
+    ctx.progress(1, 1, f"{len(result.shadow_log_ids)} shadow log entries")
+    return {
+        "message": f"lake ML shadow: {len(result.shadow_log_ids)} entries over "
+        f"{len(candidates)} real candidates (applied=False)",
+        "candidates": len(candidates),
+        "shadow_log_ids": len(result.shadow_log_ids),
+        "applied": result.applied,
+    }
+
+
+@job_handler("run_lake_paper_session")
+def _run_lake_paper_session(ctx: JobContext, params: dict) -> dict:
+    """Run + persist a REAL-DATA (replay) paper session over a downloaded snapshot.
+
+    Derives the candidate stream from real lake data and runs it through the full paper
+    pipeline (ranking → risk → execution → SimulatedVenue); trades persist to
+    ``paper_trades`` (shadow-only). Requires the snapshot to be downloaded first."""
+    from src.data.config import load_data_config
+    from src.paper.lake import run_lake_paper_session
+
+    config_path = str(params.get("config_path") or "configs/data.bybit.yaml")
+    data_cfg = load_data_config(config_path)
+    timeframe = params.get("timeframe") or None
+    symbols = params.get("symbols") or None
+    candidate_id = params.get("candidate_id") or params.get("strategy") or None
+    dataset_version = params.get("dataset_version") or None
+    ctx.log(f"real-data paper session over {data_cfg.exchange_id}/{data_cfg.data_version}")
+    ctx.progress(0, 1, "running lake paper session")
+    session, _report, sid = run_lake_paper_session(
+        data_cfg,
+        timeframe=timeframe,
+        symbols=symbols,
+        candidate_id=candidate_id,
+        dataset_version=dataset_version,
+    )
+    net = sum(t.pnl for t in session.trades)
+    ctx.progress(1, 1, f"{session.executed_count} trades, net_pnl={net:.2f}")
+    return {
+        "message": f"lake paper {sid}: {session.executed_count} executed / "
+        f"{session.rejected_count} rejected, net_pnl={net:.2f}",
+        "session_id": sid,
+        "executed": session.executed_count,
+        "rejected": session.rejected_count,
+    }
+
+
 @job_handler("run_lake_backtest")
 def _run_lake_backtest(ctx: JobContext, params: dict) -> dict:
     """Run + persist ONE real-data backtest iteration on the ``backtest`` worker.

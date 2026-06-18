@@ -29,13 +29,14 @@ ALL_CLASSES: tuple[str, ...] = ("ml", "rl", "backtest", "data", "gates", DEFAULT
 # job_type -> class. Each entry is an exact name or a ``prefix_`` (trailing underscore =
 # startswith match). Evaluated in order; first match wins, else DEFAULT_CLASS.
 _CLASS_MEMBERS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("ml", ("build_ml_", "train_ml_", "run_ml_", "evaluate_ml_models")),
+    ("ml", ("build_ml_", "train_ml_", "run_ml_", "run_lake_ml_", "evaluate_ml_models")),
     ("rl", ("train_rl_", "run_rl_", "simulate_rl_", "rl_")),
     (
         "backtest",
         (
             "run_backtest",
             "run_lake_backtest",
+            "run_lake_paper_session",
             "run_walk_forward",
             "build_dataset_version",
             "run_strategy_validation",

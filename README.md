@@ -87,6 +87,20 @@ bar (expectancy ≥ 0.03R, PF ≥ 1.10, max-DD ≤ 0.25, enough trades) — see 
 dashboard page (`/dashboard/leaderboard`). It is a comparison aid; the BT/WF/FEE/SLIP gates
 remain the binding profitability judgement before anything advances toward live.
 
+Forward-test on real data through the paper + shadow-ML pipelines (both shadow-only):
+
+```bash
+uv run python -m src.cli.main paper-lake --config configs/data.bybit.yaml --timeframe 1h
+uv run python -m src.cli.main ml-shadow-lake --config configs/data.bybit.yaml --timeframe 1h
+```
+
+`paper-lake` derives a candidate stream from the real snapshot and runs it through the full
+paper pipeline (ranking → risk → execution → SimulatedVenue), persisting real `paper_trades`
+(shown on the **Paper** page). `ml-shadow-lake` scores those real candidates with the shadow
+ML meta-labeler, logging every prediction with `applied=False` (never influences trading).
+Until a live/replay feed exists (later milestone), this is how paper/shadow forward-test on
+real downloaded data.
+
 Run the control center and a worker:
 
 ```bash

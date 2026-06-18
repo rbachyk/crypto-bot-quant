@@ -234,6 +234,71 @@ def backtest_lake(
     )
 
 
+@app.command(name="paper-lake")
+def paper_lake(
+    config_path: str = typer.Option(
+        "configs/data.bybit.yaml", "--config", help="data config yaml (real-data snapshot)"
+    ),
+    symbols: str = typer.Option("", "--symbols", help="comma-separated symbols ('' = config)"),
+    timeframe: str = typer.Option("", "--timeframe", help="decision timeframe ('' = base)"),
+    strategy: str = typer.Option(
+        "", "--strategy", help="research candidate id (per-row family B); '' = reference"
+    ),
+    dataset_version: str = typer.Option("", "--dataset-version", help="snapshot id tag"),
+) -> None:
+    """Run + persist a REAL-DATA (replay) paper session over a snapshot (shadow-only).
+
+    Derives candidates from real lake data and runs the full paper pipeline; trades land
+    in ``paper_trades`` and show on the Paper dashboard. Requires a downloaded snapshot.
+    """
+    from src.data.config import load_data_config
+    from src.paper.lake import run_lake_paper_session
+
+    data_cfg = load_data_config(config_path or None)
+    syms = [s.strip() for s in symbols.split(",") if s.strip()] or None
+    session, _report, sid = run_lake_paper_session(
+        data_cfg,
+        timeframe=timeframe or None,
+        symbols=syms,
+        candidate_id=strategy or None,
+        dataset_version=dataset_version or None,
+    )
+    net = sum(t.pnl for t in session.trades)
+    typer.echo(
+        json.dumps(
+            {
+                "session_id": sid,
+                "executed": session.executed_count,
+                "rejected": session.rejected_count,
+                "net_pnl": round(net, 2),
+            },
+            indent=2,
+        )
+    )
+
+
+@app.command(name="ml-shadow-lake")
+def ml_shadow_lake(
+    config_path: str = typer.Option("configs/data.bybit.yaml", "--config"),
+    symbols: str = typer.Option("", "--symbols"),
+    timeframe: str = typer.Option("", "--timeframe"),
+    strategy: str = typer.Option("", "--strategy", help="research candidate id ('' = reference)"),
+) -> None:
+    """Score REAL lake candidates with the shadow ML meta-labeler (applied=False)."""
+    from src.jobs import JobQueue
+    from src.jobs.handlers import ensure_handlers_registered
+
+    ensure_handlers_registered()
+    params = {
+        "config_path": config_path,
+        "symbols": [s.strip() for s in symbols.split(",") if s.strip()] or None,
+        "timeframe": timeframe or None,
+        "candidate_id": strategy or None,
+    }
+    job_id = JobQueue().enqueue("run_lake_ml_shadow_pass", params, requested_by="cli")
+    typer.echo(job_id)
+
+
 @app.command()
 def leaderboard(
     kind: str = typer.Option("backtest", "--kind", help="run kind ('all' = every kind)"),
