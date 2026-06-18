@@ -7,11 +7,22 @@ always runs even on a bare checkout.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 import redis
 from sqlalchemy import text
 from src.config import get_settings
 from src.jobs.handlers import ensure_handlers_registered
+
+# Run the suite against a dedicated redis DB (15) so it never collides with a running stack:
+# `make docker-up` workers consume the shared db-0 class queues, which would otherwise race
+# with tests that enqueue then expect to consume their own jobs. Postgres stays shared (tests
+# use unique ids). Must run before any get_settings() call so the override takes effect.
+os.environ["REDIS_URL"] = (os.environ.get("REDIS_URL") or "redis://localhost:6379/0").rsplit(
+    "/", 1
+)[0] + "/15"
+get_settings.cache_clear()
 
 ensure_handlers_registered()
 

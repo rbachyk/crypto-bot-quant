@@ -243,19 +243,23 @@ def check_ml_promo(settings: Settings) -> list[Criterion]:  # noqa: ARG001
         noise_baseline = baseline_expectancy(noise_test)
         noise_filtered = filtered_expectancy(noise_test, noise_preds)
         noise_delta = noise_filtered - noise_baseline
-        # Leakage only manifests as positive improvement on noise data.
-        # A negative delta means the model avoided trades on shuffled labels — expected
-        # noise behaviour, not leakage. Only positive inflation > 0.3R is suspicious.
-        leakage_ok = noise_delta <= 0.3
+        # Leakage only manifests as positive improvement on RANDOMLY-SHUFFLED labels — a model
+        # that "improves" expectancy on pure noise is reading something it shouldn't. A negative
+        # delta means the model correctly avoided trades on shuffled labels (expected, not
+        # leakage). The threshold is tight (0.10R): on a deterministic noise split a leakage-free
+        # model should sit near 0, so anything materially positive is suspicious.
+        leakage_threshold = 0.10
+        leakage_ok = noise_delta <= leakage_threshold
         out.append(
             Criterion.ok(
                 "ml_leakage_check",
-                f"noise improvement={noise_delta:.4f}R (≤ 0.30 → no systematic leakage)",
+                f"noise improvement={noise_delta:.4f}R (≤ {leakage_threshold:.2f} → no leakage)",
             )
             if leakage_ok
             else Criterion.fail(
                 "ml_leakage_check",
-                f"noise improvement={noise_delta:.4f}R exceeds 0.30 → possible leakage",
+                f"noise improvement={noise_delta:.4f}R exceeds {leakage_threshold:.2f}"
+                " → possible leakage",
             )
         )
     except Exception as exc:  # noqa: BLE001

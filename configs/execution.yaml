@@ -20,9 +20,10 @@ execution:
   max_slippage_frac: 0.01               # no order if slippage estimate exceeds cap
   max_latency_ms: 1500.0                # no order if exchange latency is abnormal
 
-  # Exchange-resident protection (Section 2.2 / 18): every position gets an
-  # atomic exchange-side stop at entry; momentum strategies add native trailing.
-  require_exchange_side_stop: true
+  # Exchange-resident protection (Section 2.2 / 18): every position gets an atomic
+  # exchange-side stop at entry, enforced UNCONDITIONALLY in code (execution/engine.py) —
+  # it is an immutable risk-envelope invariant, not a configurable knob. Momentum
+  # strategies add native trailing.
   attach_take_profit: true              # attach TP when the signal declares a finite one
 
   # Native trailing-stop offset as a fraction of price for momentum exits

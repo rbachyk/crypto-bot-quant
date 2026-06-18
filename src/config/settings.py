@@ -90,6 +90,15 @@ class Settings(BaseSettings):
     # --- Infrastructure endpoints (Appendix B.1) ---------------------------
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/trading_bot"
     redis_url: str = "redis://localhost:6379/0"
+    # --- Worker reliability + queue routing (Appendix B.13) ---
+    # A worker refreshes a liveness beacon every `worker_heartbeat_sec`; the reaper treats a
+    # beacon gone for `worker_heartbeat_ttl_sec` as a dead worker and re-queues its in-flight
+    # jobs. TTL must exceed the heartbeat interval. `worker_queues` is a comma-separated list of
+    # queue classes this worker serves ('' = serve all: ml, rl, backtest, data, gates, default).
+    worker_heartbeat_sec: int = 10
+    worker_heartbeat_ttl_sec: int = 30
+    worker_reaper_interval_sec: int = 30
+    worker_queues: str = ""
     object_storage_url: str = ""  # empty => use local data lake path below
     data_lake_path: Path = REPO_ROOT / "var" / "datalake"
     artifact_path: Path = REPO_ROOT / "var" / "artifacts"
@@ -103,18 +112,37 @@ class Settings(BaseSettings):
 
     # --- Feature toggles (safe defaults; Appendix B.3) ---------------------
     enable_live_trading: bool = False
+    # Gate the SCHEDULER (src/scheduler.py): research/paper jobs run only when
+    # enable_background_research_jobs is set; ML shadow passes only when enable_ml_shadow is set.
     enable_background_research_jobs: bool = True
     enable_ml_shadow: bool = False
+    # Reserved: the online-learner and RL shadow layers currently run via their gates (LEARN-PROMO,
+    # RL-SIM/RL-SHADOW), not scheduled jobs, so these toggles have no scheduled job to gate yet.
     enable_online_learning_shadow: bool = False
     enable_rl_shadow: bool = False
+
+    # --- Scheduler (periodic recurring jobs; runs as the `scheduler` service) ---
+    # Off by default so tests/host tooling never auto-enqueue; the compose scheduler service
+    # sets SCHEDULER_ENABLED=true. Per-job cadence is in src/scheduler.py.
+    scheduler_enabled: bool = False
+    scheduler_tick_sec: int = 60
 
     # --- Exchange API credentials (absent by default) ----------------------
     exchange_api_key: str = ""
     exchange_api_secret: str = ""
 
-    # --- Monitoring ---------------------------------------------------------
+    # --- Monitoring / alert transports --------------------------------------
+    # Push channels are OPTIONAL: a transport activates only when its fields are set, else the
+    # alert sink is log-only (so tests/gates are unaffected). Both are fail-safe at runtime.
     alert_telegram_bot_token: str = ""
     alert_telegram_chat_id: str = ""
+    alert_email_host: str = ""
+    alert_email_port: int = 587
+    alert_email_from: str = ""
+    alert_email_to: str = ""  # comma-separated recipients
+    alert_email_username: str = ""
+    alert_email_password: str = ""
+    alert_email_use_tls: bool = True
 
     # --- Service identity (set per container by docker-compose) ------------
     service_name: str = "backend"

@@ -1,0 +1,59 @@
+# data.bybit.yaml — REAL-DATA data-platform contract (Bybit USDT linear perps).
+#
+# Opt-in counterpart to data.yaml (which stays on the offline skeleton so tests
+# and gates run with no network). Point the platform at this file to download and
+# validate REAL Bybit public market data into a versioned DATA_VERSION snapshot:
+#
+#   qbot download --exchange bybit --symbols "BTC/USDT:USDT" --days 7
+#
+# or load it directly:  load_data_config("configs/data.bybit.yaml").
+#
+# Exchange reality the settings below encode (see src/data/ccxt_source.py):
+#   * OHLCV / mark / index / funding are served over long windows.
+#   * open_interest is RECENT-ONLY and retained longer at coarser intervals:
+#     ~16h @ 5m, ~8d @ 1h, ~33d @ 4h, ~199d @ 1d. So OI is sampled on its own
+#     coarser grid (oi_timeframe) and the download window must END near "now"
+#     for OI to be fully covered. For multi-week history sample OI at 4h/1d.
+#   * spread has no public L1 history — it is a conservative estimate.
+
+version: 1
+
+data:
+  exchange_id: bybit
+  data_version: bybit_0001
+
+  symbols:
+    - "BTC/USDT:USDT"
+    - "ETH/USDT:USDT"
+    - "SOL/USDT:USDT"
+
+  # OHLCV decision timeframes collected for every symbol.
+  timeframes: ["5m", "1h", "4h"]
+
+  # Mark / index / spread are sampled on this base grid.
+  base_timeframe: "5m"
+
+  # Open interest is sampled on a coarser grid than base because Bybit only
+  # retains ~16h of 5m OI but ~8 days at 1h (set 4h/1d for longer windows).
+  oi_timeframe: "1h"
+
+  funding_interval_hours: 8
+
+  required_series: ["ohlcv", "mark", "index", "funding", "open_interest", "spread"]
+
+  # Default example window. Keep ``as_of`` recent (within OI retention) or pass
+  # --as-of/--days on the CLI; an older window legitimately has missing OI.
+  window:
+    as_of: "2026-06-15T00:00:00Z"
+    duration_hours: 120   # 5 days (within Bybit's ~8-day 1h-OI retention)
+
+  validation:
+    max_unfilled_gap_bars: 0
+    max_spread_bps: 250.0
+    min_price: 0.0
+    max_price: 1.0e12
+    max_funding_misalignment_s: 1
+    max_markindex_misalignment_s: 1
+    clock_drift_tolerance_s: 2.0
+
+  insufficient_history: []

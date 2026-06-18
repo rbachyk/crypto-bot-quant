@@ -18,6 +18,7 @@ from src.config.settings import REPO_ROOT
 from src.data.schema import (
     FUNDING,
     OHLCV,
+    OPEN_INTEREST,
     SeriesKey,
     parse_utc_ms,
 )
@@ -49,10 +50,20 @@ class DataConfig:
     window_end_ms: int
     insufficient_history: list[str] = field(default_factory=list)
     thresholds: ValidationThresholds = field(default_factory=ValidationThresholds)
+    # Optional coarser grid for open interest. Some venues (e.g. Bybit) only serve
+    # recent OI and retain longer history at coarser intervals, so OI may be sampled
+    # on its own grid while mark/index/spread stay on ``base_timeframe``. ``None`` ⇒
+    # OI shares the base grid (the offline skeleton default, unchanged).
+    oi_timeframe: str | None = None
 
     @property
     def funding_timeframe(self) -> str:
         return f"{self.funding_interval_hours}h"
+
+    @property
+    def oi_grid(self) -> str:
+        """The timeframe label open-interest is sampled on (defaults to base)."""
+        return self.oi_timeframe or self.base_timeframe
 
     def active_symbols(self) -> list[str]:
         """Symbols that must be fully covered (insufficient-history excluded)."""
@@ -68,6 +79,8 @@ class DataConfig:
                     keys.append(SeriesKey(self.exchange_id, OHLCV, symbol, tf))
             elif series == FUNDING:
                 keys.append(SeriesKey(self.exchange_id, FUNDING, symbol, self.funding_timeframe))
+            elif series == OPEN_INTEREST:
+                keys.append(SeriesKey(self.exchange_id, OPEN_INTEREST, symbol, self.oi_grid))
             else:
                 keys.append(SeriesKey(self.exchange_id, series, symbol, self.base_timeframe))
         return keys
@@ -109,4 +122,5 @@ def load_data_config(path: str | None = None) -> DataConfig:
         window_end_ms=end_ms,
         insufficient_history=list(data.get("insufficient_history", [])),
         thresholds=thresholds,
+        oi_timeframe=(str(data["oi_timeframe"]) if data.get("oi_timeframe") else None),
     )

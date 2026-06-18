@@ -14,6 +14,7 @@ require explicit confirmation and are logged to audit_log.
 
 from __future__ import annotations
 
+import html
 from pathlib import Path
 from typing import Any
 
@@ -119,6 +120,10 @@ _NAV = """
 <a href="/">Overview</a>
 <a href="/dashboard/gates">Gates</a>
 <a href="/dashboard/road-to-live">Road to Live</a>
+<a href="/dashboard/backtests">Backtests</a>
+<a href="/dashboard/leaderboard">Leaderboard</a>
+<a href="/dashboard/paper">Paper</a>
+<a href="/dashboard/shadow">ML Shadow</a>
 <a href="/dashboard/jobs">Jobs</a>
 <a href="/dashboard/stats">Statistics</a>
 <a href="/dashboard/remediation">Remediation</a>
@@ -142,6 +147,13 @@ def _page(title: str, body: str) -> str:
         f"{body}"
         "</div></body></html>"
     )
+
+
+def _esc(value: object) -> str:
+    """HTML-escape any value before interpolating it into dashboard markup. Defensive
+    against stored-XSS if a rendered field (job params, failure text, log message, audit
+    actor/action) ever carries attacker-influenced content."""
+    return html.escape("" if value is None else str(value))
 
 
 def _status_badge(status: str) -> str:
@@ -242,10 +254,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             f"mode={settings.trading_mode.value} · "
             f"live_allowed={settings.live_trading_allowed}"
         )
+        from src.killswitch import KillSwitch
+
+        ks_engaged = KillSwitch(settings).engaged()
+        ks_control = (
+            '<form method="post" action="/api/killswitch/disengage?confirm=true" '
+            'style="display:inline"><button class="btn" type="submit">'
+            "Disengage (manual reset)</button></form>"
+            if ks_engaged
+            else '<form method="post" action="/api/killswitch/engage?reason=dashboard+manual+kill" '
+            'style="display:inline"><button class="btn btn-danger" type="submit">'
+            "ENGAGE KILL SWITCH</button></form>"
+        )
+        ks_widget = (
+            '<div class="card"><h2>Kill Switch</h2><p>Status: '
+            + (
+                '<span class="badge fail">ENGAGED</span>'
+                if ks_engaged
+                else '<span class="badge pass">CLEAR</span>'
+            )
+            + f"</p>{ks_control}</div>"
+        )
         return _page(
             "Overview — Control Center",
             f"<p class='meta'>{env_info}</p>"
             + gate_widget
+            + ks_widget
             + jobs_widget
             + universe_widget
             + f'<p class="meta">config_version={settings.config_version} · '
@@ -294,10 +328,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         to_ts: str | None = None,
         user: str = Depends(require_dashboard_auth),
     ) -> str:
-        from src.api.stats import get_aggregate_stats
+        from src.api.stats import get_aggregate_stats, get_symbols_list
 
         try:
             agg = get_aggregate_stats(period, from_ts, to_ts)
+            symbols = get_symbols_list()
+            symbol_links = (
+                " · ".join(f'<a href="/dashboard/stats/{_esc(s)}">{_esc(s)}</a>' for s in symbols)
+                if symbols
+                else '<span class="meta">no symbols yet</span>'
+            )
             g = agg.gates
             j = agg.jobs
             score_cls = (
@@ -339,7 +379,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
   </table>
 </div>
 <p class="meta">Trading metrics (PnL, win-rate, drawdown, fees, slippage, funding) populate in Phase 8.</p>
-<p><a href="/dashboard/stats/symbol" class="btn btn-neutral">Per-Symbol Stats →</a></p>"""
+<p><b>Per-Symbol Stats →</b> {symbol_links}</p>"""
         except Exception as exc:
             body = f'<div class="card"><p class="meta">Error: {exc}</p></div>'
         return _page("General Statistics", body)
@@ -519,7 +559,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 f"<td>{j.created_at.strftime('%Y-%m-%d %H:%M')}</td>"
                 f"<td>{prog}</td>"
                 f"<td>{j.related_gate_id or '-'}</td>"
-                f"<td>{(j.failure_reason or '')[:60]}</td>"
+                f"<td>{_esc((j.failure_reason or '')[:60])}</td>"
                 f"</tr>"
             )
         filter_form = f"""
@@ -552,11 +592,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return _page("Job Not Found", '<p class="meta">Job not found.</p>')
             logs_html = (
                 "".join(
-                    f"<tr><td>{lg.ts.strftime('%H:%M:%S')}</td><td>{lg.level}</td><td>{lg.message}</td></tr>"
+                    f"<tr><td>{lg.ts.strftime('%H:%M:%S')}</td><td>{_esc(lg.level)}</td><td>{_esc(lg.message)}</td></tr>"
                     for lg in job.logs
                 )
                 or '<tr><td colspan="3" class="meta">No logs.</td></tr>'
             )
+            jid = job.job_id
+            st = job.status.value
+            actions = ""
+            if st in ("queued", "running"):
+                actions += (
+                    f'<form method="post" action="/api/jobs/{jid}/cancel" style="display:inline">'
+                    f'<button class="btn btn-danger" type="submit">Cancel</button></form> '
+                )
+            if st in ("failed", "cancelled", "expired"):
+                actions += (
+                    f'<form method="post" action="/api/jobs/{jid}/retry" style="display:inline">'
+                    f'<button class="btn" type="submit">Retry</button></form> '
+                )
+            actions_card = f'<div class="card"><h2>Actions</h2>{actions}</div>' if actions else ""
             body = f"""
 <div class="card">
   <h2>Job: {job.job_id}</h2>
@@ -565,12 +619,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     <tr><td>Type</td><td>{job.job_type}</td></tr>
     <tr><td>Status</td><td>{_status_badge(job.status.value)}</td></tr>
     <tr><td>Created</td><td>{job.created_at.isoformat()}</td></tr>
-    <tr><td>Progress</td><td>{job.progress_current}/{job.progress_total} — {job.progress_message}</td></tr>
+    <tr><td>Progress</td><td>{job.progress_current}/{job.progress_total} — {_esc(job.progress_message)}</td></tr>
     <tr><td>Related Gate</td><td>{job.related_gate_id or "-"}</td></tr>
-    <tr><td>Failure Reason</td><td>{job.failure_reason or "-"}</td></tr>
-    <tr><td>Next Action</td><td>{job.next_action_hint or "-"}</td></tr>
+    <tr><td>Failure Reason</td><td>{_esc(job.failure_reason) or "-"}</td></tr>
+    <tr><td>Next Action</td><td>{_esc(job.next_action_hint) or "-"}</td></tr>
   </table>
 </div>
+{actions_card}
 <div class="card">
   <h2>Logs</h2>
   <table>
@@ -891,7 +946,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
                 remediation_html += (
                     f'<div class="remediation-step">'
-                    f"<b>Step {a.step_index + 1}:</b> {a.description} "
+                    f"<b>Step {a.step_index + 1}:</b> {_esc(a.description)} "
                     f"{status_badge} {run_btn}"
                     f"</div>"
                 )
@@ -905,7 +960,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
   <p>Status: {_status_badge(status)}</p>
   <p class="meta">Phase: {spec.phase if spec else "?"} · Blocks live: {(spec.blocks_live if spec else "?")}</p>
   <p><b>Pass condition:</b> {spec.pass_condition if spec else "N/A"}</p>
-  {f'<p class="meta"><b>Failure reason:</b> {result.failure_reason}</p>' if result and result.failure_reason else ""}
+  {f'<p class="meta"><b>Failure reason:</b> {_esc(result.failure_reason)}</p>' if result and result.failure_reason else ""}
   {f'<p class="meta">Last run: {result.started_at.isoformat() if result else "never"}</p>'}
   {f'<p class="meta">Report: <code>{result.report_path}</code></p>' if result and result.report_path else ""}
 </div>
@@ -980,6 +1035,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
   <div class="{score_cls}">{score:.0f}%</div>
   <p class="meta">{critical_passed} of {critical_total} critical gates passed</p>
   {'<p style="color:#3fb950">All critical gates PASS — system is ready for live activation (still requires manual approval).</p>' if score >= 100 else '<p class="meta">Fix all failed/blocked gates below to reach 100%.</p>'}
+  {'<form method="post" action="/api/approvals?subject_type=live_activation&subject_id=LIVE" style="margin-top:8px"><button class="btn" type="submit">Request live-activation approval</button></form>' if score >= 100 else ""}
 </div>
 <div class="card">
   <h2>Gate Checklist</h2>
@@ -1053,7 +1109,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 f"<tr>"
                 f"<td>{a.gate_id}</td>"
                 f"<td>Step {a.step_index + 1}</td>"
-                f"<td>{a.description[:100]}</td>"
+                f"<td>{_esc(a.description[:100])}</td>"
                 f"<td>{_status_badge(a.status.value)}</td>"
                 f"<td>{a.recommended_job or '-'}</td>"
                 f"<td>"
@@ -1073,6 +1129,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _page("Remediation Actions", body)
 
     # ----- approvals ------------------------------------------------------- #
+    @app.post("/api/approvals")
+    def create_approval(
+        subject_type: str,
+        subject_id: str,
+        user: str = Depends(require_dashboard_auth),
+    ) -> dict:
+        """Raise a PENDING approval request (e.g. live activation) for an operator to decide."""
+        from src.approvals import request_approval
+
+        approval_id = request_approval(subject_type, subject_id, requested_by=user)
+        _audit(
+            "approval_requested",
+            target=f"{subject_type}:{subject_id}",
+            actor=user,
+            detail={"subject_type": subject_type, "subject_id": subject_id},
+        )
+        return {"id": approval_id, "status": "pending"}
+
     @app.get("/api/approvals")
     def list_approvals(
         limit: int = 50,
@@ -1147,22 +1221,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         rows = ""
         for a in approvals:
+            if a.status is ApprovalStatus.PENDING:
+                decide = (
+                    f'<form method="post" action="/api/approvals/{a.id}/approve" '
+                    f'style="display:inline"><button class="btn" type="submit" '
+                    f'style="padding:2px 8px;font-size:11px">Approve</button></form> '
+                    f'<form method="post" action="/api/approvals/{a.id}/reject" '
+                    f'style="display:inline"><button class="btn btn-danger" type="submit" '
+                    f'style="padding:2px 8px;font-size:11px">Reject</button></form>'
+                )
+            else:
+                decide = '<span class="meta">—</span>'
             rows += (
                 f"<tr>"
-                f"<td>{a.subject_type}</td>"
-                f"<td>{a.subject_id[:32]}</td>"
+                f"<td>{_esc(a.subject_type)}</td>"
+                f"<td>{_esc(a.subject_id[:32])}</td>"
                 f"<td>{_status_badge(a.status.value)}</td>"
-                f"<td>{a.requested_by}</td>"
-                f"<td>{a.approver or '-'}</td>"
+                f"<td>{_esc(a.requested_by)}</td>"
+                f"<td>{_esc(a.approver or '-')}</td>"
                 f"<td>{a.created_at.strftime('%Y-%m-%d %H:%M')}</td>"
+                f"<td>{decide}</td>"
                 f"</tr>"
             )
         body = f"""
 <div class="card">
   <h2>Approvals ({len(approvals)} shown)</h2>
   <table>
-    <tr><th>Type</th><th>Subject</th><th>Status</th><th>Requested By</th><th>Approver</th><th>Created</th></tr>
-    {rows or '<tr><td colspan="6" class="meta">No approvals found.</td></tr>'}
+    <tr><th>Type</th><th>Subject</th><th>Status</th><th>Requested By</th><th>Approver</th>
+        <th>Created</th><th>Decide</th></tr>
+    {rows or '<tr><td colspan="7" class="meta">No approvals found.</td></tr>'}
   </table>
 </div>"""
         return _page("Approvals", body)
@@ -1206,8 +1293,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             rows += (
                 f"<tr>"
                 f"<td>{lg.ts.strftime('%Y-%m-%d %H:%M:%S')}</td>"
-                f"<td>{lg.actor}</td>"
-                f"<td>{lg.action}</td>"
+                f"<td>{_esc(lg.actor)}</td>"
+                f"<td>{_esc(lg.action)}</td>"
                 f"<td>{lg.target or '-'}</td>"
                 f"<td>{lg.environment}</td>"
                 f"</tr>"
@@ -1269,6 +1356,268 @@ def create_app(settings: Settings | None = None) -> FastAPI:
   </table>
 </div>"""
         return _page("Reports", body)
+
+    # ----- backtests ------------------------------------------------------- #
+    @app.post("/api/backtests/run")
+    def run_backtest(label: str = "", user: str = Depends(require_dashboard_auth)) -> dict:
+        """Enqueue a background backtest (consumed by the dedicated `backtest` worker)."""
+        from src.jobs import JobQueue
+
+        job_id = JobQueue(settings).enqueue(
+            "run_backtest",
+            {"label": label or "dashboard_backtest", "requested_by": user},
+            requested_by=user,
+        )
+        _audit("run_backtest", target=label or "dashboard_backtest", actor=user, detail={})
+        return {"job_id": job_id}
+
+    @app.get("/api/backtests")
+    def list_backtests(limit: int = 50, user: str = Depends(require_dashboard_auth)) -> list[dict]:
+        from src.db.models import BacktestRun
+
+        with session_scope() as session:
+            rows = (
+                session.execute(select(BacktestRun).order_by(desc(BacktestRun.created_at)))
+                .scalars()
+                .all()
+            )[:limit]
+            return [
+                {
+                    "run_id": r.run_id,
+                    "kind": r.kind,
+                    "created_at": r.created_at.isoformat(),
+                    "strategy_id": r.strategy_id,
+                    "passed": r.passed,
+                    "trade_count": r.trade_count,
+                    "expectancy_r": r.expectancy_r,
+                    "profit_factor": r.profit_factor,
+                    "total_return": r.total_return,
+                    "max_drawdown": r.max_drawdown,
+                    "report_path": r.report_path,
+                }
+                for r in rows
+            ]
+
+    @app.get("/dashboard/backtests", response_class=HTMLResponse)
+    def dashboard_backtests(user: str = Depends(require_dashboard_auth)) -> str:
+        from src.db.models import BacktestRun
+
+        with session_scope() as session:
+            rows = (
+                session.execute(select(BacktestRun).order_by(desc(BacktestRun.created_at)))
+                .scalars()
+                .all()
+            )[:100]
+            runs = [
+                (
+                    r.run_id,
+                    r.kind,
+                    r.created_at.strftime("%Y-%m-%d %H:%M"),
+                    bool(r.passed),
+                    r.trade_count,
+                    r.expectancy_r,
+                    r.profit_factor,
+                    r.total_return,
+                    r.max_drawdown,
+                )
+                for r in rows
+            ]
+
+        body_rows = "".join(
+            f"<tr><td><code>{_esc(rid)}</code></td><td>{_esc(kind)}</td><td>{created}</td>"
+            f"<td>{_status_badge('passed' if passed else 'failed')}</td>"
+            f"<td>{tc}</td><td>{er:+.4f}</td><td>{pf:.2f}</td>"
+            f"<td>{ret:+.2%}</td><td>{dd:.2%}</td></tr>"
+            for (rid, kind, created, passed, tc, er, pf, ret, dd) in runs
+        )
+        body = f"""
+<div class="card">
+  <h2>Backtests ({len(runs)})</h2>
+  <form method="post" action="/api/backtests/run" style="margin-bottom:12px">
+    <input type="text" name="label" placeholder="label (optional)" style="width:220px">
+    <button class="btn" type="submit">&#9654; Run backtest</button>
+  </form>
+  <p class="meta">Runs execute in the background on the <code>backtest</code> worker; this
+     page reads the <code>backtest_runs</code> index. Profitability is judged authoritatively
+     by the BT / WF / FEE / SLIP gates.</p>
+  <table>
+    <tr><th>Run</th><th>Kind</th><th>Created</th><th>Net&gt;0</th><th>Trades</th>
+        <th>Expectancy R</th><th>Profit Factor</th><th>Return</th><th>Max DD</th></tr>
+    {body_rows or '<tr><td colspan="9" class="meta">No backtests yet — click Run backtest.</td></tr>'}
+  </table>
+</div>"""
+        return _page("Backtests", body)
+
+    # ----- leaderboard (M3 iteration comparison) --------------------------- #
+    @app.get("/api/backtests/leaderboard")
+    def api_leaderboard(
+        kind: str = "backtest",
+        dataset_version: str = "",
+        strategy: str = "",
+        limit: int = 50,
+        best_per_iteration: bool = True,
+        user: str = Depends(require_dashboard_auth),
+    ) -> list[dict]:
+        from src.backtest.leaderboard import build_leaderboard
+
+        entries = build_leaderboard(
+            kind=None if kind == "all" else kind,
+            dataset_version=dataset_version or None,
+            strategy_id=strategy or None,
+            limit=limit,
+            best_per_iteration=best_per_iteration,
+        )
+        return [e.to_dict() for e in entries]
+
+    @app.get("/dashboard/leaderboard", response_class=HTMLResponse)
+    def dashboard_leaderboard(user: str = Depends(require_dashboard_auth)) -> str:
+        from src.backtest.leaderboard import build_leaderboard
+
+        entries = build_leaderboard(limit=100, best_per_iteration=True)
+        body_rows = "".join(
+            f"<tr><td>{e.rank}</td><td><code>{_esc(e.run_id)}</code></td>"
+            f"<td>{_esc(e.dataset_version or '—')}</td><td>{_esc(e.strategy_id)}</td>"
+            f"<td>{_esc(e.timeframe or '—')}</td>"
+            f"<td>{_status_badge('passed' if e.meets_bar else 'failed')}</td>"
+            f"<td>{e.trade_count}</td><td>{e.expectancy_r:+.4f}</td>"
+            f"<td>{e.profit_factor:.2f}</td><td>{e.total_return:+.2%}</td>"
+            f"<td>{e.max_drawdown:.2%}</td></tr>"
+            for e in entries
+        )
+        body = f"""
+<div class="card">
+  <h2>Iteration Leaderboard ({len(entries)})</h2>
+  <p class="meta">Best run per (strategy, DATA_VERSION snapshot, timeframe), ranked by the
+     profitability bar (expectancy &ge; 0.03R, PF &ge; 1.10, max-DD &le; 0.25, enough trades).
+     Runs are immutable, so every research iteration is retained and comparable. <b>Meets bar</b>
+     is a display flag — the BT / WF / FEE / SLIP gates remain the binding judgement before live.
+     Add iterations with <code>qbot backtest-lake --config configs/data.bybit.yaml</code>.</p>
+  <table>
+    <tr><th>#</th><th>Run</th><th>Data Version</th><th>Strategy</th><th>TF</th><th>Meets bar</th>
+        <th>Trades</th><th>Expectancy R</th><th>Profit Factor</th><th>Return</th><th>Max DD</th></tr>
+    {body_rows or '<tr><td colspan="11" class="meta">No runs yet — run qbot backtest-lake.</td></tr>'}
+  </table>
+</div>"""
+        return _page("Leaderboard", body)
+
+    # ----- paper trading --------------------------------------------------- #
+    @app.post("/api/paper/run")
+    def run_paper(user: str = Depends(require_dashboard_auth)) -> dict:
+        """Enqueue a background paper session over the promoted strategies."""
+        from src.jobs import JobQueue
+
+        job_id = JobQueue(settings).enqueue(
+            "run_paper_session", {"session_name": "dashboard_paper"}, requested_by=user
+        )
+        _audit("run_paper_session", target="paper", actor=user, detail={})
+        return {"job_id": job_id}
+
+    @app.get("/dashboard/paper", response_class=HTMLResponse)
+    def dashboard_paper(user: str = Depends(require_dashboard_auth)) -> str:
+        from src.db.models import PaperRun
+
+        with session_scope() as session:
+            runs = (
+                session.execute(select(PaperRun).order_by(desc(PaperRun.created_at)).limit(100))
+                .scalars()
+                .all()
+            )
+            rows = [
+                (
+                    r.session_id,
+                    r.created_at.strftime("%Y-%m-%d %H:%M"),
+                    r.executed_count,
+                    r.rejected_count,
+                    r.net_pnl,
+                    r.expectancy_r,
+                    r.win_rate,
+                    ", ".join(r.strategies or []),
+                )
+                for r in runs
+            ]
+
+        body_rows = "".join(
+            f"<tr><td><code>{_esc(sid)}</code></td><td>{created}</td><td>{ex}</td><td>{rej}</td>"
+            f"<td>{net:+.2f}</td><td>{er:+.4f}</td><td>{wr:.0%}</td><td>{_esc(strats)}</td></tr>"
+            for (sid, created, ex, rej, net, er, wr, strats) in rows
+        )
+        body = f"""
+<div class="card">
+  <h2>Paper Trading ({len(rows)})</h2>
+  <form method="post" action="/api/paper/run" style="margin-bottom:12px">
+    <button class="btn" type="submit">&#9654; Run paper session</button>
+  </form>
+  <p class="meta">Runs execute in the background and source candidates only from
+     <b>promoted</b> strategies (the research promotion registry); trades persist to
+     <code>paper_trades</code>.</p>
+  <table>
+    <tr><th>Session</th><th>Created</th><th>Executed</th><th>Rejected</th><th>Net PnL</th>
+        <th>Expectancy R</th><th>Win Rate</th><th>Strategies</th></tr>
+    {body_rows or '<tr><td colspan="8" class="meta">No paper sessions yet — click Run paper session.</td></tr>'}
+  </table>
+</div>"""
+        return _page("Paper Trading", body)
+
+    # ----- ML shadow ------------------------------------------------------- #
+    @app.post("/api/shadow/run")
+    def run_shadow(user: str = Depends(require_dashboard_auth)) -> dict:
+        """Enqueue a background ML shadow pass (predictions logged, never applied)."""
+        from src.jobs import JobQueue
+
+        job_id = JobQueue(settings).enqueue("run_ml_shadow_pass", {}, requested_by=user)
+        _audit("run_ml_shadow_pass", target="ml_shadow", actor=user, detail={})
+        return {"job_id": job_id}
+
+    @app.get("/dashboard/shadow", response_class=HTMLResponse)
+    def dashboard_shadow(user: str = Depends(require_dashboard_auth)) -> str:
+        from src.db.models import ShadowLog
+
+        with session_scope() as session:
+            logs = (
+                session.execute(select(ShadowLog).order_by(desc(ShadowLog.ts)).limit(200))
+                .scalars()
+                .all()
+            )
+            total = len(logs)
+            applied = sum(1 for lg in logs if lg.applied)
+            by_type: dict[str, int] = {}
+            by_mode: dict[str, int] = {}
+            for lg in logs:
+                by_type[lg.model_type] = by_type.get(lg.model_type, 0) + 1
+                by_mode[lg.mode] = by_mode.get(lg.mode, 0) + 1
+            recent = [
+                (
+                    lg.ts.strftime("%Y-%m-%d %H:%M"),
+                    lg.model_type,
+                    lg.mode,
+                    lg.symbol or "-",
+                    f"{lg.confidence:.3f}" if lg.confidence is not None else "-",
+                    lg.applied,
+                )
+                for lg in logs[:50]
+            ]
+
+        rows = "".join(
+            f"<tr><td>{ts}</td><td>{_esc(mt)}</td><td>{_esc(mode)}</td><td>{_esc(sym)}</td>"
+            f"<td>{conf}</td><td>{_status_badge('passed' if not ap else 'failed')}</td></tr>"
+            for (ts, mt, mode, sym, conf, ap) in recent
+        )
+        applied_badge = _status_badge("passed") if applied == 0 else _status_badge("failed")
+        body = f"""
+<div class="card">
+  <h2>ML Shadow ({total} recent predictions)</h2>
+  <form method="post" action="/api/shadow/run" style="margin-bottom:12px">
+    <button class="btn" type="submit">&#9654; Run ML shadow pass</button>
+  </form>
+  <p>Shadow-only enforcement — applied predictions: <b>{applied}</b> {applied_badge}
+     (must be 0; ML can never affect a live decision until promoted).</p>
+  <p class="meta">By model: {_esc(by_type)} · By mode: {_esc(by_mode)}</p>
+  <table>
+    <tr><th>Time</th><th>Model</th><th>Mode</th><th>Symbol</th><th>Confidence</th><th>Shadow-only</th></tr>
+    {rows or '<tr><td colspan="6" class="meta">No shadow predictions yet — click Run ML shadow pass.</td></tr>'}
+  </table>
+</div>"""
+        return _page("ML Shadow", body)
 
     # ----- alerts ---------------------------------------------------------- #
     @app.get("/api/alerts")

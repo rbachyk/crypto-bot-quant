@@ -31,6 +31,12 @@ reports/strategies/
 reports/ranking/
 reports/risk/
 reports/execution/
+reports/paper/
+reports/ml_shadow/
+reports/phase_10/
+reports/phase_11/
+reports/phase_12/
+reports/phase_13/
 
 # OS
 .DS_Store

@@ -433,6 +433,83 @@ class BacktestRun(Base):
     related_versions: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
+class StrategyPromotion(Base):
+    """Promotion verdict for one research candidate (Section 12/13).
+
+    The research harness validates each candidate (side expectancy, walk-forward, fee/slippage
+    stress, noise control) and promotes or shelves it. This table persists that verdict so the
+    paper/live pipeline can source candidates ONLY from promoted strategies instead of assuming
+    every candidate is approved. Upserted per (candidate_id, strategy_version)."""
+
+    __tablename__ = "strategy_promotions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    candidate_id: Mapped[str] = mapped_column(String(64), index=True)
+    family: Mapped[str] = mapped_column(String(8), default="")
+    strategy_version: Mapped[str] = mapped_column(String(32), index=True)
+    promoted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    status: Mapped[str] = mapped_column(String(16), default="shelved")  # promoted | shelved
+    expectancy_r: Mapped[float] = mapped_column(default=0.0)
+    allow_long: Mapped[bool] = mapped_column(Boolean, default=False)
+    allow_short: Mapped[bool] = mapped_column(Boolean, default=False)
+    shelved_reasons: Mapped[list] = mapped_column(JSON, default=list)
+    summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    validated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, index=True
+    )
+    related_versions: Mapped[dict] = mapped_column(JSON, default=dict)
+    __table_args__ = (UniqueConstraint("candidate_id", "strategy_version", name="uq_promotion"),)
+
+
+class PaperRun(Base):
+    """Summary of one paper-trading session (Section 26). Upserted per session_id; the dashboard
+    Paper page lists these and the full session JSON is written to the reports lake."""
+
+    __tablename__ = "paper_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, index=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    executed_count: Mapped[int] = mapped_column(Integer, default=0)
+    rejected_count: Mapped[int] = mapped_column(Integer, default=0)
+    net_pnl: Mapped[float] = mapped_column(default=0.0)
+    expectancy_r: Mapped[float] = mapped_column(default=0.0)
+    win_rate: Mapped[float] = mapped_column(default=0.0)
+    symbols: Mapped[list] = mapped_column(JSON, default=list)
+    strategies: Mapped[list] = mapped_column(JSON, default=list)
+    report_path: Mapped[str | None] = mapped_column(Text)
+    related_versions: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class PaperTradeRecord(Base):
+    """One executed paper trade persisted from a :class:`~src.paper.session.PaperTrade`."""
+
+    __tablename__ = "paper_trades"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(80), index=True)
+    trade_id: Mapped[str] = mapped_column(String(80), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    strategy: Mapped[str] = mapped_column(String(64), index=True)
+    side: Mapped[int] = mapped_column(Integer, default=0)
+    qty: Mapped[float] = mapped_column(default=0.0)
+    entry_price: Mapped[float] = mapped_column(default=0.0)
+    exit_price: Mapped[float] = mapped_column(default=0.0)
+    exit_reason: Mapped[str] = mapped_column(String(24), default="")
+    regime: Mapped[str] = mapped_column(String(24), default="")
+    fee: Mapped[float] = mapped_column(default=0.0)
+    slippage_cost: Mapped[float] = mapped_column(default=0.0)
+    pnl: Mapped[float] = mapped_column(default=0.0)
+    pnl_r: Mapped[float] = mapped_column(default=0.0)
+    has_exchange_side_stop: Mapped[bool] = mapped_column(Boolean, default=False)
+    execution_route: Mapped[str] = mapped_column(String(8), default="")
+
+
 class ShadowLog(Base):
     """ML shadow-mode prediction log (AGENTS.md Section 24 ``shadow_log``).
 
@@ -523,8 +600,9 @@ class LearnerLog(Base):
 
 
 class DataQualityReportRow(Base):
-    """Persisted data-validation report (Section 8/23/34). A report is generated
-    before every research/paper/live run; the DQ gate reads the latest."""
+    """Persisted data-validation report (Section 8/23/34): an append-only audit trail
+    written on each DQ run by the data platform. (The DQ gate re-runs validation live and
+    asserts on the fresh result; this table is the historical record, not its input.)"""
 
     __tablename__ = "data_quality_reports"
 

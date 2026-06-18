@@ -34,9 +34,12 @@ x-app-build: &app-build
   build:
     context: .
     dockerfile: Dockerfile
+  # Auto-restart on crash/OOM (DEPLOY gate). Merged into every app service via <<: *app-build.
+  restart: unless-stopped
 
 services:
   postgres:
+    restart: unless-stopped
     image: timescale/timescaledb:2.15.3-pg16
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -54,6 +57,7 @@ services:
       - "127.0.0.1:5432:5432"
 
   redis:
+    restart: unless-stopped
     image: redis:7-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     healthcheck:
@@ -81,21 +85,23 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-    # Internal only — exposed to the outside solely through Caddy (443).
+    # Internal only — exposed to the outside solely through Caddy (443). The `backend`
+    # service IS the dashboard + API (one FastAPI app); Caddy proxies it at https://localhost.
     expose:
       - "8000"
 
+  # Same FastAPI app as `backend`, on its own port/process (part of the canonical B.12
+  # topology the INFRA gate validates). Caddy fronts `backend`; this is a second internal
+  # instance for the dashboard shell.
   dashboard:
     <<: *app-build
     environment:
       <<: *app-env
       SERVICE_NAME: dashboard
-    # Phase 1 dashboard shell is served by the same FastAPI app.
     command: ["uvicorn", "src.api.app:app", "--host", "0.0.0.0", "--port", "8001"]
     depends_on:
       backend:
         condition: service_started
-    # Internal only — never published; fronted by Caddy (443) with auth.
     expose:
       - "8001"
 
@@ -104,7 +110,7 @@ services:
     environment:
       <<: *app-env
       SERVICE_NAME: worker-data
-    command: ["python", "-m", "src.cli.main", "worker"]
+    command: ["python", "-m", "src.cli.main", "worker", "--queues", "data"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -116,7 +122,7 @@ services:
     environment:
       <<: *app-env
       SERVICE_NAME: worker-backtest
-    command: ["python", "-m", "src.cli.main", "worker"]
+    command: ["python", "-m", "src.cli.main", "worker", "--queues", "backtest"]
     depends_on:
       redis:
         condition: service_healthy
@@ -126,7 +132,7 @@ services:
     environment:
       <<: *app-env
       SERVICE_NAME: worker-ml
-    command: ["python", "-m", "src.cli.main", "worker"]
+    command: ["python", "-m", "src.cli.main", "worker", "--queues", "ml"]
     depends_on:
       redis:
         condition: service_healthy
@@ -136,7 +142,7 @@ services:
     environment:
       <<: *app-env
       SERVICE_NAME: worker-rl
-    command: ["python", "-m", "src.cli.main", "worker"]
+    command: ["python", "-m", "src.cli.main", "worker", "--queues", "rl"]
     depends_on:
       redis:
         condition: service_healthy
@@ -146,7 +152,7 @@ services:
     environment:
       <<: *app-env
       SERVICE_NAME: worker-reports
-    command: ["python", "-m", "src.cli.main", "worker"]
+    command: ["python", "-m", "src.cli.main", "worker", "--queues", "gates"]
     depends_on:
       redis:
         condition: service_healthy
@@ -156,7 +162,10 @@ services:
     environment:
       <<: *app-env
       SERVICE_NAME: scheduler
-    command: ["python", "-m", "src.cli.main", "worker"]
+      SCHEDULER_ENABLED: "true"
+    # Periodic recurring jobs (research re-validation, paper sessions, ML shadow passes),
+    # gated by the enable_* toggles. It only enqueues; the dedicated workers consume.
+    command: ["python", "-m", "src.cli.main", "scheduler"]
     depends_on:
       redis:
         condition: service_healthy
@@ -167,8 +176,8 @@ services:
       <<: *app-env
       SERVICE_NAME: trading-engine-paper
       TRADING_MODE: PAPER
-    # Dedicated process (B.13). Phase 1 ships a placeholder loop.
-    command: ["python", "-m", "src.cli.main", "worker"]
+    # Dedicated process (B.13). Serves the default queue alongside the scheduler.
+    command: ["python", "-m", "src.cli.main", "worker", "--queues", "default"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -191,6 +200,7 @@ services:
         condition: service_healthy
 
   caddy:
+    restart: unless-stopped
     image: caddy:2-alpine
     depends_on:
       backend:

@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from src.api import create_app
 from src.config import Settings
 
-from tests.conftest import requires_redis
+from tests.conftest import requires_db, requires_redis
 
 # Force basic-auth even though tests may run in local env.
 _settings = Settings(
@@ -76,3 +76,30 @@ def test_dashboard_killswitch_engage_and_recovery(tmp_path) -> None:
     assert c.get("/api/killswitch", auth=AUTH).json()["engaged"] is True
     cleared = c.post("/api/killswitch/disengage?confirm=true", auth=AUTH)
     assert cleared.status_code == 200 and cleared.json()["engaged"] is False
+
+
+@requires_db
+def test_approvals_create_list_decide_loop() -> None:
+    # The approvals surface is fully wired: an operator can REQUEST an approval, see it
+    # pending, and approve it (previously the table was read by the UI but never written).
+    import uuid
+
+    sid = f"LIVE-{uuid.uuid4().hex[:8]}"
+    created = client.post(
+        f"/api/approvals?subject_type=live_activation&subject_id={sid}", auth=AUTH
+    )
+    assert created.status_code == 200
+    aid = created.json()["id"]
+    assert created.json()["status"] == "pending"
+
+    # Idempotent per pending subject: a second request returns the same id.
+    again = client.post(f"/api/approvals?subject_type=live_activation&subject_id={sid}", auth=AUTH)
+    assert again.json()["id"] == aid
+
+    listing = client.get("/api/approvals", auth=AUTH).json()
+    assert any(a["id"] == aid and a["status"] == "pending" for a in listing)
+
+    approved = client.post(f"/api/approvals/{aid}/approve", auth=AUTH)
+    assert approved.status_code == 200 and approved.json()["status"] == "approved"
+    # Re-deciding a non-pending approval is rejected.
+    assert client.post(f"/api/approvals/{aid}/approve", auth=AUTH).status_code == 400

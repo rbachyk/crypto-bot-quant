@@ -42,7 +42,7 @@ from src.gates.phase13 import (
 )
 from src.gates.result import Criterion
 from src.killswitch import KillSwitch
-from src.monitoring import Alert, AlertSeverity, check_health, get_alert_sink
+from src.monitoring import check_health
 from src.storage import DataLake, DatasetManifest, new_snapshot_id
 
 # Services required by Appendix B.3.
@@ -311,8 +311,13 @@ def check_queue(settings: Settings) -> list[Criterion]:
     except Exception as exc:  # noqa: BLE001
         return [Criterion.fail("redis_reachable", f"unreachable: {exc}")]
 
-    queue = JobQueue(settings)
-    worker = Worker(settings)
+    # Run the enqueue/consume/cancel probe on an ISOLATED redis DB so a running stack's
+    # workers (`make docker-up`, db 0) can't consume the probe jobs mid-check and flake the
+    # gate. The reachability check above already proves the production redis server works.
+    probe_url = settings.redis_url.rsplit("/", 1)[0] + "/15"
+    probe_client = redis.Redis.from_url(probe_url, decode_responses=True)
+    queue = JobQueue(settings, redis_client=probe_client)
+    worker = Worker(settings, redis_client=probe_client)
 
     # 1) enqueue + consume + progress + job record persisted.
     try:
@@ -437,101 +442,6 @@ def check_storage(settings: Settings) -> list[Criterion]:
         )
     except Exception as exc:  # noqa: BLE001
         out.append(Criterion.fail("artifact_writable", f"error: {exc}"))
-    return out
-
-
-# --------------------------------------------------------------------------- #
-# MON (skeleton)                                                               #
-# --------------------------------------------------------------------------- #
-def check_mon(settings: Settings) -> list[Criterion]:
-    out: list[Criterion] = []
-    report = check_health(settings=settings)
-    out.append(
-        Criterion.ok("health_checks_active", f"service={report.service}")
-        if report.components
-        else Criterion.fail("health_checks_active", "no components probed")
-    )
-
-    sink = get_alert_sink()
-    before = len(sink.recent(limit=1000))
-    # Exercise the required alert types end-to-end (Appendix B.14).
-    for title, comp in (
-        ("test alert", "monitoring"),
-        ("websocket stale", "data"),
-        ("job failed", "worker"),
-        ("kill switch triggered", "safety"),
-    ):
-        sink.send(
-            Alert(
-                title=title,
-                severity=AlertSeverity.INFO,
-                component=comp,
-                environment=settings.app_env.value,
-                recommended_action="skeleton: verify delivery transport in Phase 13",
-            )
-        )
-    delivered = len(sink.recent(limit=1000)) - before
-    out.append(
-        Criterion.ok("alert_test_delivered", f"{delivered} alerts delivered to sink")
-        if delivered >= 4
-        else Criterion.fail("alert_test_delivered", "alert delivery failed")
-    )
-    out.append(
-        Criterion.ok(
-            "monitoring_skeleton",
-            "stale-data / failed-job / kill-switch alerts wired (skeleton; transports in P13)",
-        )
-    )
-
-    # Phase 7: smoke-test dashboard panels (Appendix D Phase 7).
-    from src.gates.phase7 import check_mon_dashboard_panels
-
-    out.extend(check_mon_dashboard_panels(settings))
-
-    return out
-
-
-# --------------------------------------------------------------------------- #
-# BACKUP (skeleton)                                                            #
-# --------------------------------------------------------------------------- #
-def check_backup(settings: Settings) -> list[Criterion]:
-    from src.jobs.handlers import ensure_handlers_registered
-
-    ensure_handlers_registered()
-    from src.jobs.registry import registry
-
-    out: list[Criterion] = []
-    backup_script = REPO_ROOT / "scripts" / "backup_db.sh"
-    restore_script = REPO_ROOT / "scripts" / "restore_test.sh"
-
-    out.append(
-        Criterion.ok("backup_script_present", str(backup_script))
-        if backup_script.exists()
-        else Criterion.fail("backup_script_present", "scripts/backup_db.sh missing")
-    )
-    out.append(
-        Criterion.ok("restore_test_script_present", str(restore_script))
-        if restore_script.exists()
-        else Criterion.fail("restore_test_script_present", "scripts/restore_test.sh missing")
-    )
-    out.append(
-        Criterion.ok("restore_runnable_as_job", "run_restore_test_check registered")
-        if registry.has("run_restore_test_check")
-        else Criterion.fail("restore_runnable_as_job", "restore-test job not registered")
-    )
-    try:
-        settings.backup_path.mkdir(parents=True, exist_ok=True)
-        (settings.backup_path / ".probe").write_text("ok")
-        (settings.backup_path / ".probe").unlink()
-        out.append(Criterion.ok("backup_path_writable", str(settings.backup_path)))
-    except Exception as exc:  # noqa: BLE001
-        out.append(Criterion.fail("backup_path_writable", f"error: {exc}"))
-    out.append(
-        Criterion.ok(
-            "backup_skeleton",
-            "scheduled backups + verified restore enforced by full BACKUP gate in Phase 13",
-        )
-    )
     return out
 
 

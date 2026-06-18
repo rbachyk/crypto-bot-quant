@@ -27,7 +27,6 @@ class ExecutionPolicyConfig:
     max_spread_bps: float
     max_slippage_frac: float
     max_latency_ms: float
-    require_exchange_side_stop: bool
     attach_take_profit: bool
     trailing_offset_frac: float
     simulated_latency_ms: float
@@ -46,7 +45,6 @@ def load_execution_config(path: str | None = None) -> ExecutionPolicyConfig:
         max_spread_bps=float(data.get("max_spread_bps", 25.0)),
         max_slippage_frac=float(data.get("max_slippage_frac", 0.01)),
         max_latency_ms=float(data.get("max_latency_ms", 1500.0)),
-        require_exchange_side_stop=bool(data.get("require_exchange_side_stop", True)),
         attach_take_profit=bool(data.get("attach_take_profit", True)),
         trailing_offset_frac=float(data.get("trailing_offset_frac", 0.0)),
         simulated_latency_ms=float(data.get("simulated_latency_ms", 40.0)),

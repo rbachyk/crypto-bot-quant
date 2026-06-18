@@ -20,8 +20,7 @@ from src.config import Settings, get_settings
 from src.db.base import session_scope
 from src.db.models import Job, JobStatus
 from src.jobs.context import _cancel_key
-
-QUEUE_KEY = "qbot:queue"
+from src.jobs.routing import ALL_CLASSES, queue_class, queue_key
 
 
 class JobQueue:
@@ -62,7 +61,8 @@ class JobQueue:
                     created_at=datetime.now(UTC),
                 )
             )
-        self._redis.lpush(QUEUE_KEY, job_id)
+        # Route to the job's class queue so heavy work lands on its dedicated worker(s).
+        self._redis.lpush(queue_key(queue_class(job_type)), job_id)
         return job_id
 
     # -- cancel ---------------------------------------------------------- #
@@ -105,10 +105,12 @@ class JobQueue:
             job.progress_current = 0
             if job.max_attempts <= job.attempts:
                 job.max_attempts = job.attempts + 1
+            job_type = job.job_type
         self._redis.delete(_cancel_key(job_id))
-        self._redis.lpush(QUEUE_KEY, job_id)
+        self._redis.lpush(queue_key(queue_class(job_type)), job_id)
         return True
 
     # -- introspection --------------------------------------------------- #
     def depth(self) -> int:
-        return int(self._redis.llen(QUEUE_KEY))
+        """Total queued depth across every class queue."""
+        return sum(int(self._redis.llen(queue_key(c))) for c in ALL_CLASSES)

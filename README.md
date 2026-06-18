@@ -17,12 +17,16 @@ ownership, reconciliation), a paper-trading engine, shadow ML + RL/online-learni
 (shadow-only), and the full Gate Runner covering every gate from `INFRA` through
 `LIVE`.
 
-> **Scope note — this is a research + paper system, not a connected live bot.**
-> The exchange adapter is an offline deterministic **skeleton** (no `ccxt`/native
-> SDK), so strategies run on synthetic/replayed data and the paper engine fills via
-> a `SimulatedVenue`. Reaching real live trading still requires wiring a real venue
-> adapter, `[VERIFIED]` exchange metadata, and operator sign-off — and is hard-gated
-> off by default (see the live safety checklist below).
+> **Scope note — real market data in, simulated execution out.**
+> Real **public market data** is wired via `ccxt` (default **Bybit** USDT linear perps):
+> `qbot download --exchange bybit ...` ingests real OHLCV / mark / index / funding /
+> open-interest (+ estimated spread) into a versioned `DATA_VERSION` snapshot, so
+> backtests/paper/shadow iterate on real data without losing prior versions. The default
+> source stays the offline deterministic **skeleton** (tests + gates run with no network);
+> a real exchange id opts in. **Order placement / account access is still skeleton** — the
+> paper engine fills via a `SimulatedVenue`. Reaching real live trading still requires a
+> real *trading* venue adapter, `[VERIFIED]` exchange metadata, and operator sign-off, and
+> is hard-gated off by default (see the live safety checklist below).
 
 ## Local setup
 
@@ -51,12 +55,65 @@ make run-all-gates                          # every gate in dependency order
 uv run python -m src.gates.runner --gate BT --json    # one gate as JSON
 ```
 
+Or download **real** market data (Bybit) into a versioned snapshot and backtest on it:
+
+```bash
+# Real Bybit public data → immutable DATA_VERSION snapshot (OI sampled at 1h).
+uv run python -m src.cli.main download --config configs/data.bybit.yaml --days 5
+# Then run the event-based engine on that snapshot (src.backtest.service.run_lake_backtest).
+```
+
+Each download is an immutable `DATA_VERSION` snapshot, so research iterations never lose
+prior data. `build_lake_inputs()` feeds the lake through the **one** feature pipeline (the
+Parity Rule) into the same engine the BT/WF/FEE/SLIP gates use. Note Bybit only serves recent
+open-interest (≈8 days at 1h), so keep download windows recent or sample OI coarsely.
+
+Run real-data iterations and compare them on a leaderboard (each run is tagged with its
+`DATA_VERSION` so nothing is lost and iterations stay comparable):
+
+```bash
+uv run python -m src.cli.main backtest-lake --config configs/data.bybit.yaml --timeframe 1h
+uv run python -m src.cli.main leaderboard            # ranked by the profitability bar
+```
+
+The leaderboard ranks the best run per (strategy, snapshot, timeframe) by the profitability
+bar (expectancy ≥ 0.03R, PF ≥ 1.10, max-DD ≤ 0.25, enough trades) — see the **Leaderboard**
+dashboard page (`/dashboard/leaderboard`). It is a comparison aid; the BT/WF/FEE/SLIP gates
+remain the binding profitability judgement before anything advances toward live.
+
 Run the control center and a worker:
 
 ```bash
 uv run uvicorn src.api.app:app --reload     # dashboard + API on :8000
 make run-worker-data                        # a job worker (dedicated process)
 ```
+
+The dashboard (one FastAPI app, served via Caddy at `https://localhost` under docker) has:
+**Gates**, **Road to Live** (a live-readiness score over the `blocks_live` gates, in dependency
+order, with a *Request live-activation approval* button at 100%), **Backtests** (*Run backtest* →
+background `backtest` worker → stored in `backtest_runs`), **Leaderboard** (real-data iterations
+ranked by the profitability bar, grouped by `DATA_VERSION` snapshot), **Paper** (*Run paper session* → sources
+candidates only from **promoted** strategies → trades stored in `paper_trades`), **ML Shadow**
+(*Run ML shadow pass* → `shadow_logs`, with the applied-count = 0 enforcement shown), **Jobs**
+(with Cancel/Retry), **Statistics**, **Remediation**, **Approvals** (Approve/Reject), **Audit
+Logs**, **Reports**, **Health**, plus a **Kill Switch** panel on the overview. Background work is
+routed to dedicated per-class workers (`data`/`backtest`/`ml`/`rl`/`gates`/`default`), and the
+`scheduler` service enqueues recurring shadow-only jobs (research re-validation, paper sessions,
+ML shadow passes) gated by the `ENABLE_*` toggles.
+
+End-to-end research flow: **research promotes candidates → `strategy_promotions` registry →
+paper sources promoted strategies → `paper_trades` → dashboard**. Alerts deliver to the log/
+dashboard sink plus optional Telegram/email transports (`ALERT_TELEGRAM_*` / `ALERT_EMAIL_*`).
+
+Lifecycle is **backtest/research → paper → live** (there is no separate "demo" stage). The
+backtest gates (BT/WF/FEE/SLIP) enforce the profitability bar (walk-forward expectancy ≥ 0.03R,
+PF ≥ 1.10, max-DD ≤ 0.25, survives ×2 fees / +50% slippage); paper gates (PAPER-A/B) verify
+pipeline correctness and trade volume, not paper profitability. Live stays disabled until the
+full gate chain (incl. `LIVE`) passes **and** `TRADING_MODE=LIVE` + `APP_ENV=production` +
+`ENABLE_LIVE_TRADING=true` + an operator sign-off — there is no "go live" button.
+
+Training the learned layers (ML meta-labeler, RL/online learner) is **shadow-only** and
+documented in [`docs/ml_rl_training.md`](docs/ml_rl_training.md) — when, how, and what data.
 
 Run a gate:
 

@@ -154,9 +154,15 @@ _BUILDERS = {
 
 
 def get_data_source(exchange_id: str | None = None) -> DataSource:
-    """Return the active data source.
+    """Return the active data source for ``exchange_id``.
 
-    Phase 2 always returns the offline deterministic source; later phases
-    select a real ccxt-backed source by ``exchange_id`` (Section 6).
+    ``skeleton`` (the default, used by tests + the offline data gates) returns the deterministic
+    offline source; any real exchange id (e.g. ``bybit``) returns the live ccxt-backed source.
+    Real downloads are opt-in via config/CLI (``configs/data.yaml`` ships ``skeleton``).
     """
-    return DeterministicSource(exchange_id or "skeleton")
+    eid = exchange_id or "skeleton"
+    if eid == "skeleton":
+        return DeterministicSource(eid)
+    from src.data.ccxt_source import CcxtDataSource
+
+    return CcxtDataSource(eid)

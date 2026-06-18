@@ -26,10 +26,12 @@ from src.backtest.metrics import BacktestReport, build_report
 from src.backtest.reference import ReferenceReader
 from src.backtest.strategy import PortfolioStrategy, ReferenceMomentumStrategy, Strategy
 from src.config import Settings, get_settings
-from src.data.schema import SPREAD, timeframe_ms
+from src.data.config import DataConfig, load_data_config
+from src.data.schema import FUNDING, SPREAD, SeriesKey, timeframe_ms
+from src.data.store import SeriesStore
 from src.exchange.metadata import MetadataConfig, load_metadata_config
 from src.features.config import FeatureConfig, load_feature_config
-from src.features.pipeline import FeatureFrame, compute_features
+from src.features.pipeline import FeatureFrame, StoreReader, compute_features
 
 
 @dataclass(slots=True)
@@ -115,6 +117,170 @@ def _reference_feature_config(cfg: BacktestConfig) -> FeatureConfig:
     from dataclasses import replace
 
     return replace(base, timeframe=cfg.reference.timeframe)
+
+
+def _lake_feature_config(timeframe: str) -> FeatureConfig:
+    """Feature config aligned to the lake decision timeframe (Parity Rule, Section 10)."""
+    base = load_feature_config()
+    if base.timeframe == timeframe:
+        return base
+    from dataclasses import replace
+
+    return replace(base, timeframe=timeframe)
+
+
+def build_lake_inputs(
+    store: SeriesStore,
+    *,
+    exchange_id: str,
+    symbols: list[str],
+    timeframe: str,
+    base_timeframe: str,
+    funding_timeframe: str,
+    start_ms: int,
+    end_ms: int,
+    oi_timeframe: str | None = None,
+    feat_cfg: FeatureConfig | None = None,
+) -> list[SymbolInput]:
+    """Build per-symbol engine inputs from REAL downloaded lake series.
+
+    The Parity-Rule twin of :func:`build_reference_inputs`: the SAME feature
+    pipeline and the SAME :class:`SymbolInput` shape, but the data-reading
+    adapter is the Parquet :class:`StoreReader` over a downloaded ``DATA_VERSION``
+    snapshot instead of the synthetic reference. Mark/index/spread are read on
+    ``base_timeframe``; OI may be coarser (``oi_timeframe``); funding on its own
+    grid. Symbols with no OHLCV in the window are skipped (the caller validates
+    coverage via the data platform before backtesting).
+    """
+    feat_cfg = feat_cfg or _lake_feature_config(timeframe)
+    oi_tf = oi_timeframe or base_timeframe
+    inputs: list[SymbolInput] = []
+    for symbol in symbols:
+        reader = StoreReader(
+            store,
+            exchange_id,
+            timeframe,
+            base_timeframe,
+            funding_timeframe,
+            start_ms,
+            end_ms,
+            oi_timeframe=oi_tf,
+        )
+        bars = reader.ohlcv(symbol)
+        if not bars:
+            continue  # no history in window — excluded from the run
+        frame = compute_features(symbol, reader, feat_cfg)
+        spread = store.read(
+            SeriesKey(exchange_id, SPREAD, symbol, base_timeframe), start_ms, end_ms
+        )
+        funding = store.read(
+            SeriesKey(exchange_id, FUNDING, symbol, funding_timeframe), start_ms, end_ms
+        )
+        inputs.append(
+            SymbolInput(
+                symbol=symbol,
+                bars=bars,
+                frame=frame,
+                spread_samples=[{"ts": s["ts"], "spread_bps": s["spread_bps"]} for s in spread],
+                funding_events=[
+                    {"ts": f["ts"], "funding_rate": f["funding_rate"]} for f in funding
+                ],
+                activation_ts=0,
+            )
+        )
+    return inputs
+
+
+def run_lake_backtest(
+    data_cfg: DataConfig | None = None,
+    cfg: BacktestConfig | None = None,
+    meta: MetadataConfig | None = None,
+    *,
+    settings: Settings | None = None,
+    timeframe: str | None = None,
+    symbols: list[str] | None = None,
+    label: str = "lake",
+) -> BacktestRunResult:
+    """Run the event-based engine over real lake data for a ``DATA_VERSION`` snapshot.
+
+    Reads the downloaded series from the configured data lake (``data.bybit.yaml``
+    et al.), builds inputs through the one feature pipeline and runs the engine.
+    Fees fall back to the backtest-config defaults for symbols without verified
+    exchange metadata (research-grade; verified metadata is a live/META concern).
+    """
+    settings = settings or get_settings()
+    data_cfg = data_cfg or load_data_config()
+    cfg = cfg or load_backtest_config()
+    meta = meta or load_metadata_config()
+    tf = timeframe or data_cfg.base_timeframe
+    syms = symbols or data_cfg.active_symbols()
+    store = SeriesStore(settings.data_lake_path)
+    inputs = build_lake_inputs(
+        store,
+        exchange_id=data_cfg.exchange_id,
+        symbols=syms,
+        timeframe=tf,
+        base_timeframe=data_cfg.base_timeframe,
+        funding_timeframe=data_cfg.funding_timeframe,
+        start_ms=data_cfg.window_start_ms,
+        end_ms=data_cfg.window_end_ms,
+        oi_timeframe=data_cfg.oi_grid,
+    )
+    if not inputs:
+        raise ValueError(
+            "no lake inputs for the configured window — download a DATA_VERSION "
+            "snapshot first (qbot download ...)"
+        )
+    return run_engine(cfg, meta, inputs, label=label)
+
+
+def run_and_persist_lake_backtest(
+    data_cfg: DataConfig | None = None,
+    cfg: BacktestConfig | None = None,
+    meta: MetadataConfig | None = None,
+    *,
+    settings: Settings | None = None,
+    timeframe: str | None = None,
+    symbols: list[str] | None = None,
+    dataset_version: str | None = None,
+    label: str = "lake",
+    kind: str = "backtest",
+) -> tuple[str, BacktestRunResult]:
+    """Run ONE real-data backtest iteration and persist it as a comparable run.
+
+    Writes the report to the reports lake and upserts a ``backtest_runs`` index row
+    tagged with the ``DATA_VERSION`` it ran over, so the leaderboard can rank this
+    iteration against others and no prior iteration is lost (each distinct
+    snapshot/strategy/symbols combination is its own immutable row).
+    """
+    settings = settings or get_settings()
+    data_cfg = data_cfg or load_data_config()
+    cfg = cfg or load_backtest_config()
+    tf = timeframe or data_cfg.base_timeframe
+    syms = symbols or data_cfg.active_symbols()
+    out = run_lake_backtest(
+        data_cfg, cfg, meta, settings=settings, timeframe=tf, symbols=syms, label=label
+    )
+    report_path = write_report(settings, out.report.payload, kind=kind)
+    rid = persist_backtest_run(
+        cfg,
+        out.report,
+        kind=kind,
+        report_path=report_path,
+        settings=settings,
+        passed=out.report.expectancy_r > 0,  # display flag; the bar lives on the leaderboard
+        strategy_id=cfg.reference_strategy.name,
+        dataset_version=dataset_version or data_cfg.data_version,
+        symbols=syms,
+        summary_extra={
+            "label": label,
+            "timeframe": tf,
+            "exchange_id": data_cfg.exchange_id,
+            "data_version": data_cfg.data_version,
+            "window": [data_cfg.window_start_ms, data_cfg.window_end_ms],
+        },
+    )
+    return rid, out
 
 
 def rebase_window(inputs: list[SymbolInput], lo_ts: int, hi_ts: int) -> list[SymbolInput]:
@@ -227,12 +393,36 @@ def persist_backtest_run(
     passed: bool = True,
     strategy_id: str = "",
     strategy_version: str = "",
+    dataset_version: str | None = None,
+    symbols: list[str] | None = None,
     summary_extra: dict | None = None,
 ) -> str:
-    """Upsert a :class:`~src.db.models.BacktestRun` index row for a run."""
+    """Upsert a :class:`~src.db.models.BacktestRun` index row for a run.
+
+    ``dataset_version`` records the immutable ``DATA_VERSION`` snapshot a real-data
+    (lake) run was computed over, so iterations are grouped + comparable on the
+    leaderboard and prior runs are never lost. It also keys the content-addressed
+    ``run_id`` so the same strategy on two different snapshots yields two rows.
+    """
     settings = settings or get_settings()
     p = report.payload
-    rid = run_id(cfg, kind, p)
+    syms = list(symbols) if symbols is not None else list(cfg.reference.symbols)
+    extra = summary_extra or {}
+    # Fold the full iteration identity into the run id so distinct (snapshot, strategy,
+    # symbols, timeframe, label) iterations are distinct rows even if their metrics
+    # coincide (e.g. two timeframes that both produce zero trades on real data).
+    rid = run_id(
+        cfg,
+        kind,
+        {
+            "report": p,
+            "dataset_version": dataset_version,
+            "strategy_id": strategy_id or cfg.reference_strategy.name,
+            "symbols": syms,
+            "timeframe": extra.get("timeframe"),
+            "label": extra.get("label", p.get("label")),
+        },
+    )
     from src.db.base import session_scope
     from src.db.models import BacktestRun
 
@@ -252,7 +442,9 @@ def persist_backtest_run(
         row.backtest_version = cfg.backtest_version
         row.strategy_id = strategy_id or cfg.reference_strategy.name
         row.strategy_version = strategy_version or cfg.reference_strategy.strategy_version
-        row.symbols = list(cfg.reference.symbols)
+        row.dataset_version = dataset_version
+        row.feature_set_version = settings.versions().get("feature_set_version")
+        row.symbols = syms
         row.passed = passed
         row.trade_count = report.trade_count
         row.expectancy_r = report.expectancy_r

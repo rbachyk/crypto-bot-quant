@@ -564,4 +564,139 @@ def _run_ml_filter_evaluation(ctx: JobContext, params: dict) -> dict:
     }
 
 
+# --------------------------------------------------------------------------- #
+# Research: validate strategy candidates → persist promote/shelve verdicts     #
+# --------------------------------------------------------------------------- #
+@job_handler("run_strategy_validation")
+def _run_strategy_validation(ctx: JobContext, params: dict) -> dict:
+    """Run the research harness over all enabled candidates and persist each promote/shelve
+    verdict to the strategy_promotions registry, so paper/live can source only promoted ones."""
+    from src.strategies.promotion import persist_validations
+    from src.strategies.research import validate_all
+
+    ctx.log("validating strategy candidates (backtest + walk-forward + stress + noise)")
+    ctx.progress(0, 1, "validating candidates")
+    validations = validate_all()
+    written = persist_validations(validations)
+    promoted = [v.candidate_id for v in validations if v.promoted]
+    ctx.progress(1, 1, f"{len(promoted)}/{written} promoted")
+    return {
+        "message": f"{len(promoted)}/{written} candidates promoted; verdicts persisted",
+        "promoted": promoted,
+        "shelved": [v.candidate_id for v in validations if not v.promoted],
+        "total": written,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Paper trading: run a session over PROMOTED strategies and persist it         #
+# --------------------------------------------------------------------------- #
+@job_handler("run_paper_session")
+def _run_paper_session(ctx: JobContext, params: dict) -> dict:
+    """Run a paper-trading session over candidates sourced from the promoted-strategy registry,
+    then persist the trades + a run summary the dashboard Paper page reads."""
+    from src.paper.run import run_paper_session
+
+    name = str(params.get("session_name") or "dashboard_paper")
+    ctx.log(f"running paper session over promoted strategies: {name}")
+    ctx.progress(0, 1, "running paper pipeline")
+    session, report, session_id = run_paper_session(session_name=name)
+    net = sum(t.pnl for t in session.trades)
+    ctx.progress(1, 1, f"{session.executed_count} trades, net_pnl={net:.2f}")
+    return {
+        "message": f"paper session {session_id}: {session.executed_count} executed / "
+        f"{session.rejected_count} rejected, net_pnl={net:.2f}",
+        "session_id": session_id,
+        "executed": session.executed_count,
+        "rejected": session.rejected_count,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Backtesting (dashboard-triggered, runs on the dedicated `backtest` queue)    #
+# --------------------------------------------------------------------------- #
+@job_handler("run_backtest")
+def _run_backtest(ctx: JobContext, params: dict) -> dict:
+    """Run a full event-based reference backtest in the background and persist the result.
+
+    Triggered from the dashboard (POST /api/backtests/run) and consumed by the dedicated
+    ``backtest`` worker. The report JSON is written to the reports lake and an index row is
+    upserted into ``backtest_runs`` (B.4) so the dashboard Backtests page can display the
+    metrics. ``passed`` reflects a positive net expectancy (display only; the BT/WF/FEE/SLIP
+    gates remain the authoritative profitability judgement)."""
+    from src.backtest.service import (
+        load_backtest_config,
+        persist_backtest_run,
+        run_reference_backtest,
+        write_report,
+    )
+    from src.config import get_settings
+
+    settings = get_settings()
+    label = str(params.get("label") or "dashboard_backtest")
+    ctx.log(f"starting backtest: {label}")
+    ctx.progress(0, 1, "running event-based backtest")
+    cfg = load_backtest_config()
+    out = run_reference_backtest(cfg, label=label)
+    report = out.report
+    report_path = write_report(settings, report.payload, kind="backtest")
+    run_id = persist_backtest_run(
+        cfg,
+        report,
+        kind="backtest",
+        report_path=report_path,
+        settings=settings,
+        passed=report.expectancy_r > 0,
+        summary_extra={"label": label, "requested_by": str(params.get("requested_by", ""))},
+    )
+    ctx.progress(1, 1, f"backtest {run_id}: expectancy_r={report.expectancy_r:.4f}")
+    return {
+        "message": f"backtest {run_id}: expectancy_r={report.expectancy_r:.4f}, "
+        f"PF={min(report.profit_factor, 1e9):.2f}, trades={report.trade_count}",
+        "run_id": run_id,
+        "expectancy_r": report.expectancy_r,
+        "profit_factor": min(report.profit_factor, 1e9),
+        "trade_count": report.trade_count,
+        "report_path": report_path,
+    }
+
+
+@job_handler("run_lake_backtest")
+def _run_lake_backtest(ctx: JobContext, params: dict) -> dict:
+    """Run + persist ONE real-data backtest iteration on the ``backtest`` worker.
+
+    The Parity-Rule real-data counterpart of ``run_backtest``: it reads a downloaded
+    ``DATA_VERSION`` snapshot (default ``configs/data.bybit.yaml``), runs the event
+    engine through the one feature pipeline, and upserts a ``backtest_runs`` row tagged
+    with the snapshot so the iteration leaderboard can rank it. Requires the snapshot to
+    have been downloaded first (``qbot download --config ...``)."""
+    from src.backtest.service import run_and_persist_lake_backtest
+    from src.data.config import load_data_config
+
+    config_path = str(params.get("config_path") or "configs/data.bybit.yaml")
+    data_cfg = load_data_config(config_path)
+    timeframe = params.get("timeframe") or None
+    symbols = params.get("symbols") or None
+    label = str(params.get("label") or "lake")
+    dataset_version = params.get("dataset_version") or None
+    ctx.log(f"real-data backtest over {data_cfg.exchange_id}/{data_cfg.data_version}")
+    ctx.progress(0, 1, "running lake backtest")
+    rid, out = run_and_persist_lake_backtest(
+        data_cfg,
+        timeframe=timeframe,
+        symbols=symbols,
+        dataset_version=dataset_version,
+        label=label,
+    )
+    r = out.report
+    ctx.progress(1, 1, f"{rid}: expectancy_r={r.expectancy_r:.4f}")
+    return {
+        "message": f"lake backtest {rid}: expectancy_r={r.expectancy_r:.4f}, "
+        f"trades={r.trade_count}",
+        "run_id": rid,
+        "expectancy_r": r.expectancy_r,
+        "trade_count": r.trade_count,
+    }
+
+
 ensure_handlers_registered()

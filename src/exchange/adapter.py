@@ -84,9 +84,15 @@ class SkeletonExchangeAdapter(ExchangeAdapter):
 
 
 def get_adapter(exchange_id: str | None = None) -> ExchangeAdapter:
-    """Return an exchange adapter.
+    """Return an exchange adapter for ``exchange_id``.
 
-    Phase 1 always returns the offline skeleton; later phases select a real
-    ccxt-backed adapter by ``exchange_id``.
+    ``skeleton`` (the default) returns the offline adapter used by tests + offline gates; any
+    real exchange id (e.g. ``bybit``) returns the live ccxt-backed adapter. Real exchange access
+    is opt-in by passing a real id.
     """
-    return SkeletonExchangeAdapter(exchange_id or "skeleton")
+    eid = exchange_id or "skeleton"
+    if eid == "skeleton":
+        return SkeletonExchangeAdapter(eid)
+    from src.exchange.ccxt_adapter import CcxtExchangeAdapter
+
+    return CcxtExchangeAdapter(eid)

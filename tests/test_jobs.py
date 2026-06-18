@@ -69,3 +69,99 @@ def test_retry_with_attempts_eventually_succeeds() -> None:
     assert worker.process_job(job_id) is JobStatus.QUEUED
     # Second processing exhausts attempts and fails.
     assert worker.process_job(job_id) is JobStatus.FAILED
+
+
+@requires_redis
+def test_run_backtest_job_persists_result() -> None:
+    # The dashboard-triggered backtest runs as a background job and writes a BacktestRun
+    # index row the dashboard reads.
+    from sqlalchemy import select
+    from src.db.models import BacktestRun
+    from src.jobs.routing import queue_class
+
+    assert queue_class("run_backtest") == "backtest"  # routed to the dedicated worker
+    queue, worker = JobQueue(), Worker()
+    job_id = queue.enqueue("run_backtest", {"label": "unit_test_bt"}, requested_by="test")
+    assert worker.process_job(job_id) is JobStatus.SUCCEEDED
+    with session_scope() as session:
+        rows = session.execute(select(BacktestRun)).scalars().all()
+        mine = [r for r in rows if (r.summary or {}).get("label") == "unit_test_bt"]
+        assert mine, "run_backtest must persist a BacktestRun row"
+        assert mine[0].kind == "backtest"
+        assert mine[0].trade_count > 0
+
+
+@requires_redis
+def test_enqueue_routes_to_class_queue() -> None:
+    # Heavy ML / data / gate jobs are routed to dedicated class queues (B.13 isolation),
+    # so a heavy job never lands on a light worker's queue.
+    from src.jobs.routing import queue_class, queue_key
+
+    assert queue_class("train_ml_models") == "ml"
+    assert queue_class("download_ohlcv_history") == "data"
+    assert queue_class("run_gate") == "gates"
+    assert queue_class("selftest_echo") == "default"
+
+    queue = JobQueue()
+    r = queue.redis
+    job_id = queue.enqueue("train_ml_models", {}, requested_by="test")
+    try:
+        # The id is on the ml queue, and NOT on the default queue.
+        assert r.lrem(queue_key("ml"), 0, job_id) == 1
+        assert r.lrem(queue_key("default"), 0, job_id) == 0
+    finally:
+        queue.cancel(job_id)
+
+
+@requires_redis
+def test_reaper_requeues_orphan_of_dead_worker() -> None:
+    # A job claimed by a worker that then dies (no liveness beacon) must be recovered from
+    # its processing list and put back on the queue — never silently lost.
+    from datetime import UTC, datetime
+
+    from src.jobs.routing import processing_key, queue_class, queue_key
+    from src.jobs.worker import reap_orphaned_jobs
+
+    queue = JobQueue()
+    r = queue.redis
+    cls = queue_class("selftest_echo")
+    job_id = queue.enqueue("selftest_echo", {"steps": 1}, requested_by="test")
+
+    # Simulate a dead worker mid-job: id sits in its processing list, DB row is RUNNING,
+    # and there is NO beacon for that worker.
+    dead = "deadworker:host:999:abcdef01"
+    pkey = processing_key(dead)
+    r.lrem(queue_key(cls), 0, job_id)  # it was claimed (removed from the queue)
+    r.lpush(pkey, job_id)
+    with session_scope() as s:
+        j = s.get(Job, job_id)
+        assert j is not None
+        j.status = JobStatus.RUNNING
+        j.started_at = datetime.now(UTC)
+        j.attempts = 1
+
+    assert reap_orphaned_jobs(r) >= 1
+    assert r.llen(pkey) == 0  # processing list drained
+    assert _load(job_id).status is JobStatus.QUEUED  # DB row recovered
+    assert r.lrem(queue_key(cls), 0, job_id) == 1  # back on its class queue
+    queue.cancel(job_id)
+
+
+@requires_redis
+def test_reaper_leaves_live_workers_alone() -> None:
+    # A worker with a current beacon is alive; its in-flight job must NOT be reaped.
+    from src.jobs.routing import processing_key, worker_key
+    from src.jobs.worker import reap_orphaned_jobs
+
+    queue = JobQueue()
+    r = queue.redis
+    job_id = queue.enqueue("selftest_echo", {}, requested_by="test")
+    alive = "aliveworker:host:1:beefbeef"
+    r.set(worker_key(alive), alive, ex=60)  # present beacon → alive
+    r.lpush(processing_key(alive), job_id)
+    try:
+        reap_orphaned_jobs(r)
+        assert r.lrem(processing_key(alive), 0, job_id) == 1  # still held, not reaped
+    finally:
+        r.delete(worker_key(alive))
+        queue.cancel(job_id)

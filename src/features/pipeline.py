@@ -90,17 +90,25 @@ class StoreReader(FeatureDataReader):
         funding_timeframe: str,
         start_ms: int,
         end_ms: int,
+        *,
+        oi_timeframe: str | None = None,
     ) -> None:
         self.store = store
         self.exchange_id = exchange_id
         self.timeframe = timeframe
         self.base_timeframe = base_timeframe
         self.funding_timeframe = funding_timeframe
+        # OI may live on its own (coarser) grid; defaults to the base grid.
+        self.oi_timeframe = oi_timeframe or base_timeframe
         self.start_ms = start_ms
         self.end_ms = end_ms
 
     def _tf_for(self, data_type: str) -> str:
-        return self.funding_timeframe if data_type == FUNDING else self.base_timeframe
+        if data_type == FUNDING:
+            return self.funding_timeframe
+        if data_type == OPEN_INTEREST:
+            return self.oi_timeframe
+        return self.base_timeframe
 
     def ohlcv(self, symbol: str) -> list[dict]:
         key = SeriesKey(self.exchange_id, OHLCV, symbol, self.timeframe)

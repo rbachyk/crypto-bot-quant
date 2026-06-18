@@ -124,16 +124,18 @@ class CandidateRankingEngine:
                 continue
             scored.append((cand, score))
 
-        # Deterministic ranking: best setup_quality_score first, then EV net of
-        # costs, then symbol/strategy for a stable, reproducible order.
-        scored.sort(
-            key=lambda cs: (
-                -cs[1].total,
-                -cs[1].expected_value_after_costs,
-                cs[0].symbol,
-                cs[0].strategy,
-            )
-        )
+        # Deterministic ranking driven by configs/ranking.yaml `rank_by` (each key sorted
+        # best-first), with symbol/strategy as stable tiebreakers for a reproducible order.
+        # Unknown keys are ignored; an empty list falls back to score then EV-after-costs.
+        _RANK_KEYS = {
+            "setup_quality_score": lambda cs: -cs[1].total,
+            "expected_value_after_costs": lambda cs: -cs[1].expected_value_after_costs,
+        }
+        extractors = [_RANK_KEYS[k] for k in self.cfg.rank_by if k in _RANK_KEYS] or [
+            _RANK_KEYS["setup_quality_score"],
+            _RANK_KEYS["expected_value_after_costs"],
+        ]
+        scored.sort(key=lambda cs: (*(f(cs) for f in extractors), cs[0].symbol, cs[0].strategy))
         selected = tuple(
             RankedCandidate(cand, score, rank=i + 1) for i, (cand, score) in enumerate(scored)
         )

@@ -58,6 +58,9 @@ backup-db:
 restore-test:
 	bash scripts/restore_test.sh
 
+config-freeze:
+	$(RUN) python -m src.cli.main config-freeze
+
 # --- Workers / engines (dedicated processes; B.13) -------------------------
 run-worker-data:
 	SERVICE_NAME=worker-data $(RUN) python -m src.cli.main worker

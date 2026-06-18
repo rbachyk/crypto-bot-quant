@@ -44,8 +44,17 @@ def test_bt_persists_backtest_run_row() -> None:
 
     GateRunner().run("BT")
     with session_scope() as session:
+        # The BT gate persists a REFERENCE backtest (no dataset_version); filter to those
+        # so real-data lake runs / leaderboard rows in the shared DB don't shadow it.
         latest = (
-            session.execute(select(BacktestRun).order_by(desc(BacktestRun.id))).scalars().first()
+            session.execute(
+                select(BacktestRun)
+                .where(BacktestRun.kind == "backtest")
+                .where(BacktestRun.dataset_version.is_(None))
+                .order_by(desc(BacktestRun.id))
+            )
+            .scalars()
+            .first()
         )
         assert latest is not None
         assert latest.trade_count > 0

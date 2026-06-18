@@ -163,21 +163,24 @@ class SimulatedVenue:
             owned=True,
         )
         resting: list[str] = []
-        # Atomic protection legs.
-        if plan.stop is not None:
-            self.open_orders[plan.stop.client_id] = plan.stop
-            position.stop_order_id = plan.stop.client_id
-            resting.append(plan.stop.client_id)
-        if plan.take_profit is not None:
-            self.open_orders[plan.take_profit.client_id] = plan.take_profit
-            position.tp_order_id = plan.take_profit.client_id
-            resting.append(plan.take_profit.client_id)
-        if plan.trailing is not None:
-            self.open_orders[plan.trailing.client_id] = plan.trailing
-            position.trail_order_id = plan.trailing.client_id
-            resting.append(plan.trailing.client_id)
-
-        self.positions[plan.symbol] = position
+        # Only a real (non-zero) fill creates a position and its atomic protection legs.
+        # A zero fill must NOT register a qty-0 phantom position in the book (it would
+        # pollute reconciliation/heat) nor rest reduce-only legs for a position that
+        # doesn't exist — the entry simply rests below as a working order.
+        if filled_qty > 0:
+            if plan.stop is not None:
+                self.open_orders[plan.stop.client_id] = plan.stop
+                position.stop_order_id = plan.stop.client_id
+                resting.append(plan.stop.client_id)
+            if plan.take_profit is not None:
+                self.open_orders[plan.take_profit.client_id] = plan.take_profit
+                position.tp_order_id = plan.take_profit.client_id
+                resting.append(plan.take_profit.client_id)
+            if plan.trailing is not None:
+                self.open_orders[plan.trailing.client_id] = plan.trailing
+                position.trail_order_id = plan.trailing.client_id
+                resting.append(plan.trailing.client_id)
+            self.positions[plan.symbol] = position
 
         fully = fill_ratio >= 1.0
         remaining = entry.qty - filled_qty

@@ -241,7 +241,7 @@ gates:
     name: Kill Switch Verification
     phase: "6,13"
     depends_on: [EXEC]
-    pass_condition: "CLI and dashboard kill switch each flatten positions and halt; CLI works with dashboard down; verified by deliberate test."
+    pass_condition: "CLI and dashboard kill switch each HALT trading (block new entries; open positions keep their exchange-side stops — flattening is the separate audited Emergency-Close mode, Section 35); CLI works with the dashboard down; verified by deliberate test."
     failure_signals: ["kill depends on UI", "positions not flattened", "untested"]
     remediation_steps:
       - "Implement independent kill flag (Redis/CLI)."
@@ -385,7 +385,7 @@ gates:
     name: Security
     phase: 13
     depends_on: [EXEC]
-    pass_condition: "No secrets in repo; key scoped trading-only + IP-whitelisted; dashboard authenticated/behind VPN; only 443+SSH exposed; SSH hardened."
+    pass_condition: "No secrets in repo (.env.example placeholders only); live trading disabled and TRADING_MODE=PAPER; dashboard auth enabled; live engine behind the `live` compose profile; only 443 published. Exchange-key scoping/IP-whitelist, VPN and SSH hardening are host/exchange-side and operator-attested (security checklist)."
     failure_signals: ["secret in repo", "key withdrawal-enabled", "public unauthenticated dashboard", "open ports"]
     remediation_steps:
       - "Rotate/scope API key; remove withdrawal permission; whitelist IP."
@@ -399,7 +399,7 @@ gates:
     phase: 13
     auto_remediation: partial
     depends_on: [INFRA]
-    pass_condition: "Reproducible deploy to VPS; auto-restart; healthchecks; live engine isolated from research workers; rollback plan present."
+    pass_condition: "Deploy config valid: compose parses; live engine isolated behind the `live` profile; every long-running service declares an auto-restart policy; healthchecks present; rollback plan recorded. (Reproducible VPS provisioning is operator-run.)"
     failure_signals: ["non-reproducible deploy", "no auto-restart", "live engine shares research process"]
     remediation_steps:
       - "Fix compose/systemd; isolate live engine process."
@@ -424,7 +424,7 @@ gates:
     phase: 13
     auto_remediation: partial
     depends_on: [INFRA]
-    pass_condition: "All required alerts deliver end-to-end with severity/escalation; dashboard shows system + job load; data freshness + exchange health visible."
+    pass_condition: "Required alerts are delivered to the configured sink(s) with severity + escalation metadata (real Telegram/email transports exercised when configured); dashboard shows system + job load; data freshness + exchange health visible."
     failure_signals: ["alert undelivered", "no escalation path", "no load/freshness panels"]
     remediation_steps:
       - "Fix notifier/credentials/route for the failing alert; send a test event."
@@ -436,7 +436,7 @@ gates:
     name: Config Freeze
     phase: 13
     depends_on: [SEC, DEPLOY, BACKUP, MON]
-    pass_condition: "All versions (config/strategy/data/risk/exec/model/RL) locked and tagged; staged versioned copy verified; no unversioned live artifacts."
+    pass_condition: "All versions (config/strategy/data/risk/exec/model/RL) are present and frozen in a recorded manifest that matches the running config (no drift); live trading disabled. (Git-tagging the freeze is an operator step recorded in the manifest.)"
     failure_signals: ["unversioned artifact", "untagged config", "drift between staged and running config"]
     remediation_steps:
       - "Stage config as new versioned copy; freeze + git tag all versions."
@@ -449,9 +449,10 @@ gates:
     phase: 13
     depends_on: [DQ, UNIV, META, FEAT, BT, WF, FEE, SLIP, SETUP, RISK, EXEC, KILL, ORDER-OWN, PAPER-A, PAPER-B, SEC, DEPLOY, BACKUP, MON, CONFIG-FREEZE]
     pass_condition: >
-      All upstream gates PASS; >=72h soak no unhandled crash; breakers+kill verified; restart-reconciliation verified;
-      portfolio limits (heat/beta/max-concurrent) verified under load; alerts E2E; metadata [VERIFIED]; paper-B passed;
-      frozen versions + rollback ready; operator sign-off (capital loseable; risk/leverage/drawdown confirmed).
+      All upstream gates PASS; soak/monitoring framework ready and a >=72h soak operator-attested (no unhandled crash);
+      breakers+kill verified; restart-reconciliation verified; portfolio limits (heat/beta/max-concurrent) verified under
+      load; alerts E2E; metadata [VERIFIED]; paper-B passed; frozen versions + rollback ready; operator sign-off
+      (capital loseable; risk/leverage/drawdown confirmed).
     failure_signals: ["any upstream gate not PASS", "crash within soak", "breaker not firing", "reconciliation mismatch", "missing sign-off"]
     remediation_steps:
       - "Resolve each failing upstream gate (see its entry)."
