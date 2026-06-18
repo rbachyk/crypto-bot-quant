@@ -31,6 +31,15 @@ from src.gates.phase9 import check_ml_promo as _check_ml_promo_phase9
 from src.gates.phase10 import check_ml_phase10
 from src.gates.phase11 import check_learn_promo_s
 from src.gates.phase12 import check_rl_shadow, check_rl_sim
+from src.gates.phase13 import (
+    check_backup_phase13,
+    check_config_freeze,
+    check_deploy,
+    check_learn_promo_l,
+    check_live,
+    check_mon_phase13,
+    check_sec,
+)
 from src.gates.result import Criterion
 from src.killswitch import KillSwitch
 from src.monitoring import Alert, AlertSeverity, check_health, get_alert_sink
@@ -1510,8 +1519,9 @@ CHECKS: dict[str, Callable[[Settings], list[Criterion]]] = {
     "WF": check_wf,
     "FEE": check_fee,
     "SLIP": check_slip,
-    "MON": check_mon,
-    "BACKUP": check_backup,
+    # MON and BACKUP: Phase 13 full versions replace Phase 1 skeletons.
+    "MON": check_mon_phase13,
+    "BACKUP": check_backup_phase13,
     # Phase 6 — Ranking, Risk, Execution core.
     "SETUP": check_setup,
     "RISK": check_risk,
@@ -1528,6 +1538,12 @@ CHECKS: dict[str, Callable[[Settings], list[Criterion]]] = {
     # Phase 12 — RL Research and Shadow Policy gates.
     "RL-SIM": check_rl_sim,
     "RL-SHADOW": check_rl_shadow,
+    # Phase 13 — Controlled Live Readiness gates.
+    "LEARN-PROMO-L": check_learn_promo_l,
+    "SEC": check_sec,
+    "DEPLOY": check_deploy,
+    "CONFIG-FREEZE": check_config_freeze,
+    "LIVE": check_live,
 }
 
 

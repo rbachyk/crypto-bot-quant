@@ -4,7 +4,7 @@
   "coder": "claude-sonnet-4-6",
   "date": "2026-06-18",
   "branch": "phase/12",
-  "commit": "TBD (committed after this report)",
+  "commit": "3c56e664954f2e39267f81a9c74d7cf9429cef21",
   "config_version": "cfg_0001",
   "data_version": "dv_0001",
   "model_version": "rl_policy_v1/learner_0002",

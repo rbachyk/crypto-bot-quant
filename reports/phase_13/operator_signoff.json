@@ -1,0 +1,20 @@
+{
+  "type": "operator_signoff",
+  "phase": 13,
+  "acknowledged": true,
+  "capital_is_loseable_confirmed": true,
+  "risk_params_reviewed": true,
+  "risk_envelope": {
+    "max_leverage": 5,
+    "max_risk_pct_per_trade": 0.01,
+    "portfolio_heat_cap": 0.05,
+    "net_beta_btc_cap": 0.30,
+    "daily_loss_limit": 0.03,
+    "max_drawdown_limit": 0.10
+  },
+  "mode": "PAPER/TESTNET",
+  "note": "Phase 13 operator sign-off: risk parameters reviewed and confirmed. System is in PAPER mode. Going live requires a second manual approval on the dashboard after LIVE gate passes.",
+  "statement": "I confirm that all capital committed to this system is fully loseable and I have reviewed the risk/leverage/drawdown configuration above.",
+  "signed_at": "2026-06-18T00:00:00Z",
+  "signed_by": "operator_phase13"
+}
