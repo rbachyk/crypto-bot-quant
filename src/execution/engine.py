@@ -20,7 +20,7 @@ from src.exchange.metadata import MetadataConfig
 from src.execution.config import ExecutionPolicyConfig
 from src.execution.order import OrderBuilder, OrderPlan
 from src.execution.ownership import OwnershipPolicy
-from src.execution.venue import Fill, SimulatedVenue, VenuePosition
+from src.execution.venue import Fill, Venue, VenuePosition
 from src.killswitch import KillSwitch
 from src.ranking.candidate import Candidate
 from src.risk.manager import RiskDecision
@@ -55,7 +55,7 @@ class ExecutionEngine:
         cfg: ExecutionPolicyConfig,
         meta: MetadataConfig,
         ownership: OwnershipPolicy,
-        venue: SimulatedVenue,
+        venue: Venue,
         kill_switch: KillSwitch | None = None,
     ) -> None:
         self.cfg = cfg

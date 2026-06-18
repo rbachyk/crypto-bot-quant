@@ -15,6 +15,7 @@ phase; nothing here touches the network.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Protocol, runtime_checkable
 
 from src.exchange.metadata import MetadataConfig
 from src.execution.order import BUY, SELL, Order, OrderPlan, OrderType
@@ -80,6 +81,39 @@ class BracketResult:
     resting_order_ids: list[str] = field(default_factory=list)
     fully_filled: bool = True
     remaining_qty: float = 0.0
+
+
+@runtime_checkable
+class Venue(Protocol):
+    """The execution surface the engine drives — one contract for simulated and live.
+
+    A live (ccxt/testnet) venue swaps in behind this Protocol; the ExecutionEngine,
+    paper engine and live loop never depend on the concrete venue (Section 18)."""
+
+    open_orders: dict[str, Order]
+    positions: dict[str, VenuePosition]
+
+    def place_bracket(
+        self,
+        plan: OrderPlan,
+        *,
+        ref_price: float,
+        realized_slippage_frac: float,
+        latency_ms: float,
+        spread_bps: float = 0.0,
+        signal_age_ms: float = 0.0,
+        fill_ratio: float = 1.0,
+    ) -> BracketResult: ...
+
+    def cancel(self, client_id: str, *, owned_only: bool = True) -> bool: ...
+
+    def cancel_replace(self, client_id: str, new_order: Order) -> str | None: ...
+
+    def order_status(self, client_id: str) -> str: ...
+
+    def emergency_close_all(self, *, confirm: bool) -> int: ...
+
+    def snapshot(self) -> dict[str, object]: ...
 
 
 class SimulatedVenue:
@@ -257,4 +291,4 @@ def _is_owned(order: Order) -> bool:
     return bool(order.tags.get("bot_instance_id"))
 
 
-__all__ = ["Fill", "VenuePosition", "BracketResult", "SimulatedVenue", "BUY", "SELL"]
+__all__ = ["Fill", "VenuePosition", "BracketResult", "SimulatedVenue", "Venue", "BUY", "SELL"]

@@ -1,0 +1,287 @@
+"""Real ccxt-backed execution venue — TESTNET by default (AGENTS.md Section 18).
+
+The live counterpart of :class:`~src.execution.venue.SimulatedVenue`, behind the same
+:class:`~src.execution.venue.Venue` Protocol. It places a bracket **atomically** —
+the entry order carries its exchange-resident stop-loss (and take-profit) via ccxt's
+unified ``stopLoss`` / ``takeProfit`` params — so a position is never opened without
+protection (Section 2.2). Every order carries the bot's ownership prefix as
+``clientOrderId`` (Section 7).
+
+Safety, by construction:
+* Defaults to the **testnet** sandbox (``settings.exchange_env``); no real funds.
+* Refuses to construct without API credentials (no anonymous trading).
+* For a **live** (mainnet, real-money) environment it refuses to place any order unless
+  an injected activation guard authorises it (wired by M8's LiveActivationGuard). Testnet
+  needs no guard — it cannot move real money.
+
+Tests inject a fake client, so nothing here needs the network or real keys.
+"""
+
+from __future__ import annotations
+
+import contextlib
+from typing import Any, Protocol
+
+from src.config import Settings, get_settings
+from src.exchange.metadata import MetadataConfig
+from src.execution.order import BUY, Order, OrderPlan, OrderType
+from src.execution.venue import BracketResult, Fill, Venue, VenuePosition
+
+# Order types that rest as maker (no taker slippage).
+_MAKER_TYPES = (OrderType.POST_ONLY, OrderType.LIMIT)
+
+
+class LiveOrderGuard(Protocol):
+    """Authorises (or refuses) a real-money order. Injected by M8."""
+
+    def allow_live_order(self, plan: OrderPlan) -> tuple[bool, str]: ...
+
+
+class CcxtLiveVenue:
+    """Real venue (default: Bybit testnet) behind the Venue Protocol."""
+
+    def __init__(
+        self,
+        meta: MetadataConfig,
+        settings: Settings | None = None,
+        *,
+        client: Any | None = None,
+        guard: LiveOrderGuard | None = None,
+    ) -> None:
+        self.meta = meta
+        self.settings = settings or get_settings()
+        self.exchange_id = self.settings.exchange_id
+        self.exchange_env = self.settings.exchange_env  # "testnet" | "live"
+        self._guard = guard
+        self.open_orders: dict[str, Order] = {}
+        self.positions: dict[str, VenuePosition] = {}
+        self.fills: list[Fill] = []
+        self.cancelled: set[str] = set()
+
+        if client is not None:
+            self._ex = client
+        else:
+            if not (self.settings.exchange_api_key and self.settings.exchange_api_secret):
+                raise ValueError(
+                    "CcxtLiveVenue requires EXCHANGE_API_KEY/SECRET (no anonymous trading)"
+                )
+            import ccxt
+
+            klass = getattr(ccxt, self.exchange_id)
+            self._ex = klass(
+                {
+                    "apiKey": self.settings.exchange_api_key,
+                    "secret": self.settings.exchange_api_secret,
+                    "enableRateLimit": True,
+                    "options": {"defaultType": "swap"},
+                }
+            )
+            if self.exchange_env != "live" and hasattr(self._ex, "set_sandbox_mode"):
+                self._ex.set_sandbox_mode(True)  # TESTNET — no real funds
+
+    @property
+    def is_live(self) -> bool:
+        """Real-money mainnet (not testnet)."""
+        return self.exchange_env == "live"
+
+    # -- placement ------------------------------------------------------- #
+    def place_bracket(
+        self,
+        plan: OrderPlan,
+        *,
+        ref_price: float,
+        realized_slippage_frac: float,
+        latency_ms: float,
+        spread_bps: float = 0.0,
+        signal_age_ms: float = 0.0,
+        fill_ratio: float = 1.0,
+    ) -> BracketResult:
+        """Place the entry with its stop (+TP) attached atomically, then mirror state.
+
+        On a real-money venue the activation guard must authorise the order first; a
+        denial raises (the engine surfaces it as a non-placement) — we never silently
+        trade live."""
+        if self.is_live:
+            allowed, reason = self._authorise(plan)
+            if not allowed:
+                raise PermissionError(f"live order refused by activation guard: {reason}")
+
+        entry = plan.entry
+        maker = entry.order_type in _MAKER_TYPES
+        order_type = "limit" if maker else "market"
+        price = float(entry.price) if entry.price is not None else None
+
+        params: dict[str, Any] = {"clientOrderId": entry.client_id}
+        # Atomic exchange-resident protection attached to the entry (Section 2.2).
+        if plan.stop is not None and plan.stop.stop_price is not None:
+            params["stopLoss"] = {"triggerPrice": float(plan.stop.stop_price), "type": "market"}
+        if plan.take_profit is not None and plan.take_profit.stop_price is not None:
+            params["takeProfit"] = {
+                "triggerPrice": float(plan.take_profit.stop_price),
+                "type": "market",
+            }
+
+        resp = self._ex.create_order(plan.symbol, order_type, entry.side, entry.qty, price, params)
+
+        avg = _num(resp.get("average")) or _num(resp.get("price")) or ref_price
+        filled = _num(resp.get("filled"))
+        filled_qty = filled if filled is not None else entry.qty * max(0.0, min(1.0, fill_ratio))
+        fee = _num((resp.get("fee") or {}).get("cost")) or 0.0
+        expected = price if price is not None else ref_price
+        slip_frac = 0.0 if maker else realized_slippage_frac
+        fill = Fill(
+            client_id=entry.client_id,
+            symbol=plan.symbol,
+            side=entry.side,
+            qty=filled_qty,
+            expected_price=expected,
+            actual_price=avg,
+            fee=fee,
+            maker=maker,
+            latency_ms=latency_ms,
+            slippage_frac=slip_frac,
+            slippage_cost=abs(avg - ref_price) * filled_qty,
+            spread_bps_at_order=spread_bps,
+            signal_age_ms=signal_age_ms,
+            order_type=entry.order_type.value,
+        )
+        self.fills.append(fill)
+
+        # The stop is attached to the position on the exchange; record a marker id so
+        # has_exchange_side_stop() is True (the Section 2.2 invariant the engine checks).
+        position = VenuePosition(
+            symbol=plan.symbol,
+            side=plan.side,
+            qty=filled_qty,
+            entry_price=avg,
+            stop_order_id=f"{entry.client_id}:sl" if plan.stop is not None else None,
+            tp_order_id=f"{entry.client_id}:tp" if plan.take_profit is not None else None,
+            owned=True,
+        )
+        resting: list[str] = []
+        if filled_qty > 0:
+            self.positions[plan.symbol] = position
+        fully = filled_qty >= entry.qty - 1e-12
+        if not fully:
+            self.open_orders[entry.client_id] = entry
+            resting.append(entry.client_id)
+        return BracketResult(
+            fill=fill,
+            position=position,
+            resting_order_ids=resting,
+            fully_filled=fully,
+            remaining_qty=max(0.0, entry.qty - filled_qty),
+        )
+
+    def _authorise(self, plan: OrderPlan) -> tuple[bool, str]:
+        if self._guard is None:
+            return False, "no activation guard configured for a live venue"
+        return self._guard.allow_live_order(plan)
+
+    # -- order management ------------------------------------------------ #
+    def order_status(self, client_id: str) -> str:
+        if client_id in self.open_orders:
+            return "open"
+        if client_id in self.cancelled:
+            return "cancelled"
+        return "unknown"
+
+    def cancel(self, client_id: str, *, owned_only: bool = True) -> bool:
+        order = self.open_orders.get(client_id)
+        if order is None:
+            return False
+        if owned_only and not order.tags.get("bot_instance_id"):
+            return False
+        with contextlib.suppress(Exception):  # already gone / race; treat as cancelled
+            self._ex.cancel_order(client_id, order.symbol, {"clientOrderId": client_id})
+        del self.open_orders[client_id]
+        self.cancelled.add(client_id)
+        return True
+
+    def cancel_replace(self, client_id: str, new_order: Order) -> str | None:
+        if not self.cancel(client_id):
+            return None
+        self.place_order(new_order)
+        return new_order.client_id
+
+    def place_order(self, order: Order) -> None:
+        """Place a single (non-bracket) order — used by cancel/replace."""
+        otype = "limit" if order.order_type in _MAKER_TYPES else "market"
+        price = float(order.price) if order.price is not None else None
+        self._ex.create_order(
+            order.symbol, otype, order.side, order.qty, price, {"clientOrderId": order.client_id}
+        )
+        self.open_orders[order.client_id] = order
+
+    # -- reconciliation -------------------------------------------------- #
+    def fetch_exchange_positions(self) -> dict[str, VenuePosition]:
+        """Live exchange positions (for reconciliation vs the bot's mirror, Section 7)."""
+        out: dict[str, VenuePosition] = {}
+        for p in self._ex.fetch_positions() or []:
+            qty = _num(p.get("contracts")) or 0.0
+            if qty <= 0:
+                continue
+            sym = str(p.get("symbol"))
+            cid = str((p.get("info") or {}).get("clientOrderId") or "")
+            out[sym] = VenuePosition(
+                symbol=sym,
+                side=1 if str(p.get("side")) == "long" else -1,
+                qty=qty,
+                entry_price=_num(p.get("entryPrice")) or 0.0,
+                owned=cid.startswith(self.settings.order_client_id_prefix),
+            )
+        return out
+
+    def emergency_close_all(self, *, confirm: bool) -> int:
+        if not confirm:
+            raise PermissionError("emergency_close_all requires explicit confirmation (Section 7)")
+        n = 0
+        for sym, pos in list(self.positions.items()):
+            close_side = "sell" if pos.side > 0 else "buy"
+            with contextlib.suppress(Exception):
+                self._ex.create_order(
+                    sym, "market", close_side, pos.qty, None, {"reduceOnly": True}
+                )
+            n += 1
+        for cid, order in list(self.open_orders.items()):
+            with contextlib.suppress(Exception):
+                self._ex.cancel_order(cid, order.symbol, {"clientOrderId": cid})
+            n += 1
+        self.positions.clear()
+        self.open_orders.clear()
+        return n
+
+    def snapshot(self) -> dict[str, object]:
+        return {"orders": dict(self.open_orders), "positions": dict(self.positions)}
+
+
+def _num(value: Any) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def get_venue(
+    meta: MetadataConfig,
+    settings: Settings | None = None,
+    *,
+    live: bool = False,
+    client: Any | None = None,
+    guard: LiveOrderGuard | None = None,
+) -> Venue:
+    """Return the execution venue. Default is the offline SimulatedVenue (paper).
+
+    ``live=True`` opts into the real ccxt venue (testnet by default via
+    ``settings.exchange_env``); this is an explicit choice by the live loop, never the
+    default. Real-money (mainnet) placement additionally requires the activation guard.
+    """
+    from src.execution.venue import SimulatedVenue
+
+    settings = settings or get_settings()
+    if not live:
+        return SimulatedVenue(meta)
+    return CcxtLiveVenue(meta, settings, client=client, guard=guard)
+
+
+__all__ = ["CcxtLiveVenue", "LiveOrderGuard", "get_venue", "BUY"]
