@@ -1,8 +1,10 @@
 """Dashboard statistics with time-period filtering (Phase 7, Section 25).
 
-Provides aggregate and per-symbol statistics for the dashboard.
-Trading-level metrics (PnL, drawdown) are scaffolded with zero-safe defaults
-until Phase 8 paper/live data populates them.
+Provides aggregate and per-symbol statistics for the dashboard. Trading-level
+metrics (PnL, win rate, expectancy, profit factor, drawdown, fees, slippage and
+breakdowns by strategy / regime / session / symbol) are computed from the
+real ``paper_trades`` produced by paper sessions — the data that powers the
+performance ("TradeZella-style") dashboard.
 """
 
 from __future__ import annotations
@@ -20,11 +22,25 @@ from src.db.models import (
     GateStatus,
     Job,
     JobStatus,
+    PaperTradeRecord,
     RemediationAction,
     RemediationStatus,
     UniverseMember,
     UniverseVersion,
 )
+
+# Paper sessions seed each account at this notional equity (src/paper/run.py),
+# so drawdown is expressed as a fraction of this base.
+_PAPER_BASE_EQUITY = 10_000.0
+
+
+def _session_bucket(hour: int) -> str:
+    """Coarse trading session for the hour-of-day (UTC) — matches the feature pipeline."""
+    if 0 <= hour < 8:
+        return "asia"
+    if 8 <= hour < 16:
+        return "europe"
+    return "us"
 
 
 class TimePeriod(str, enum.Enum):
@@ -119,7 +135,7 @@ class UniverseStats:
 
 @dataclass
 class TradingStats:
-    """Phase 7 scaffold — zeroed until paper/live data in Phase 8."""
+    """Realized trading performance computed from ``paper_trades`` over a window."""
 
     total_trades: int = 0
     winning_trades: int = 0
@@ -135,6 +151,117 @@ class TradingStats:
     max_drawdown_pct: float = 0.0
     current_equity: float = 0.0
     symbols_traded: list[str] = field(default_factory=list)
+    # Richer performance fields for the TradeZella-style views.
+    avg_win: float = 0.0
+    avg_loss: float = 0.0
+    gross_win: float = 0.0
+    gross_loss: float = 0.0
+    largest_win: float = 0.0
+    largest_loss: float = 0.0
+    equity_curve: list[float] = field(default_factory=list)
+    by_strategy: list[dict[str, Any]] = field(default_factory=list)
+    by_regime: list[dict[str, Any]] = field(default_factory=list)
+    by_session: list[dict[str, Any]] = field(default_factory=list)
+    by_symbol: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_summary(self) -> dict[str, Any]:
+        """The richer fields, for the performance API/page."""
+        return {
+            "avg_win": self.avg_win,
+            "avg_loss": self.avg_loss,
+            "gross_win": self.gross_win,
+            "gross_loss": self.gross_loss,
+            "largest_win": self.largest_win,
+            "largest_loss": self.largest_loss,
+            "equity_curve": self.equity_curve,
+            "by_strategy": self.by_strategy,
+            "by_regime": self.by_regime,
+            "by_session": self.by_session,
+            "by_symbol": self.by_symbol,
+        }
+
+
+def _breakdown(rows: list[Any], key) -> list[dict[str, Any]]:
+    """Group trade rows by ``key(row)`` → per-group performance, sorted by pnl desc."""
+    groups: dict[str, list[Any]] = {}
+    for r in rows:
+        groups.setdefault(str(key(r)) or "—", []).append(r)
+    out: list[dict[str, Any]] = []
+    for name, items in groups.items():
+        pnl = sum(t.pnl for t in items)
+        wins = sum(1 for t in items if t.pnl > 0)
+        out.append(
+            {
+                "group": name,
+                "trades": len(items),
+                "pnl": round(pnl, 2),
+                "win_rate": round(wins / len(items), 4) if items else 0.0,
+                "expectancy_r": round(sum(t.pnl_r for t in items) / len(items), 4)
+                if items
+                else 0.0,
+            }
+        )
+    return sorted(out, key=lambda d: d["pnl"], reverse=True)
+
+
+def compute_trading_stats(
+    window: TimeWindow, *, symbol: str | None = None, strategy: str | None = None
+) -> TradingStats:
+    """Realized performance from ``paper_trades`` in ``window`` (optionally scoped)."""
+    st = TradingStats()
+    with session_scope() as session:
+        q = select(PaperTradeRecord)
+        if window.start:
+            q = q.where(PaperTradeRecord.created_at >= window.start)
+        if window.end:
+            q = q.where(PaperTradeRecord.created_at <= window.end)
+        if symbol:
+            q = q.where(PaperTradeRecord.symbol == symbol)
+        if strategy:
+            q = q.where(PaperTradeRecord.strategy == strategy)
+        rows = list(session.execute(q.order_by(PaperTradeRecord.created_at)).scalars().all())
+
+    st.total_trades = len(rows)
+    if not rows:
+        return st
+    wins = [t for t in rows if t.pnl > 0]
+    losses = [t for t in rows if t.pnl < 0]
+    st.winning_trades = len(wins)
+    st.losing_trades = len(losses)
+    st.win_rate = round(len(wins) / len(rows), 4)
+    st.expectancy_r = round(sum(t.pnl_r for t in rows) / len(rows), 4)
+    st.realized_pnl = round(sum(t.pnl for t in rows), 2)
+    st.total_fees_paid = round(sum(t.fee for t in rows), 2)
+    st.total_slippage = round(sum(t.slippage_cost for t in rows), 2)
+    st.gross_win = round(sum(t.pnl for t in wins), 2)
+    st.gross_loss = round(sum(t.pnl for t in losses), 2)  # negative
+    st.profit_factor = round(st.gross_win / abs(st.gross_loss), 4) if st.gross_loss else 0.0
+    st.avg_win = round(st.gross_win / len(wins), 2) if wins else 0.0
+    st.avg_loss = round(st.gross_loss / len(losses), 2) if losses else 0.0
+    st.largest_win = round(max((t.pnl for t in rows), default=0.0), 2)
+    st.largest_loss = round(min((t.pnl for t in rows), default=0.0), 2)
+    st.symbols_traded = sorted({t.symbol for t in rows})
+
+    # Equity curve + max drawdown (fraction of running peak).
+    equity = _PAPER_BASE_EQUITY
+    peak = equity
+    max_dd = 0.0
+    curve = [round(equity, 2)]
+    for t in rows:
+        equity += t.pnl
+        peak = max(peak, equity)
+        if peak > 0:
+            max_dd = max(max_dd, (peak - equity) / peak)
+        curve.append(round(equity, 2))
+    st.current_equity = round(equity, 2)
+    st.max_drawdown_pct = round(max_dd, 4)
+    st.equity_curve = curve
+
+    st.by_strategy = _breakdown(rows, lambda r: r.strategy)
+    st.by_regime = _breakdown(rows, lambda r: r.regime)
+    st.by_symbol = _breakdown(rows, lambda r: r.symbol)
+    st.by_session = _breakdown(rows, lambda r: _session_bucket(r.created_at.hour))
+    return st
 
 
 @dataclass
@@ -323,7 +450,7 @@ def get_aggregate_stats(
         gates=compute_gate_stats(window),
         jobs=compute_job_stats(window),
         universe=compute_universe_stats(),
-        trading=TradingStats(),  # Phase 8
+        trading=compute_trading_stats(window),
         open_remediation_items=compute_open_remediation_count(),
     )
 
@@ -334,27 +461,29 @@ def get_per_symbol_stats(
     from_ts: str | None = None,
     to_ts: str | None = None,
 ) -> dict[str, Any]:
-    """Per-symbol stats scaffold — trading metrics populated in Phase 8."""
+    """Per-symbol realized trading stats from ``paper_trades``."""
     window = resolve_window(period, from_ts, to_ts)
+    t = compute_trading_stats(window, symbol=symbol)
     return {
         "symbol": symbol,
         "period": period,
         "window_start": window.start.isoformat() if window.start else None,
         "window_end": window.end.isoformat() if window.end else None,
         "trading": {
-            "total_trades": 0,
-            "winning_trades": 0,
-            "losing_trades": 0,
-            "win_rate": 0.0,
-            "expectancy_r": 0.0,
-            "profit_factor": 0.0,
-            "realized_pnl": 0.0,
-            "total_fees_paid": 0.0,
-            "total_slippage": 0.0,
-            "total_funding_paid": 0.0,
-            "max_drawdown_pct": 0.0,
+            "total_trades": t.total_trades,
+            "winning_trades": t.winning_trades,
+            "losing_trades": t.losing_trades,
+            "win_rate": t.win_rate,
+            "expectancy_r": t.expectancy_r,
+            "profit_factor": t.profit_factor,
+            "realized_pnl": t.realized_pnl,
+            "total_fees_paid": t.total_fees_paid,
+            "total_slippage": t.total_slippage,
+            "total_funding_paid": t.total_funding_paid,
+            "max_drawdown_pct": t.max_drawdown_pct,
+            "current_equity": t.current_equity,
         },
-        "note": "Phase 7 scaffold: trading data populated in Phase 8.",
+        "summary": t.to_summary(),
     }
 
 

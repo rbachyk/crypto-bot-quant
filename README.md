@@ -108,18 +108,26 @@ uv run uvicorn src.api.app:app --reload     # dashboard + API on :8000
 make run-worker-data                        # a job worker (dedicated process)
 ```
 
-The dashboard (one FastAPI app, served via Caddy at `https://localhost` under docker) has:
-**Gates**, **Road to Live** (a live-readiness score over the `blocks_live` gates, in dependency
-order, with a *Request live-activation approval* button at 100%), **Backtests** (*Run backtest* →
-background `backtest` worker → stored in `backtest_runs`), **Leaderboard** (real-data iterations
-ranked by the profitability bar, grouped by `DATA_VERSION` snapshot), **Paper** (*Run paper session* → sources
-candidates only from **promoted** strategies → trades stored in `paper_trades`), **ML Shadow**
-(*Run ML shadow pass* → `shadow_logs`, with the applied-count = 0 enforcement shown), **Jobs**
-(with Cancel/Retry), **Statistics**, **Remediation**, **Approvals** (Approve/Reject), **Audit
-Logs**, **Reports**, **Health**, plus a **Kill Switch** panel on the overview. Background work is
-routed to dedicated per-class workers (`data`/`backtest`/`ml`/`rl`/`gates`/`default`), and the
-`scheduler` service enqueues recurring shadow-only jobs (research re-validation, paper sessions,
-ML shadow passes) gated by the `ENABLE_*` toggles.
+The dashboard (one FastAPI app, served via Caddy at `https://localhost` under docker) is split
+into two nav groups (Section 25):
+
+- **Trading** — the performance side. The **Overview** is a TradeZella-style performance dashboard:
+  KPI cards (net P&L, win rate, expectancy R, profit factor, max drawdown, trades, avg win/loss,
+  fees), an equity curve, and per-strategy/per-symbol breakdowns, all over a selectable time
+  period — computed from the real `paper_trades`. **Analytics** breaks performance down by
+  strategy / regime / session / symbol; **Statistics** + per-symbol views; **Backtests**,
+  **Leaderboard** (real-data iterations ranked by the profitability bar, grouped by `DATA_VERSION`),
+  **Paper** (trades in `paper_trades`), **Reports**. A compact gate-status (live-readiness) widget
+  persists on the performance pages.
+- **System** — the operational control center. **Control Center** (gate status, jobs, universe,
+  **Kill Switch**), **Gates**, **Road to Live** (live-readiness score over the `blocks_live` gates
+  with a *Request live-activation approval* button at 100%), **Jobs** (Cancel/Retry), **ML Shadow**
+  (`shadow_logs`, applied-count = 0 enforcement), **Remediation**, **Approvals**, **Audit Logs**,
+  **Health**.
+
+Background work is routed to dedicated per-class workers (`data`/`backtest`/`ml`/`rl`/`gates`/`default`),
+and the `scheduler` service enqueues recurring shadow-only jobs (research re-validation, paper
+sessions, ML shadow passes) gated by the `ENABLE_*` toggles.
 
 End-to-end research flow: **research promotes candidates → `strategy_promotions` registry →
 paper sources promoted strategies → `paper_trades` → dashboard**. Alerts deliver to the log/

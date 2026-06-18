@@ -112,24 +112,38 @@ button:hover,.btn:hover{background:#2ea043}
 pre{background:#0d1117;padding:10px;border-radius:4px;overflow-x:auto;font-size:12px;border:1px solid #30363d}
 .remediation-step{padding:8px;margin:4px 0;border-left:3px solid #58a6ff;background:#0d1117;font-size:13px}
 .form-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+nav .navgroup{color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.5px;align-self:center}
+nav .navsep{color:#30363d;align-self:center}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+.kpi{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:14px}
+.kpi .v{font-size:22px;font-weight:bold;color:#f0f6fc}
+.kpi .l{color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
+.pos{color:#3fb950}
+.neg{color:#f85149}
+.chart{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px}
 </style>
 """
 
 _NAV = """
 <nav>
+<span class="navgroup">Trading</span>
 <a href="/">Overview</a>
-<a href="/dashboard/gates">Gates</a>
-<a href="/dashboard/road-to-live">Road to Live</a>
+<a href="/dashboard/analytics">Analytics</a>
+<a href="/dashboard/stats">Statistics</a>
 <a href="/dashboard/backtests">Backtests</a>
 <a href="/dashboard/leaderboard">Leaderboard</a>
 <a href="/dashboard/paper">Paper</a>
-<a href="/dashboard/shadow">ML Shadow</a>
+<a href="/dashboard/reports">Reports</a>
+<span class="navsep">|</span>
+<span class="navgroup">System</span>
+<a href="/dashboard/system">Control Center</a>
+<a href="/dashboard/gates">Gates</a>
+<a href="/dashboard/road-to-live">Road to Live</a>
 <a href="/dashboard/jobs">Jobs</a>
-<a href="/dashboard/stats">Statistics</a>
+<a href="/dashboard/shadow">ML Shadow</a>
 <a href="/dashboard/remediation">Remediation</a>
 <a href="/dashboard/approvals">Approvals</a>
 <a href="/dashboard/audit-logs">Audit Logs</a>
-<a href="/dashboard/reports">Reports</a>
 <a href="/health">Health</a>
 </nav>
 """
@@ -167,6 +181,119 @@ def _status_badge(status: str) -> str:
     return f'<span class="badge {cls}">{status.upper()}</span>'
 
 
+_PERIODS = [
+    ("all", "All time"),
+    ("today", "Today"),
+    ("yesterday", "Yesterday"),
+    ("last_7d", "Last 7 days"),
+    ("last_30d", "Last 30 days"),
+    ("current_month", "This month"),
+    ("prev_month", "Last month"),
+]
+
+
+def _period_selector(action: str, period: str) -> str:
+    """A GET form that re-renders the page for the chosen time period (Section 25)."""
+    opts = "".join(
+        f'<option value="{value}"{" selected" if value == period else ""}>{label}</option>'
+        for value, label in _PERIODS
+    )
+    return (
+        f'<form method="get" action="{action}" class="form-row">'
+        f'<label class="meta">Period</label><select name="period" onchange="this.form.submit()">'
+        f"{opts}</select>"
+        '<noscript><button class="btn" type="submit">Apply</button></noscript></form>'
+    )
+
+
+def _money(value: float) -> str:
+    cls = "pos" if value > 0 else ("neg" if value < 0 else "")
+    return f'<span class="{cls}">{value:+,.2f}</span>'
+
+
+def _kpi(label: str, value_html: str) -> str:
+    return f'<div class="kpi"><div class="v">{value_html}</div><div class="l">{_esc(label)}</div></div>'
+
+
+def _kpi_row(t: Any) -> str:
+    """KPI cards for a TradingStats-like object."""
+    pf = "∞" if t.gross_loss == 0 and t.gross_win > 0 else f"{t.profit_factor:.2f}"
+    cards = [
+        _kpi("Net P&L", _money(t.realized_pnl)),
+        _kpi("Win rate", f"{t.win_rate * 100:.1f}%"),
+        _kpi(
+            "Expectancy R",
+            f'<span class="{"pos" if t.expectancy_r > 0 else "neg" if t.expectancy_r < 0 else ""}">{t.expectancy_r:+.3f}</span>',
+        ),
+        _kpi("Profit factor", pf),
+        _kpi("Max drawdown", f'<span class="neg">{t.max_drawdown_pct * 100:.2f}%</span>'),
+        _kpi("Trades", f"{t.total_trades}"),
+        _kpi(
+            "Avg win / loss",
+            f'<span class="pos">{t.avg_win:+.1f}</span> / <span class="neg">{t.avg_loss:+.1f}</span>',
+        ),
+        _kpi("Fees", f"{t.total_fees_paid:,.2f}"),
+    ]
+    return f'<div class="kpis">{"".join(cards)}</div>'
+
+
+def _equity_svg(curve: list[float], width: int = 1120, height: int = 180) -> str:
+    """Inline SVG equity curve (no JS / external deps)."""
+    if len(curve) < 2:
+        return '<p class="meta">No trades in this period — run a paper session.</p>'
+    lo, hi = min(curve), max(curve)
+    span = (hi - lo) or 1.0
+    n = len(curve)
+    pts = " ".join(
+        f"{i / (n - 1) * (width - 8) + 4:.1f},{height - 4 - (v - lo) / span * (height - 8):.1f}"
+        for i, v in enumerate(curve)
+    )
+    base = curve[0]
+    end = curve[-1]
+    color = "#3fb950" if end >= base else "#f85149"
+    return (
+        f'<div class="chart"><svg viewBox="0 0 {width} {height}" width="100%" height="{height}" '
+        f'preserveAspectRatio="none">'
+        f'<polyline fill="none" stroke="{color}" stroke-width="1.5" points="{pts}"/>'
+        f"</svg></div>"
+        f'<p class="meta">Equity {base:,.0f} → {end:,.0f} over {n - 1} trades '
+        f"(base {base:,.0f}).</p>"
+    )
+
+
+def _breakdown_table(title: str, rows: list[dict], group_header: str) -> str:
+    body = "".join(
+        f"<tr><td>{_esc(r['group'])}</td><td>{r['trades']}</td>"
+        f"<td>{_money(r['pnl'])}</td><td>{r['win_rate'] * 100:.1f}%</td>"
+        f"<td>{r['expectancy_r']:+.3f}</td></tr>"
+        for r in rows
+    )
+    return (
+        f'<div class="card"><h2>{_esc(title)}</h2><table>'
+        f"<tr><th>{_esc(group_header)}</th><th>Trades</th><th>P&L</th>"
+        f"<th>Win rate</th><th>Expectancy R</th></tr>"
+        f"{body or '<tr><td colspan=5 class=meta>No trades.</td></tr>'}</table></div>"
+    )
+
+
+def _gate_status_line(g: Any) -> str:
+    """Compact persistent gate widget (Section 25 'Gate Status Widget')."""
+    score = g.live_readiness_score
+    cls = "score" if score >= 80 else ("score score-mid" if score >= 50 else "score score-low")
+    nxt = (
+        f" · next: {_esc(g.next_critical_action)}" if getattr(g, "next_critical_action", "") else ""
+    )
+    return (
+        '<div class="card"><div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap">'
+        f'<span class="{cls}">{score:.0f}%</span>'
+        f'<span class="meta">Live readiness ({g.critical_gates_passed}/{g.total_critical_gates} critical) · '
+        f"{_status_badge('passed')} {g.passed} {_status_badge('failed')} {g.failed} "
+        f"{_status_badge('blocked')} {g.blocked} {_status_badge('not_run')} {g.not_run}{nxt}</span>"
+        '<a href="/dashboard/road-to-live" class="btn btn-neutral">Road to Live →</a>'
+        "</div></div>"
+    )
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -194,67 +321,89 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ----- dashboard overview (authenticated) ------------------------------ #
     @app.get("/", response_class=HTMLResponse)
-    def dashboard(user: str = Depends(require_dashboard_auth)) -> str:
+    def dashboard(period: str = "all", user: str = Depends(require_dashboard_auth)) -> str:
+        """Performance overview (TradeZella-style) over the chosen period.
+
+        Sourced from real ``paper_trades`` (shadow-only). The operational control
+        center (gates, jobs, universe, kill switch) lives under System → Control Center.
+        """
         from src.api.stats import get_aggregate_stats
 
+        env_info = (
+            f"Signed in as <b>{_esc(user)}</b> · env={settings.app_env.value} · "
+            f"mode={settings.trading_mode.value} · live_allowed={settings.live_trading_allowed}"
+        )
+        try:
+            agg = get_aggregate_stats(period)
+            t = agg.trading
+            body = (
+                f"<p class='meta'>{env_info}</p>"
+                + _gate_status_line(agg.gates)
+                + _period_selector("/", period)
+                + _kpi_row(t)
+                + f'<div class="card"><h2>Equity Curve</h2>{_equity_svg(t.equity_curve)}</div>'
+                + _breakdown_table("By Strategy", t.by_strategy, "Strategy")
+                + _breakdown_table("By Symbol", t.by_symbol, "Symbol")
+                + '<p class="meta">Realized performance from <code>paper_trades</code> '
+                "(shadow-only; live still gated). Run sessions via Paper or "
+                "<code>qbot paper-lake</code>. "
+                f"config_version={settings.config_version} · data_version={settings.data_version}</p>"
+            )
+        except Exception as exc:  # noqa: BLE001 - dashboard must render even if stats fail
+            body = f"<p class='meta'>{env_info}</p><div class='card'><p class='meta'>Stats unavailable: {_esc(exc)}</p></div>"
+        return _page("Performance Overview", body)
+
+    @app.get("/dashboard/analytics", response_class=HTMLResponse)
+    def dashboard_analytics(
+        period: str = "all", user: str = Depends(require_dashboard_auth)
+    ) -> str:
+        """Performance broken down by strategy / regime / session / symbol (Section 25)."""
+        from src.api.stats import get_aggregate_stats
+
+        agg = get_aggregate_stats(period)
+        t = agg.trading
+        body = (
+            _period_selector("/dashboard/analytics", period)
+            + _kpi_row(t)
+            + _breakdown_table("By Strategy", t.by_strategy, "Strategy")
+            + _breakdown_table("By Regime", t.by_regime, "Regime")
+            + _breakdown_table("By Session", t.by_session, "Session (UTC)")
+            + _breakdown_table("By Symbol", t.by_symbol, "Symbol")
+        )
+        return _page("Analytics", body)
+
+    @app.get("/dashboard/system", response_class=HTMLResponse)
+    def dashboard_system(user: str = Depends(require_dashboard_auth)) -> str:
+        """Operational control center: gates, jobs, universe, kill switch (Section 25)."""
+        from src.api.stats import get_aggregate_stats
+        from src.killswitch import KillSwitch
+
+        env_info = (
+            f"Signed in as <b>{_esc(user)}</b> · env={settings.app_env.value} · "
+            f"mode={settings.trading_mode.value} · live_allowed={settings.live_trading_allowed}"
+        )
         try:
             agg = get_aggregate_stats("all")
             g = agg.gates
-            score = g.live_readiness_score
-            score_cls = (
-                "score"
-                if score >= 80
-                else ("score score-mid" if score >= 50 else "score score-low")
+            gate_widget = _gate_status_line(g) + (
+                '<p><a href="/dashboard/gates" class="btn btn-neutral">All Gates →</a></p>'
             )
-            gate_widget = f"""
-<div class="card">
-  <h2>Gate Status</h2>
-  <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:center">
-    <div>
-      <div class="{score_cls}">{score:.0f}%</div>
-      <div class="meta">Live Readiness Score ({g.critical_gates_passed}/{g.total_critical_gates} critical)</div>
-    </div>
-    <div>
-      {_status_badge("passed")} {g.passed}&nbsp;&nbsp;
-      {_status_badge("failed")} {g.failed}&nbsp;&nbsp;
-      {_status_badge("blocked")} {g.blocked}&nbsp;&nbsp;
-      {_status_badge("not_run")} {g.not_run}
-    </div>
-  </div>
-  {f'<p class="meta" style="margin-top:10px">Next action: {g.next_critical_action}</p>' if g.next_critical_action else ""}
-  <p><a href="/dashboard/road-to-live" class="btn">Road to Live →</a>
-     <a href="/dashboard/gates" class="btn btn-neutral" style="margin-left:8px">All Gates →</a></p>
-</div>"""
             jobs_widget = f"""
-<div class="card">
-  <h2>Jobs (all-time)</h2>
-  <p>Total {agg.jobs.total} &nbsp;|&nbsp;
-     ✓ {agg.jobs.succeeded} succeeded &nbsp;|&nbsp;
-     ✗ {agg.jobs.failed} failed &nbsp;|&nbsp;
-     ↻ {agg.jobs.running} running &nbsp;|&nbsp;
-     ⏳ {agg.jobs.queued} queued</p>
-  <p><a href="/dashboard/jobs" class="btn btn-neutral">View Jobs →</a></p>
-</div>"""
+<div class="card"><h2>Jobs (all-time)</h2>
+  <p>Total {agg.jobs.total} &nbsp;|&nbsp; ✓ {agg.jobs.succeeded} &nbsp;|&nbsp;
+     ✗ {agg.jobs.failed} &nbsp;|&nbsp; ↻ {agg.jobs.running} &nbsp;|&nbsp; ⏳ {agg.jobs.queued}</p>
+  <p><a href="/dashboard/jobs" class="btn btn-neutral">View Jobs →</a></p></div>"""
             universe_widget = f"""
-<div class="card">
-  <h2>Universe</h2>
+<div class="card"><h2>Universe</h2>
   <p>{agg.universe.active_symbols} active / {agg.universe.total_symbols} total symbols
      {f"(v: {agg.universe.universe_version})" if agg.universe.universe_version else ""}</p>
   <p>{agg.open_remediation_items} open remediation item(s)
-     {'<a href="/dashboard/remediation" class="btn btn-neutral" style="margin-left:8px">View →</a>' if agg.open_remediation_items else ""}</p>
-</div>"""
-        except Exception as exc:
-            gate_widget = f'<div class="card"><p class="meta">Stats unavailable: {exc}</p></div>'
-            jobs_widget = ""
-            universe_widget = ""
-
-        env_info = (
-            f"Signed in as <b>{user}</b> · "
-            f"env={settings.app_env.value} · "
-            f"mode={settings.trading_mode.value} · "
-            f"live_allowed={settings.live_trading_allowed}"
-        )
-        from src.killswitch import KillSwitch
+     {'<a href="/dashboard/remediation" class="btn btn-neutral">View →</a>' if agg.open_remediation_items else ""}</p></div>"""
+        except Exception as exc:  # noqa: BLE001
+            gate_widget = (
+                f'<div class="card"><p class="meta">Stats unavailable: {_esc(exc)}</p></div>'
+            )
+            jobs_widget = universe_widget = ""
 
         ks_engaged = KillSwitch(settings).engaged()
         ks_control = (
@@ -276,7 +425,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             + f"</p>{ks_control}</div>"
         )
         return _page(
-            "Overview — Control Center",
+            "Control Center",
             f"<p class='meta'>{env_info}</p>"
             + gate_widget
             + ks_widget

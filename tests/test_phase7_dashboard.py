@@ -330,8 +330,25 @@ def test_reports_list(client: TestClient) -> None:
 def test_overview_page_renders(client: TestClient) -> None:
     resp = client.get("/", auth=_AUTH)
     assert resp.status_code == 200
-    assert "Control Center" in resp.text or "Overview" in resp.text
-    assert "Gate Status" in resp.text
+    # Performance overview (TradeZella-style): KPI cards + equity curve + gate widget.
+    assert "Performance Overview" in resp.text
+    assert "Win rate" in resp.text and "Profit factor" in resp.text
+    assert "Equity Curve" in resp.text
+    assert "Live readiness" in resp.text  # persistent gate-status widget (Section 25)
+
+
+def test_system_control_center_renders(client: TestClient) -> None:
+    resp = client.get("/dashboard/system", auth=_AUTH)
+    assert resp.status_code == 200
+    assert "Control Center" in resp.text
+    assert "Kill Switch" in resp.text  # dev/ops widgets moved here from the overview
+
+
+def test_analytics_page_renders(client: TestClient) -> None:
+    resp = client.get("/dashboard/analytics", auth=_AUTH)
+    assert resp.status_code == 200
+    assert "By Strategy" in resp.text and "By Regime" in resp.text
+    assert "By Session" in resp.text and "By Symbol" in resp.text
 
 
 def test_gates_page_renders(client: TestClient) -> None:
