@@ -362,6 +362,38 @@ class PaperTradingEngine:
         session.decision_logs.append(
             self._decision_log(candidate, "execute", "approved", True, ks_state)
         )
+        session.explainability.append(self._explain(candidate, paper_trade, fill))
+
+    def _explain(self, candidate: Candidate, trade, fill):
+        """Build the Section-24 TradeExplainability for an executed trade."""
+        from src.explainability import TradeExplainability
+
+        edge_after = (
+            candidate.expected_edge_frac * trade.entry_price - fill.fee - fill.slippage_cost
+        )
+        return TradeExplainability(
+            trade_id=trade.trade_id,
+            symbol=candidate.symbol,
+            strategy_id=candidate.strategy,
+            setup_type=candidate.strategy,
+            regime=candidate.regime,
+            signal_features=dict(candidate.features),
+            expected_edge_after_costs=edge_after,
+            expected_fees=fill.fee,
+            expected_slippage=fill.slippage_cost,
+            expected_funding_impact=None,
+            stop_price=trade.stop_price,
+            invalidation_conditions=["stop_hit", "regime_change", "time_stop"],
+            execution_route=trade.execution_route,
+            risk_approved=True,
+            risk_reason="approved",
+            model_version=None,
+            learner_version=None,
+            config_version=self._config_version,
+            universe_version=self._universe_version,
+            why_selected=f"{candidate.strategy} setup ranked in regime {candidate.regime}",
+            why_rejected_others=[],
+        )
 
     def _decision_log(
         self,

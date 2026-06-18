@@ -149,6 +149,8 @@ class PaperSession:
     trades: list[PaperTrade] = field(default_factory=list)
     rejected: list[RejectedPaperCandidate] = field(default_factory=list)
     decision_logs: list[PaperDecisionLog] = field(default_factory=list)
+    # Per-trade TradeExplainability records (Section 24); typed loosely to avoid an import cycle.
+    explainability: list = field(default_factory=list)
 
     # Kill-switch events (ts, reason).
     kill_switch_events: list[dict] = field(default_factory=list)

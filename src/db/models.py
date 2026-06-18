@@ -618,3 +618,53 @@ class DataQualityReportRow(Base):
     window: Mapped[dict] = mapped_column(JSON, default=dict)
     report: Mapped[dict] = mapped_column(JSON, default=dict)
     report_path: Mapped[str | None] = mapped_column(Text)
+
+
+class DecisionLog(Base):
+    """Per-signal decision record (AGENTS.md Section 24).
+
+    The chosen action plus the rejected alternatives (which symbol/setup lost and why),
+    the decision-time features, expected edge/cost, and the version stamps. Writes happen
+    off the execution hot path (after the decision is committed), never blocking it."""
+
+    __tablename__ = "decision_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
+    session_id: Mapped[str | None] = mapped_column(String(80), index=True)
+    symbol: Mapped[str] = mapped_column(String(48), index=True)
+    strategy: Mapped[str] = mapped_column(String(64), index=True)
+    strategy_version: Mapped[str] = mapped_column(String(32), default="")
+    side: Mapped[int] = mapped_column(Integer, default=0)
+    action: Mapped[str] = mapped_column(String(16), default="")  # execute | reject | block
+    reason: Mapped[str] = mapped_column(Text, default="")
+    rejected_alternatives: Mapped[list] = mapped_column(JSON, default=list)  # [{symbol, reason}]
+    features: Mapped[dict] = mapped_column(JSON, default=dict)  # features at decision time
+    expected_edge: Mapped[float] = mapped_column(default=0.0)
+    expected_cost: Mapped[float] = mapped_column(default=0.0)
+    risk_approved: Mapped[bool] = mapped_column(Boolean, default=False)
+    config_version: Mapped[str] = mapped_column(String(32), default="")
+    model_version: Mapped[str | None] = mapped_column(String(80))
+    universe_version: Mapped[str | None] = mapped_column(String(64))
+    kill_switch_state: Mapped[str] = mapped_column(String(8), default="clear")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class TradeExplainabilityRow(Base):
+    """The full Trade Explainability schema for an executed trade (Section 24).
+
+    Every live trade must be explainable; the row is written from the validated
+    :class:`~src.observability.explainability.TradeExplainability` dataclass. If that
+    schema cannot be populated, the trade is not taken (enforced at build time)."""
+
+    __tablename__ = "trade_explainability"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_id: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    session_id: Mapped[str | None] = mapped_column(String(80), index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
+    symbol: Mapped[str] = mapped_column(String(48), index=True)
+    strategy_id: Mapped[str] = mapped_column(String(64), index=True)
+    regime: Mapped[str] = mapped_column(String(24), default="")
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)  # the full schema as dict
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

@@ -150,7 +150,54 @@ def persist_paper_session(
                     execution_route=t.execution_route,
                 )
             )
+        _persist_decision_and_explainability(db, session)
     return session.session_id
+
+
+def _persist_decision_and_explainability(db, session: PaperSession) -> None:
+    """Write the Section-24 decision_logs + trade_explainability for a paper session."""
+    from src.db.models import DecisionLog, TradeExplainabilityRow
+    from src.explainability import ExplainabilityError
+
+    sid = session.session_id
+    # Replace any prior rows for this session (idempotent re-run).
+    for model in (DecisionLog, TradeExplainabilityRow):
+        for old in db.execute(select(model).where(model.session_id == sid)).scalars().all():
+            db.delete(old)
+    for d in session.decision_logs:
+        db.add(
+            DecisionLog(
+                session_id=sid,
+                symbol=d.symbol,
+                strategy=d.strategy,
+                strategy_version=d.strategy_version,
+                side=d.side,
+                action=d.action,
+                reason=d.reason,
+                features={},
+                expected_edge=d.expected_edge,
+                expected_cost=d.expected_fee + d.expected_slippage,
+                risk_approved=d.risk_approved,
+                config_version=d.config_version,
+                universe_version=d.universe_version,
+                kill_switch_state=d.kill_switch_state,
+            )
+        )
+    for te in session.explainability:
+        try:
+            te.ensure_complete()  # Section 24: only fully-explainable trades are recorded
+        except ExplainabilityError:
+            continue
+        db.add(
+            TradeExplainabilityRow(
+                trade_id=te.trade_id,
+                session_id=sid,
+                symbol=te.symbol,
+                strategy_id=te.strategy_id,
+                regime=te.regime,
+                payload=te.to_dict(),
+            )
+        )
 
 
 def run_paper_session(
