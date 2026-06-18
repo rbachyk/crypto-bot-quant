@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from src.config import Settings, get_settings
 from src.data.config import DataConfig, load_data_config
@@ -113,6 +113,7 @@ class LiveLoop:
         venue: Venue | None = None,
         kill_switch: KillSwitch | None = None,
         guard: LiveOrderGuard | None = None,
+        data_manager: Any | None = None,
     ) -> None:
         if mode not in _MODES:
             raise ValueError(f"mode must be one of {_MODES}, got {mode!r}")
@@ -120,6 +121,9 @@ class LiveLoop:
         self.settings = settings or get_settings()
         self.meta = meta or load_metadata_config()
         self.kill_switch = kill_switch or KillSwitch(self.settings)
+        # Optional Section-8 live data manager; when exchange-wide data integrity fails it
+        # halts ALL trading (mirrors the kill switch).
+        self.data_manager = data_manager
         live = mode in ("testnet", "live")
         self.venue = (
             venue
@@ -143,6 +147,10 @@ class LiveLoop:
             if max_ticks is not None and i >= max_ticks:
                 break
             if self.kill_switch.engaged():
+                result.halted = True
+                break
+            # Section 8: halt ALL trading if exchange-wide live-data integrity fails.
+            if self.data_manager is not None and self.data_manager.poll(decision_ts).exchange_halt:
                 result.halted = True
                 break
             before_exec = session.executed_count

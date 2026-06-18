@@ -136,3 +136,18 @@ def test_live_loop_drives_testnet_venue(tmp_path) -> None:
     assert fake.orders  # real (testnet) orders were placed through the loop
     # every order carried the ownership prefix as clientOrderId
     assert all(o["params"].get("clientOrderId") for o in fake.orders)
+
+
+def test_live_loop_halts_on_data_integrity_failure(tmp_path) -> None:
+    """Section 8: an exchange-wide data-integrity failure halts the loop like a kill switch."""
+    from src.live.data_manager import DataHealth
+
+    feed = _feed(tmp_path)
+
+    class _HaltingDataManager:
+        def poll(self, now_ms):
+            return DataHealth(ts=now_ms, connected=False, exchange_halt=True, reason="disconnected")
+
+    result = LiveLoop(mode="paper", data_manager=_HaltingDataManager()).run(feed, session_name="t")
+    assert result.halted
+    assert result.executed == 0  # nothing trades while live data integrity is down
