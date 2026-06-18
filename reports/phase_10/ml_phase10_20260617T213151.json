@@ -1,0 +1,18 @@
+{
+  "phase": 10,
+  "model_version": "ml_shadow_0001",
+  "ml_stage": 4,
+  "versions": {
+    "CONFIG_VERSION": "cfg_0001",
+    "UNIVERSE_VERSION": "univ_0001",
+    "DATA_VERSION": "data_0001",
+    "METADATA_VERSION": "meta_0001",
+    "STRATEGY_VERSION": "strat_0000",
+    "FEATURE_SET_VERSION": "feat_0001",
+    "RISK_POLICY_VERSION": "risk_0001",
+    "EXECUTION_POLICY_VERSION": "exec_0001",
+    "ONLINE_LEARNER_VERSION": "learner_0001"
+  },
+  "generated_at": "20260617T213151",
+  "note": "Phase 10 \u2014 ML Recommendation Mode (Stage 3) + Constrained Live Filter (Stage 4). Shadow gate passed in Phase 9. Stage 3: recommendations shown in dashboard, never auto-applied. Stage 4: filter may block deterministic candidates; cannot create candidates, increase risk, or override hard blockers."
+}

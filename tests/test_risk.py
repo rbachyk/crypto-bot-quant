@@ -88,6 +88,24 @@ def test_envelope_config_can_tighten() -> None:
     assert env.max_risk_pct_per_trade == 0.005
 
 
+def test_envelope_missing_field_fails_closed_not_to_ceiling() -> None:
+    # A missing/invalid envelope field must fall back to the conservative SAFE_DEFAULT
+    # (tighter), NEVER silently widen to the loosest legal value (the hard ceiling).
+    from src.risk.envelope import SAFE_DEFAULTS
+
+    env = RiskEnvelope.from_config({})  # everything missing
+    for field, default in SAFE_DEFAULTS.items():
+        got = getattr(env, field)
+        assert got == default, f"{field}: missing config gave {got}, expected default {default}"
+        assert got <= HARD_CEILINGS[field]  # default never exceeds the ceiling
+    # Concretely: a missing risk cap must be 1%, not the 2% ceiling.
+    assert env.max_risk_pct_per_trade == 0.01
+    # Invalid values (non-numeric, <=0) also fail closed to the default.
+    bad = RiskEnvelope.from_config({"max_leverage": -5, "daily_loss_limit": "oops"})
+    assert bad.max_leverage == SAFE_DEFAULTS["max_leverage"]
+    assert bad.daily_loss_limit == SAFE_DEFAULTS["daily_loss_limit"]
+
+
 def test_base_risk_pct_clamped_to_envelope() -> None:
     cfg = load_risk_config()
     assert cfg.base_risk_pct <= cfg.envelope.max_risk_pct_per_trade

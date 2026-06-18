@@ -6,24 +6,49 @@ fully. The Priority Stack (Section 1) resolves every conflict; **capital
 protection wins**. Live trading is never enabled by default and only becomes
 possible after every required gate passes (Section 27).
 
-This repository is built in phases (AGENTS.md Section 32). **Phase 1 —
-Infrastructure Foundation** is implemented here: config + environment
-validation, PostgreSQL/Alembic, a Redis-backed job system, health checks, a
-dashboard shell with auth, an independent kill switch, exchange/universe
-skeletons, a data lake, and the Gate Runner with the `INFRA`, `DB`, `QUEUE`,
-`STORAGE`, `MON` (skeleton) and `BACKUP` (skeleton) gates.
+This repository is built in phases (AGENTS.md Section 32). **All 13 phases are
+implemented**: infrastructure (config/env validation, PostgreSQL/Alembic, a
+Redis-backed job system, health checks, dashboard + auth, independent kill
+switch, data lake), the data platform + universe + feature pipeline, an
+event-based backtest engine with walk-forward + fee/slippage stress, deterministic
+quant strategies (families A/B/G) with a promotion/shelving research harness,
+ranking + the immutable risk envelope + the execution core (atomic bracket orders,
+ownership, reconciliation), a paper-trading engine, shadow ML + RL/online-learning
+(shadow-only), and the full Gate Runner covering every gate from `INFRA` through
+`LIVE`.
+
+> **Scope note — this is a research + paper system, not a connected live bot.**
+> The exchange adapter is an offline deterministic **skeleton** (no `ccxt`/native
+> SDK), so strategies run on synthetic/replayed data and the paper engine fills via
+> a `SimulatedVenue`. Reaching real live trading still requires wiring a real venue
+> adapter, `[VERIFIED]` exchange metadata, and operator sign-off — and is hard-gated
+> off by default (see the live safety checklist below).
 
 ## Local setup
 
 Prerequisites: Python 3.12+, [uv](https://docs.astral.sh/uv/), and a reachable
-PostgreSQL + Redis (either local services or `make docker-up`).
+PostgreSQL + Redis. If you don't run them locally, start the dockerised ones with
+`make docker-up` **first** and wait for them to report healthy, then run the
+host-side steps below (they connect to `127.0.0.1:5432` / `6379`).
 
 ```bash
 uv sync                      # or: make setup
-cp .env.example .env         # edit DATABASE_URL / REDIS_URL / DASHBOARD_PASSWORD
-make migrate                 # apply Alembic migrations (idempotent)
-make health                  # probe db / redis / storage / kill switch
-make test lint typecheck     # quality gates
+cp .env.example .env         # edit DASHBOARD_PASSWORD (DB/Redis URLs default to localhost)
+make docker-up               # OPTIONAL: postgres + redis (+ stack) if not running locally
+make migrate                 # apply Alembic migrations (idempotent; targets head)
+make health                  # probe db / redis / storage / kill switch  → status: healthy
+make test lint typecheck     # full quality suite (must be clean)
+```
+
+> macOS note: if a local (Homebrew) PostgreSQL already owns port 5432 it will
+> shadow the docker one and `make migrate` will hit the wrong database — stop it
+> (`brew services stop postgresql@<v>`) or remap the published port.
+
+Once healthy you can exercise the system end-to-end without an exchange:
+
+```bash
+make run-all-gates                          # every gate in dependency order
+uv run python -m src.gates.runner --gate BT --json    # one gate as JSON
 ```
 
 Run the control center and a worker:
@@ -67,8 +92,11 @@ make docker-down
 ## Live safety checklist (never bypass)
 
 Live trading is gated behind **every** item below (AGENTS.md Sections 2, 27;
-Appendix A). Phase 1 satisfies none of the trading gates yet — this list is the
-contract for later phases.
+Appendix A). All of these gates are now implemented and enforced by the Gate
+Runner — but live trading additionally requires wiring a real venue adapter (the
+shipped one is an offline skeleton) and a manual operator sign-off, and stays
+disabled unless `TRADING_MODE=LIVE` **and** `APP_ENV=production` **and**
+`ENABLE_LIVE_TRADING=true`.
 
 1. `TRADING_MODE=LIVE` only with `APP_ENV=production` **and**
    `ENABLE_LIVE_TRADING=true` (enforced in `src/config/settings.py`).
@@ -95,15 +123,25 @@ dashboard shows ordered remediation steps from `configs/gates.yaml`.
 src/config/      env-validated, versioned settings
 src/db/          SQLAlchemy models + engine (jobs, gates, audit, …)
 src/jobs/        Redis+Postgres job queue, worker, handlers
-src/gates/       gate catalog, checks, runner (CLI: python -m src.gates.runner)
-src/storage/     data lake + artifact store (versioned snapshots/manifests)
+src/data/        data lake ingestion, coverage, quality, schema
+src/universe/    tradable-universe builder
+src/features/    the single causal feature pipeline (the Parity Rule)
+src/backtest/    event-based engine, metrics, walk-forward, fee/slippage stress
+src/strategies/  deterministic candidates (A/B/G) + research promotion harness
+src/ranking/     setup-quality scoring + candidate ranking
+src/risk/        immutable risk envelope, breakers, deterministic sizing
+src/execution/   bracket orders, ownership, reconciliation, simulated venue
+src/paper/       paper-trading engine (full pipeline on SimulatedVenue)
+src/ml/          shadow ML (models, predictor, scorer, registry) — shadow-only
+src/adaptation/  RL / online-learning policy (shadow-only)
+src/gates/       gate catalog, checks (phase6–13), runner (python -m src.gates.runner)
 src/exchange/    exchange adapter skeleton (the only path to the venue)
-src/universe/    universe builder skeleton
-src/monitoring/  health checks + alert skeleton
-src/api/         FastAPI backend + dashboard shell + auth
-src/cli/         qbot CLI (kill switch, health, gate, worker)
+src/monitoring/  health checks + alerting
+src/api/         FastAPI backend + dashboard + auth
+src/cli/         qbot CLI (kill switch, health, gate, worker, enqueue)
+src/killswitch.py  dual-backend (file + redis) fail-safe kill switch
 migrations/      Alembic
-configs/         gates.yaml (gate single source of truth)
+configs/         gates.yaml + risk/strategy/feature/execution configs
 scripts/         backup_db.sh, restore_test.sh
 docs/decisions/  recorded assumptions
 ```

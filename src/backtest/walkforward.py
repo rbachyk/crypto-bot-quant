@@ -130,8 +130,13 @@ def run_walk_forward(
         holdout_report = run_engine(
             cfg, meta, windowed, strategy=strategy, label="wf_holdout"
         ).report
-        holdout_passed = holdout_report.expectancy_r > 0 and holdout_report.net_pnl > 0
-        out.holdout = FoldResult(-1, test_end_ts, span_ts, holdout_passed, [], holdout_report)
+        # The locked hold-out is the strongest, evaluated-once OOS check — hold it to the
+        # SAME kill-criteria as every fold (min trades, expectancy, PF, drawdown), not a bare
+        # "expectancy>0 and net>0" that a single lucky trade could clear.
+        holdout_passed, holdout_failures = _evaluate_fold(holdout_report, kc)
+        out.holdout = FoldResult(
+            -1, test_end_ts, span_ts, holdout_passed, holdout_failures, holdout_report
+        )
 
     # 3) Verdict.
     if out.folds_passed < kc.min_folds_passed:

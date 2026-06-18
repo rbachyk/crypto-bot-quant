@@ -59,6 +59,12 @@ class PaperCandidateInput:
     equity: float = 10_000.0
     daily_pnl: float = 0.0
     open_risk: float = 0.0
+    # Running session peak equity and realized loss streak at decision time. Threaded through
+    # to BreakerInputs so the drawdown and consecutive-loss breakers can actually trip in
+    # paper (they were previously hardcoded to peak==equity / 0, making them dead). Defaults
+    # (0) fall back to "flat / no streak", preserving prior behaviour for callers that omit them.
+    peak_equity: float = 0.0
+    consecutive_losses: int = 0
     # A foreign (unowned) order injected to exercise reconciliation detection.
     inject_foreign_order: bool = False
     # Price movement fraction after entry (positive = favorable).
@@ -232,9 +238,11 @@ class PaperTradingEngine:
         portfolio = PortfolioState(equity=inp.equity)
         breakers = BreakerInputs(
             equity=inp.equity,
-            peak_equity=inp.equity,
+            # peak_equity is at least the current equity; a higher session peak lets the
+            # drawdown breaker trip. consecutive_losses drives the loss-streak breaker.
+            peak_equity=max(inp.peak_equity, inp.equity),
             daily_pnl=inp.daily_pnl,
-            consecutive_losses=0,
+            consecutive_losses=inp.consecutive_losses,
             abnormal_slippage_active=False,
             reconciled=not inp.inject_foreign_order,
         )

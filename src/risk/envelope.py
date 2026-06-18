@@ -29,6 +29,19 @@ HARD_CEILINGS: dict[str, float] = {
     "max_drawdown_limit": 0.25,
 }
 
+# Conservative fall-backs used ONLY when a config field is missing/invalid. These are
+# strictly tighter than HARD_CEILINGS (they mirror the shipped configs/risk.yaml envelope):
+# a config omission or typo must fail *closed* to a safe value, never silently widen to the
+# loosest legal limit. Accidentally widening the envelope is the one thing Section 2.2 forbids.
+SAFE_DEFAULTS: dict[str, float] = {
+    "max_leverage": 5.0,
+    "max_risk_pct_per_trade": 0.01,
+    "portfolio_heat_cap": 0.05,
+    "net_beta_btc_cap": 0.30,
+    "daily_loss_limit": 0.03,
+    "max_drawdown_limit": 0.10,
+}
+
 
 @dataclass(frozen=True, slots=True)
 class RiskEnvelope:
@@ -73,6 +86,7 @@ class RiskEnvelope:
 def _clamp(field: str, value: object) -> float:
     ceiling = HARD_CEILINGS[field]
     if not isinstance(value, (int, float)) or value <= 0:
-        # Missing/invalid → fall back to the capital-preserving ceiling.
-        return ceiling
+        # Missing/invalid → fail CLOSED to the conservative default, never widen to the
+        # ceiling (the loosest legal value). A config typo must tighten, never loosen.
+        return min(SAFE_DEFAULTS[field], ceiling)
     return min(float(value), ceiling)

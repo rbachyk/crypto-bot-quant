@@ -1,0 +1,237 @@
+[
+  {
+    "gate_id": "ML-PROMO",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "ml_shadow_imports",
+        "title": "ml_shadow_imports",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "all ML shadow components importable"
+      },
+      {
+        "id": "ml_feature_matrix",
+        "title": "ml_feature_matrix",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "100 rows \u00d7 9 features from reference dataset"
+      },
+      {
+        "id": "ml_models_train",
+        "title": "ml_models_train",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "all 5 models trained; meta_labeler accuracy=0.9067"
+      },
+      {
+        "id": "ml_shadow_log_writes",
+        "title": "ml_shadow_log_writes",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "100 shadow log entries written, applied=False on all"
+      },
+      {
+        "id": "ml_no_live_influence",
+        "title": "ml_no_live_influence",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "7000 SHADOW entries; 0 applied entries"
+      },
+      {
+        "id": "ml_registry_records",
+        "title": "ml_registry_records",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "5 model artifacts registered: ['meta_labeler_ml_shadow_0001', 'regime_classifier_ml_shadow_0001', 'exec_quality_ml_shadow_0001', 'strategy_selector_ml_shadow_0001', 'symbol_ranker_ml_shadow_0001']"
+      },
+      {
+        "id": "ml_leakage_check",
+        "title": "ml_leakage_check",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "noise improvement=-0.7629R (\u2264 0.30 \u2192 no systematic leakage)"
+      },
+      {
+        "id": "ml_expectancy_improves",
+        "title": "ml_expectancy_improves",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "model expectancy=0.6936R vs baseline=0.1254R (improvement=+0.5682R)"
+      },
+      {
+        "id": "ml_profit_factor_preserved",
+        "title": "ml_profit_factor_preserved",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "model PF=18.896 baseline PF=1.618 ratio=11.675"
+      },
+      {
+        "id": "ml_tail_risk_reduced",
+        "title": "ml_tail_risk_reduced",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "model worst=-0.2686R baseline worst=-0.7333R ratio=0.366"
+      },
+      {
+        "id": "ml_best_trades_preserved",
+        "title": "ml_best_trades_preserved",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "10.0% of top trades removed (\u2264 20% allowed)"
+      },
+      {
+        "id": "ml_stage_advanced",
+        "title": "ml_stage_advanced",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "ml_stage=4 (>= 3 for Recommendation Mode)"
+      },
+      {
+        "id": "ml_phase10_imports",
+        "title": "ml_phase10_imports",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "RecommendationEngine, MLFilter, and related types importable"
+      },
+      {
+        "id": "recommendation_mode",
+        "title": "recommendation_mode",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "13 recommendations produced; all applied=False"
+      },
+      {
+        "id": "recommendation_no_live_influence",
+        "title": "recommendation_no_live_influence",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "0 Stage-3 recommendations have applied=True"
+      },
+      {
+        "id": "recommendation_db_applied_false",
+        "title": "recommendation_db_applied_false",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "RECOMMEND mode shadow_log entries: applied=False on all"
+      },
+      {
+        "id": "filter_can_block",
+        "title": "filter_can_block",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "filter blocked 7 / 10 candidates"
+      },
+      {
+        "id": "filter_no_create",
+        "title": "filter_no_create",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "passed 10 <= input 10; all passed are original candidates"
+      },
+      {
+        "id": "filter_no_risk_increase",
+        "title": "filter_no_risk_increase",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "passed candidates are identical Python objects \u2014 no field mutation"
+      },
+      {
+        "id": "filter_hard_blocked",
+        "title": "filter_hard_blocked",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "strategy_disabled candidate blocked even with high ML confidence; normal candidate passed"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/ML-PROMO_20260617T204742.json",
+    "note": ""
+  },
+  {
+    "gate_id": "QUALITY",
+    "overall": "PASS",
+    "criteria": [],
+    "report_path": "",
+    "note": "make test lint typecheck passed"
+  }
+]

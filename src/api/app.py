@@ -876,12 +876,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             remediation_html = "<h2>Remediation Steps</h2>"
             for a in actions:
                 status_badge = _status_badge(a.status.value)
+                # `recommended_job` (e.g. "gate:infra", "run_upstream_gates") is advisory
+                # text, NOT an enqueuable job_type — POSTing it to /api/jobs/* returns 400.
+                # The actionable remediation is to re-run THIS gate once the step is addressed,
+                # so the button targets the working gate-rerun endpoint and shows the hint.
                 run_btn = (
-                    f'<form method="post" action="/api/jobs/{a.recommended_job}"'
-                    f' style="display:inline">'
+                    f'<form method="post" action="/api/gates/{gate_id}/run"'
+                    f' style="display:inline" title="recommended: {a.recommended_job}">'
                     f'<button class="btn" type="submit"'
                     f' style="padding:2px 6px;font-size:11px">'
-                    f"&#9654; {a.recommended_job}</button></form>"
+                    f"&#9654; re-run gate</button></form>"
                     if a.recommended_job
                     else ""
                 )

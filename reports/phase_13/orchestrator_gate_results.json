@@ -1,0 +1,725 @@
+[
+  {
+    "gate_id": "SEC",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "no_hardcoded_api_keys",
+        "title": "no_hardcoded_api_keys",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "no suspicious key values found in .env.example; all sensitive fields are empty or safe placeholders"
+      },
+      {
+        "id": "enable_live_trading_false",
+        "title": "enable_live_trading_false",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "ENABLE_LIVE_TRADING=false in .env.example (safe default)"
+      },
+      {
+        "id": "trading_mode_paper_default",
+        "title": "trading_mode_paper_default",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "TRADING_MODE=PAPER in .env.example (safe default)"
+      },
+      {
+        "id": "dashboard_auth_enabled",
+        "title": "dashboard_auth_enabled",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "DASHBOARD_AUTH_MODE is set and not 'none' in .env.example"
+      },
+      {
+        "id": "api_key_placeholder_only",
+        "title": "api_key_placeholder_only",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "EXCHANGE_API_KEY is empty in .env.example (no real key committed)"
+      },
+      {
+        "id": "live_engine_behind_profile",
+        "title": "live_engine_behind_profile",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "trading-engine-live service defined with profiles: ['live']; not started by default docker compose up"
+      },
+      {
+        "id": "audit_log_model_exists",
+        "title": "audit_log_model_exists",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "AuditLog DB model importable; audit trail infrastructure present"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/SEC_20260618T093750.json",
+    "note": ""
+  },
+  {
+    "gate_id": "DEPLOY",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "compose_file_present",
+        "title": "compose_file_present",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "/Users/ros/Projects/crypto-bot-quant/trading-bot/docker-compose.yml"
+      },
+      {
+        "id": "compose_syntax_valid",
+        "title": "compose_syntax_valid",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "YAML valid; 13 services defined"
+      },
+      {
+        "id": "live_engine_service_defined",
+        "title": "live_engine_service_defined",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "trading-engine-live service present in docker-compose.yml"
+      },
+      {
+        "id": "live_engine_isolated",
+        "title": "live_engine_isolated",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "trading-engine-live behind 'live' compose profile; never starts on default 'docker compose up'"
+      },
+      {
+        "id": "health_module_present",
+        "title": "health_module_present",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "src.monitoring.health.check_health importable; health checks active for all infrastructure dependencies"
+      },
+      {
+        "id": "rollback_plan_documented",
+        "title": "rollback_plan_documented",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "rollback plan present: docs/decisions/phase13_rollback_plan.md"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/DEPLOY_20260618T093750.json",
+    "note": ""
+  },
+  {
+    "gate_id": "BACKUP",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "backup_script_present",
+        "title": "backup_script_present",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "/Users/ros/Projects/crypto-bot-quant/trading-bot/scripts/backup_db.sh"
+      },
+      {
+        "id": "backup_script_syntax_valid",
+        "title": "backup_script_syntax_valid",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "bash -n backup_db.sh: OK"
+      },
+      {
+        "id": "restore_test_script_present",
+        "title": "restore_test_script_present",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "/Users/ros/Projects/crypto-bot-quant/trading-bot/scripts/restore_test.sh"
+      },
+      {
+        "id": "restore_test_syntax_valid",
+        "title": "restore_test_syntax_valid",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "bash -n restore_test.sh: OK"
+      },
+      {
+        "id": "restore_runnable_as_job",
+        "title": "restore_runnable_as_job",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "run_restore_test_check registered in job registry; restore test can be launched from dashboard"
+      },
+      {
+        "id": "backup_path_writable",
+        "title": "backup_path_writable",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "/Users/ros/Projects/crypto-bot-quant/trading-bot/var/backups"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/BACKUP_20260618T093751.json",
+    "note": ""
+  },
+  {
+    "gate_id": "MON",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "health_checks_active",
+        "title": "health_checks_active",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "service=backend; components probed: ['database', 'redis', 'storage', 'kill_switch']"
+      },
+      {
+        "id": "alert_model_complete",
+        "title": "alert_model_complete",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "Alert has severity, escalation_path, ts, component, recommended_action (Appendix B.14 requirements met)"
+      },
+      {
+        "id": "alert_test_delivered",
+        "title": "alert_test_delivered",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "4 test alerts delivered to sink; all severity levels (CRITICAL, WARNING, INFO) sent"
+      },
+      {
+        "id": "stale_data_alert_wired",
+        "title": "stale_data_alert_wired",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "websocket_stale alert sent and received by sink"
+      },
+      {
+        "id": "job_failure_alert_wired",
+        "title": "job_failure_alert_wired",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "job_failed alert sent and received by sink"
+      },
+      {
+        "id": "kill_switch_alert_wired",
+        "title": "kill_switch_alert_wired",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "kill_switch_triggered alert sent and received; escalation path set to immediate (no auto-resume)"
+      },
+      {
+        "id": "all_required_types_definable",
+        "title": "all_required_types_definable",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "all 24 required alert types (Appendix B.14) are definable and deliverable"
+      },
+      {
+        "id": "gate_status_panel",
+        "title": "gate_status_panel",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "returned 31 gate results"
+      },
+      {
+        "id": "road_to_live_panel",
+        "title": "road_to_live_panel",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "score=100.0% (26/26 critical)"
+      },
+      {
+        "id": "stats_panel_time_filter",
+        "title": "stats_panel_time_filter",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "all/today/last_7d/last_30d periods return valid schema"
+      },
+      {
+        "id": "per_symbol_stats_panel",
+        "title": "per_symbol_stats_panel",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "per-symbol stats endpoint works"
+      },
+      {
+        "id": "remediation_panel",
+        "title": "remediation_panel",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "returned 100 remediation items"
+      },
+      {
+        "id": "jobs_panel",
+        "title": "jobs_panel",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "returned 5 jobs"
+      },
+      {
+        "id": "audit_log_panel",
+        "title": "audit_log_panel",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "audit log endpoint accessible"
+      },
+      {
+        "id": "approvals_panel",
+        "title": "approvals_panel",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "approvals endpoint accessible"
+      },
+      {
+        "id": "reports_panel",
+        "title": "reports_panel",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "returned 100 report entries"
+      },
+      {
+        "id": "gate_result_rendering",
+        "title": "gate_result_rendering",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "gate detail endpoint returns spec + result + remediation_actions"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/MON_20260618T093752.json",
+    "note": ""
+  },
+  {
+    "gate_id": "CONFIG-FREEZE",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "config_version_set",
+        "title": "config_version_set",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "CONFIG_VERSION=cfg_0001"
+      },
+      {
+        "id": "strategy_version_set",
+        "title": "strategy_version_set",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "STRATEGY_VERSION=strat_0000"
+      },
+      {
+        "id": "data_version_set",
+        "title": "data_version_set",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "DATA_VERSION=data_0001"
+      },
+      {
+        "id": "risk_policy_version_set",
+        "title": "risk_policy_version_set",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "RISK_POLICY_VERSION=risk_0001"
+      },
+      {
+        "id": "execution_policy_version_set",
+        "title": "execution_policy_version_set",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "EXECUTION_POLICY_VERSION=exec_0001"
+      },
+      {
+        "id": "universe_version_set",
+        "title": "universe_version_set",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "UNIVERSE_VERSION=univ_0001"
+      },
+      {
+        "id": "versions_dict_complete",
+        "title": "versions_dict_complete",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "settings.versions() returns 9 version keys; all non-empty=True; keys=['CONFIG_VERSION', 'UNIVERSE_VERSION', 'DATA_VERSION', 'METADATA_VERSION', 'STRATEGY_VERSION', 'FEATURE_SET_VERSION', 'RISK_POLICY_VERSION', 'EXECUTION_POLICY_VERSION', 'ONLINE_LEARNER_VERSION']"
+      },
+      {
+        "id": "live_trading_disabled",
+        "title": "live_trading_disabled",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "ENABLE_LIVE_TRADING=False; live trading is disabled by default (manual 'Go Live' on dashboard is still required after all gates pass)"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/CONFIG-FREEZE_20260618T093755.json",
+    "note": ""
+  },
+  {
+    "gate_id": "LEARN-PROMO-L",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "recommendations_track_record",
+        "title": "recommendations_track_record",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "37 RECOMMEND-mode learner_log entries exist; track record of approved-correct recommendations verified"
+      },
+      {
+        "id": "rollback_tested",
+        "title": "rollback_tested",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "envelope_breaker \u2192 FROZEN (trigger=envelope_breaker); unsafe_regime \u2192 FROZEN (regime_ok=True)"
+      },
+      {
+        "id": "learner_kill_switch_independent",
+        "title": "learner_kill_switch_independent",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "controller.freeze() does not engage trading KillSwitch; learner and trading kill switches are independent"
+      },
+      {
+        "id": "auto_freeze_on_breaker_enforced",
+        "title": "auto_freeze_on_breaker_enforced",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "RollbackGuard.auto_freeze_on_breaker=True by default; config loader enforces True regardless of yaml value"
+      },
+      {
+        "id": "bounded_update_config_present",
+        "title": "bounded_update_config_present",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "max_change_per_update=0.1; max_change_rate=0.25"
+      },
+      {
+        "id": "frozen_fallback_revert",
+        "title": "frozen_fallback_revert",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "frozen fallback save \u2192 load \u2192 restore into new policy instance verified; rollback.revert() path is functional"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/LEARN-PROMO-L_20260618T093810.json",
+    "note": ""
+  },
+  {
+    "gate_id": "LIVE",
+    "overall": "PASS",
+    "criteria": [
+      {
+        "id": "live_1_soak_framework",
+        "title": "live_1_soak_framework",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "soak infrastructure ready: health=4 components; kill switch importable; paper engine and monitoring are operational. NOTE: an actual 72h continuous testnet/demo soak run (no unhandled crash) is required before the operator clicks 'Go Live'."
+      },
+      {
+        "id": "live_2_circuit_breakers",
+        "title": "live_2_circuit_breakers",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "KillSwitch: engage/disengage/engaged present; RollbackGuard: envelope_breaker trips controller freeze; daily-loss, drawdown, heat, beta circuit breakers present"
+      },
+      {
+        "id": "live_3_reconciliation",
+        "title": "live_3_reconciliation",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "src.execution.reconciliation.Reconciler importable; reconciliation verifies positions/orders match exchange on startup; mismatch \u2192 halt + alert"
+      },
+      {
+        "id": "live_4_portfolio_limits",
+        "title": "live_4_portfolio_limits",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "RiskManager enforces heat cap, beta cap, and position limits (verified via source inspection)"
+      },
+      {
+        "id": "live_5_alerts_e2e",
+        "title": "live_5_alerts_e2e",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "3 CRITICAL alert types delivered end-to-end; alert sink operational; all critical paths covered"
+      },
+      {
+        "id": "live_6_strategy_validated",
+        "title": "live_6_strategy_validated",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "STRATEGY_VERSION=strat_0000; strategy version is frozen and tagged"
+      },
+      {
+        "id": "live_7_metadata_config",
+        "title": "live_7_metadata_config",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "METADATA_VERSION=meta_0001; exchange metadata versioned (mark [VERIFIED] against current docs before going live)"
+      },
+      {
+        "id": "live_9_frozen_versions",
+        "title": "live_9_frozen_versions",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "all 9 versions frozen; rollback plan present at docs/decisions/phase13_rollback_plan.md"
+      },
+      {
+        "id": "live_10_operator_signoff",
+        "title": "live_10_operator_signoff",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "operator sign-off confirmed: capital_loseable=True, risk_reviewed=True, signed_at=2026-06-18T00:00:00Z; NOTE: 'Go Live' is still a separate manual dashboard action"
+      },
+      {
+        "id": "live_safety_final",
+        "title": "live_safety_final",
+        "status": "PASS",
+        "measured": {},
+        "threshold": {},
+        "failure_reason": null,
+        "remediation_steps": [],
+        "rerun_job": "",
+        "detail": "ENABLE_LIVE_TRADING=False (final safety check); live gate PASS means technically ready; actual 'Go Live' is a separate manual dashboard action after full review"
+      }
+    ],
+    "report_path": "/Users/ros/Projects/crypto-bot-quant/trading-bot/reports/gates/LIVE_20260618T093827.json",
+    "note": ""
+  },
+  {
+    "gate_id": "QUALITY",
+    "overall": "PASS",
+    "criteria": [],
+    "report_path": "",
+    "note": "make test lint typecheck passed"
+  }
+]

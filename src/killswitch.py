@@ -61,19 +61,31 @@ class KillSwitch:
         if client is not None:
             client.delete(_REDIS_KEY)
 
+    def _redis_has_key(self, client: redis.Redis | None) -> bool:
+        """Whether redis reports the switch engaged. Never raises — a redis error mid-read
+        (e.g. the connection drops after ping) must not propagate up through risk evaluation
+        and crash the trading loop. The local file backend stays authoritative regardless."""
+        if client is None:
+            return False
+        try:
+            return bool(client.exists(_REDIS_KEY))
+        except redis.RedisError:
+            return False
+
     def engaged(self) -> bool:
-        """True if any backend reports the switch engaged."""
+        """True if any backend reports the switch engaged. The local file backend is
+        authoritative and always readable, so a redis outage can never read as 'clear' by
+        raising — it degrades to the file backend instead of crashing."""
         if self._file.exists():
             return True
-        client = self._redis()
-        return bool(client is not None and client.exists(_REDIS_KEY))
+        return self._redis_has_key(self._redis())
 
     def status(self) -> dict[str, object]:
         client = self._redis()
         return {
             "engaged": self.engaged(),
             "file_backend": self._file.exists(),
-            "redis_backend": bool(client is not None and client.exists(_REDIS_KEY)),
+            "redis_backend": self._redis_has_key(client),
             "redis_reachable": client is not None,
             "detail": self._file.read_text(encoding="utf-8") if self._file.exists() else "",
         }

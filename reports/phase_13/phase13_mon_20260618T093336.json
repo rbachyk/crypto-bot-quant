@@ -1,0 +1,17 @@
+{
+  "phase": 13,
+  "gate": "MON",
+  "versions": {
+    "CONFIG_VERSION": "cfg_0001",
+    "UNIVERSE_VERSION": "univ_0001",
+    "DATA_VERSION": "data_0001",
+    "METADATA_VERSION": "meta_0001",
+    "STRATEGY_VERSION": "strat_0000",
+    "FEATURE_SET_VERSION": "feat_0001",
+    "RISK_POLICY_VERSION": "risk_0001",
+    "EXECUTION_POLICY_VERSION": "exec_0001",
+    "ONLINE_LEARNER_VERSION": "learner_0001"
+  },
+  "generated_at": "20260618T093336",
+  "note": "Phase 13 \u2014 Controlled Live Readiness. Gate: mon. All Phase 13 gates (LEARN-PROMO-L, SEC, DEPLOY, BACKUP, MON, CONFIG-FREEZE, LIVE) must PASS before the manual 'Go Live' action."
+}

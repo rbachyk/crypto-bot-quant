@@ -1,0 +1,61 @@
+{
+  "model_version": "ml_shadow_0001",
+  "ml_stage": 4,
+  "train_metrics": {
+    "meta_labeler": {
+      "accuracy": 0.9067,
+      "precision": 0.9394,
+      "recall": 0.8611,
+      "brier_score": 0.0568,
+      "train_samples": 75,
+      "positive_rate": 0.48
+    },
+    "exec_quality": {
+      "accuracy": 0.9067,
+      "train_samples": 75
+    },
+    "strategy_selector": {
+      "accuracy": 0.9333,
+      "train_samples": 75
+    },
+    "symbol_ranker": {
+      "accuracy": 0.9333,
+      "train_samples": 75
+    },
+    "regime_classifier": {
+      "accuracy": 1.0,
+      "train_samples": 75,
+      "n_classes": 2
+    }
+  },
+  "scoring": {
+    "n_test": 25,
+    "n_baseline_taken": 25,
+    "n_model_taken": 11,
+    "baseline_expectancy": 0.1254,
+    "model_expectancy": 0.6936,
+    "expectancy_improvement": 0.5682,
+    "baseline_profit_factor": 1.6184,
+    "model_profit_factor": 18.8955,
+    "profit_factor_ratio": 11.6755,
+    "baseline_worst_trade": -0.7333,
+    "model_worst_trade": -0.2686,
+    "tail_loss_ratio": 0.3663,
+    "best_trades_removed_pct": 0.1,
+    "passed": true,
+    "fail_reasons": []
+  },
+  "versions": {
+    "CONFIG_VERSION": "cfg_0001",
+    "UNIVERSE_VERSION": "univ_0001",
+    "DATA_VERSION": "data_0001",
+    "METADATA_VERSION": "meta_0001",
+    "STRATEGY_VERSION": "strat_0000",
+    "FEATURE_SET_VERSION": "feat_0001",
+    "RISK_POLICY_VERSION": "risk_0001",
+    "EXECUTION_POLICY_VERSION": "exec_0001",
+    "ONLINE_LEARNER_VERSION": "learner_0001"
+  },
+  "generated_at": "20260618T084306",
+  "note": "Phase 9 shadow ML gate check using synthetic reference dataset. Performance criteria validated on 25%% held-out test split. Manual review required before promotion to Stage 3+."
+}
