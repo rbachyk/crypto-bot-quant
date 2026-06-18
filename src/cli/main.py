@@ -323,6 +323,50 @@ def leaderboard(
 
 
 @app.command()
+def live(
+    config_path: str = typer.Option("configs/data.bybit.yaml", "--config"),
+    mode: str = typer.Option("paper", "--mode", help="paper | testnet | live"),
+    symbols: str = typer.Option("", "--symbols"),
+    timeframe: str = typer.Option("", "--timeframe"),
+    strategy: str = typer.Option("", "--strategy", help="research candidate id ('' = reference)"),
+    max_ticks: int = typer.Option(0, "--max-ticks", help="0 = process the whole snapshot"),
+) -> None:
+    """Run the live trading loop over a snapshot (replay), shadow/paper by default.
+
+    ``--mode paper`` uses the offline SimulatedVenue; ``testnet`` places real orders on
+    the exchange sandbox (no real funds); ``live`` is real-money and is refused unless
+    the full live-safety condition holds (gates green + sign-off) — orders are gracefully
+    rejected otherwise. Requires a downloaded snapshot (``qbot download``).
+    """
+    from src.data.config import load_data_config
+    from src.live.loop import run_replay_session
+
+    data_cfg = load_data_config(config_path or None)
+    syms = [s.strip() for s in symbols.split(",") if s.strip()] or None
+    result = run_replay_session(
+        data_cfg,
+        mode=mode,
+        timeframe=timeframe or None,
+        symbols=syms,
+        candidate_id=strategy or None,
+        max_ticks=max_ticks or None,
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "mode": result.mode,
+                "session_id": result.session.session_id,
+                "ticks": len(result.ticks),
+                "executed": result.executed,
+                "rejected": result.rejected,
+                "halted": result.halted,
+            },
+            indent=2,
+        )
+    )
+
+
+@app.command()
 def config() -> None:
     """Print the active (non-secret) configuration and versions."""
     s = get_settings()

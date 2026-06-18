@@ -107,15 +107,20 @@ class ExecutionEngine:
 
         # Taker entries realise the estimated slippage; maker entries rest at price.
         slip = candidate.slippage_est if realized_slippage_frac is None else realized_slippage_frac
-        bracket = self.venue.place_bracket(
-            plan,
-            ref_price=candidate.entry_price,
-            realized_slippage_frac=slip,
-            latency_ms=self.cfg.simulated_latency_ms,
-            spread_bps=candidate.spread_bps,
-            signal_age_ms=signal_age_ms,
-            fill_ratio=fill_ratio,
-        )
+        try:
+            bracket = self.venue.place_bracket(
+                plan,
+                ref_price=candidate.entry_price,
+                realized_slippage_frac=slip,
+                latency_ms=self.cfg.simulated_latency_ms,
+                spread_bps=candidate.spread_bps,
+                signal_age_ms=signal_age_ms,
+                fill_ratio=fill_ratio,
+            )
+        except PermissionError as exc:
+            # A live venue refuses unauthorised real-money orders (M8 guard); treat the
+            # refusal as a graceful non-placement, never a crash.
+            return ExecutionResult(False, reason=f"live_order_refused:{exc}")
 
         # Section 2.2 invariant: the position must carry exchange-side protection.
         if not bracket.position.has_exchange_side_stop():

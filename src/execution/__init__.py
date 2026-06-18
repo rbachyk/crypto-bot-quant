@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from src.execution.config import ExecutionPolicyConfig, load_execution_config
 from src.execution.engine import ExecutionEngine, ExecutionResult
+from src.execution.live_venue import CcxtLiveVenue, get_venue
 from src.execution.order import (
     NO_FIXED_TP_FRAC,
     BuildResult,
@@ -19,7 +20,7 @@ from src.execution.order import (
 )
 from src.execution.ownership import OwnershipPolicy
 from src.execution.reconciliation import Reconciler, ReconResult
-from src.execution.venue import BracketResult, Fill, SimulatedVenue, VenuePosition
+from src.execution.venue import BracketResult, Fill, SimulatedVenue, Venue, VenuePosition
 
 __all__ = [
     "ExecutionPolicyConfig",
@@ -36,6 +37,9 @@ __all__ = [
     "Reconciler",
     "ReconResult",
     "SimulatedVenue",
+    "Venue",
+    "CcxtLiveVenue",
+    "get_venue",
     "Fill",
     "VenuePosition",
     "BracketResult",

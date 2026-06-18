@@ -27,6 +27,7 @@ from src.execution import (
     OwnershipPolicy,
     Reconciler,
     SimulatedVenue,
+    Venue,
     load_execution_config,
 )
 from src.killswitch import KillSwitch
@@ -95,6 +96,7 @@ class PaperTradingEngine:
         config_version: str = "v0.1.0",
         universe_version: str = "u_2026_06_17_001",
         settings: Settings | None = None,
+        venue: Venue | None = None,
     ) -> None:
         from src.exchange.metadata import load_metadata_config
 
@@ -113,7 +115,9 @@ class PaperTradingEngine:
         self._scorer = SetupQualityScorer(rank_cfg, self._meta)
         self._ranker = CandidateRankingEngine(rank_cfg, self._meta)
         ownership = OwnershipPolicy(self._settings)
-        self._venue = SimulatedVenue(self._meta)
+        # The venue is injectable so the live loop can drive the SAME pipeline against a
+        # real (testnet) venue; defaults to the offline SimulatedVenue for paper.
+        self._venue = venue if venue is not None else SimulatedVenue(self._meta)
         self._exec = ExecutionEngine(
             exec_cfg, self._meta, ownership, self._venue, self._kill_switch
         )
