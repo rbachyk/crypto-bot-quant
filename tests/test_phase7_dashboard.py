@@ -450,3 +450,25 @@ def test_mon_gate_passes_with_phase7_panels() -> None:
             f"  {c.get('id')}: {c.get('status')} — {c.get('detail', '')}" for c in result.criteria
         )
     )
+
+
+@pytest.mark.parametrize(
+    "path,marker",
+    [
+        ("/dashboard/data-coverage", "Data Coverage"),
+        ("/dashboard/universe", "Universe"),
+        ("/dashboard/live", "Live status"),
+        ("/dashboard/execution", "Execution quality"),
+        ("/dashboard/risk", "risk envelope"),
+        ("/dashboard/learning", "Online learning"),
+        ("/dashboard/rl", "RL log"),
+        ("/dashboard/settings", "Versions"),
+        ("/dashboard/strategy", "By Strategy"),
+        ("/dashboard/regime", "By Regime"),
+        ("/dashboard/session-analytics", "By Session"),
+    ],
+)
+def test_section25_pages_render(client: TestClient, path: str, marker: str) -> None:
+    resp = client.get(path, auth=_AUTH)
+    assert resp.status_code == 200
+    assert marker in resp.text

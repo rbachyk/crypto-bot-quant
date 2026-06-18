@@ -129,21 +129,32 @@ _NAV = """
 <span class="navgroup">Trading</span>
 <a href="/">Overview</a>
 <a href="/dashboard/analytics">Analytics</a>
+<a href="/dashboard/strategy">Strategy</a>
+<a href="/dashboard/regime">Regime</a>
+<a href="/dashboard/session-analytics">Session</a>
 <a href="/dashboard/stats">Statistics</a>
+<a href="/dashboard/execution">Execution</a>
+<a href="/dashboard/risk">Risk</a>
 <a href="/dashboard/backtests">Backtests</a>
 <a href="/dashboard/leaderboard">Leaderboard</a>
 <a href="/dashboard/paper">Paper</a>
+<a href="/dashboard/live">Live</a>
 <a href="/dashboard/reports">Reports</a>
 <span class="navsep">|</span>
 <span class="navgroup">System</span>
 <a href="/dashboard/system">Control Center</a>
+<a href="/dashboard/data-coverage">Data</a>
+<a href="/dashboard/universe">Universe</a>
 <a href="/dashboard/gates">Gates</a>
 <a href="/dashboard/road-to-live">Road to Live</a>
 <a href="/dashboard/jobs">Jobs</a>
 <a href="/dashboard/shadow">ML Shadow</a>
+<a href="/dashboard/learning">Learning</a>
+<a href="/dashboard/rl">RL</a>
 <a href="/dashboard/remediation">Remediation</a>
 <a href="/dashboard/approvals">Approvals</a>
 <a href="/dashboard/audit-logs">Audit Logs</a>
+<a href="/dashboard/settings">Settings</a>
 <a href="/health">Health</a>
 </nav>
 """
@@ -433,6 +444,289 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             + universe_widget
             + f'<p class="meta">config_version={settings.config_version} · '
             f"data_version={settings.data_version}</p>",
+        )
+
+    def _rows_table(headers: list[str], rows: list[list], empty: str = "No data.") -> str:
+        head = "".join(f"<th>{_esc(h)}</th>" for h in headers)
+        body = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
+        n = len(headers)
+        return (
+            f"<table><tr>{head}</tr>"
+            f"{body or f'<tr><td colspan={n} class=meta>{_esc(empty)}</td></tr>'}</table>"
+        )
+
+    def _kv_card(title: str, pairs: list[tuple[str, object]]) -> str:
+        rows = "".join(
+            f'<tr><td class="meta">{_esc(k)}</td><td>{_esc(v)}</td></tr>' for k, v in pairs
+        )
+        return f'<div class="card"><h2>{_esc(title)}</h2><table>{rows}</table></div>'
+
+    # ----- Data Coverage (#2) --------------------------------------------- #
+    @app.get("/dashboard/data-coverage", response_class=HTMLResponse)
+    def dashboard_data_coverage(user: str = Depends(require_dashboard_auth)) -> str:
+        from src.db.models import DatasetVersion
+
+        with session_scope() as s:
+            rows = list(
+                s.execute(select(DatasetVersion).order_by(desc(DatasetVersion.created_at)))
+                .scalars()
+                .all()
+            )[:50]
+            data = [
+                [
+                    f"<code>{_esc(r.version)}</code>",
+                    _esc(r.data_version),
+                    _esc(r.exchange_id),
+                    _status_badge("passed" if r.validation_status == "valid" else "failed"),
+                    _esc(", ".join(r.symbols or [])),
+                    sum((r.row_counts or {}).values()),
+                ]
+                for r in rows
+            ]
+        body = (
+            f'<div class="card"><h2>Data Coverage — DATA_VERSION snapshots ({len(data)})</h2>'
+            + _rows_table(
+                ["Snapshot", "Data Version", "Exchange", "Valid", "Symbols", "Rows"],
+                data,
+                "No snapshots — run `qbot download`.",
+            )
+            + "</div>"
+        )
+        return _page("Data Coverage", body)
+
+    # ----- Universe (#3) -------------------------------------------------- #
+    @app.get("/dashboard/universe", response_class=HTMLResponse)
+    def dashboard_universe(user: str = Depends(require_dashboard_auth)) -> str:
+        from src.db.models import UniverseMember, UniverseVersion
+
+        with session_scope() as s:
+            latest = s.execute(
+                select(UniverseVersion).order_by(desc(UniverseVersion.created_at)).limit(1)
+            ).scalar_one_or_none()
+            members = (
+                list(
+                    s.execute(
+                        select(UniverseMember).where(
+                            UniverseMember.universe_version == latest.version
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                if latest
+                else []
+            )
+            rows = [
+                [
+                    _esc(m.symbol),
+                    _status_badge("passed" if m.status.value == "active" else "not_run"),
+                    _esc(m.reason or ""),
+                ]
+                for m in members
+            ]
+        ver = latest.version if latest else "—"
+        body = (
+            f'<div class="card"><h2>Universe ({_esc(ver)}) — {len(rows)} symbols</h2>'
+            + _rows_table(["Symbol", "Status", "Reason"], rows, "No universe built yet.")
+            + "</div>"
+        )
+        return _page("Universe", body)
+
+    # ----- Live Trading (#9) ---------------------------------------------- #
+    @app.get("/dashboard/live", response_class=HTMLResponse)
+    def dashboard_live(user: str = Depends(require_dashboard_auth)) -> str:
+        from src.db.models import PaperRun
+
+        with session_scope() as s:
+            runs = list(
+                s.execute(select(PaperRun).order_by(desc(PaperRun.created_at))).scalars().all()
+            )
+            live_runs = [r for r in runs if str(r.session_id).startswith(("live:", "testnet:"))][
+                :50
+            ]
+            rows = [
+                [
+                    f"<code>{_esc(r.session_id)}</code>",
+                    r.executed_count,
+                    f"{r.net_pnl:+.2f}",
+                    f"{r.win_rate * 100:.1f}%",
+                ]
+                for r in live_runs
+            ]
+        status = _kv_card(
+            "Live status",
+            [
+                ("trading_mode", settings.trading_mode.value),
+                ("app_env", settings.app_env.value),
+                ("live_trading_allowed", settings.live_trading_allowed),
+                ("exchange / env", f"{settings.exchange_id} / {settings.exchange_env}"),
+            ],
+        )
+        body = (
+            status + '<p class="meta">Live trading is hard-gated: it requires TRADING_MODE=LIVE + '
+            "APP_ENV=production + ENABLE_LIVE_TRADING=true, all blocks_live gates PASS, an "
+            "approved live_activation sign-off, and bounded-live caps (configs/live.yaml). "
+            "Run loops via <code>qbot live --mode paper|testnet|live</code>.</p>"
+            + f'<div class="card"><h2>Live / testnet sessions ({len(rows)})</h2>'
+            + _rows_table(
+                ["Session", "Executed", "Net P&L", "Win rate"], rows, "No live/testnet runs yet."
+            )
+            + "</div>"
+        )
+        return _page("Live Trading", body)
+
+    # ----- Execution Quality (#15) ---------------------------------------- #
+    @app.get("/dashboard/execution", response_class=HTMLResponse)
+    def dashboard_execution(
+        period: str = "all", user: str = Depends(require_dashboard_auth)
+    ) -> str:
+        from src.api.stats import compute_trading_stats, resolve_window
+        from src.db.models import PaperTradeRecord
+
+        window = resolve_window(period, None, None)
+        with session_scope() as s:
+            q = select(PaperTradeRecord)
+            if window.start:
+                q = q.where(PaperTradeRecord.created_at >= window.start)
+            if window.end:
+                q = q.where(PaperTradeRecord.created_at <= window.end)
+            trades = list(s.execute(q).scalars().all())
+        n = len(trades)
+        maker = sum(1 for t in trades if t.execution_route == "maker")
+        with_stop = sum(1 for t in trades if t.has_exchange_side_stop)
+        avg_slip = (sum(t.slippage_cost for t in trades) / n) if n else 0.0
+        body = (
+            _period_selector("/dashboard/execution", period)
+            + _kpi_row(compute_trading_stats(window))
+            + _kv_card(
+                "Execution quality",
+                [
+                    ("trades", n),
+                    ("maker fill %", f"{(maker / n * 100) if n else 0:.1f}%"),
+                    ("exchange-side stop %", f"{(with_stop / n * 100) if n else 0:.1f}%"),
+                    ("avg slippage cost", f"{avg_slip:.4f}"),
+                    ("total fees", f"{sum(t.fee for t in trades):.2f}"),
+                ],
+            )
+        )
+        return _page("Execution Quality", body)
+
+    # ----- Risk (#16) ----------------------------------------------------- #
+    @app.get("/dashboard/risk", response_class=HTMLResponse)
+    def dashboard_risk(user: str = Depends(require_dashboard_auth)) -> str:
+        from src.risk import load_risk_config
+
+        rc = load_risk_config()
+        env = rc.envelope
+        body = _kv_card(
+            "Immutable risk envelope (Section 17 — hard ceilings)",
+            [
+                ("max risk % / trade", env.max_risk_pct_per_trade),
+                ("max leverage", env.max_leverage),
+                ("portfolio heat cap", env.portfolio_heat_cap),
+                ("net beta (BTC) cap", env.net_beta_btc_cap),
+                ("daily loss limit", env.daily_loss_limit),
+                ("max drawdown limit", env.max_drawdown_limit),
+            ],
+        ) + (
+            '<p class="meta">The envelope is immutable: values may only tighten via a new '
+            "config version + approval; the live activation guard re-checks all gates + caps.</p>"
+        )
+        return _page("Risk", body)
+
+    # ----- Online Learning (#18) + RL (#19) ------------------------------- #
+    def _learner_page(title: str, modes: tuple[str, ...]) -> str:
+        from src.db.models import LearnerLog
+
+        with session_scope() as s:
+            rows = list(
+                s.execute(
+                    select(LearnerLog)
+                    .where(LearnerLog.mode.in_(modes))
+                    .order_by(desc(LearnerLog.ts))
+                )
+                .scalars()
+                .all()
+            )[:50]
+            data = [
+                [
+                    _esc(r.learner_id),
+                    _esc(r.mode),
+                    _status_badge("passed" if not r.applied else "failed"),
+                    _esc(r.rollback_event or ""),
+                ]
+                for r in rows
+            ]
+        return (
+            '<p class="meta">Shadow-only / gated: learner actions are never applied to live '
+            "trading (applied=False) until promoted through the gates + sign-off (Section 21).</p>"
+            + f'<div class="card"><h2>{_esc(title)} log ({len(data)})</h2>'
+            + _rows_table(
+                ["Learner", "Mode", "Applied=False", "Rollback"], data, "No learner activity yet."
+            )
+            + "</div>"
+        )
+
+    @app.get("/dashboard/learning", response_class=HTMLResponse)
+    def dashboard_learning(user: str = Depends(require_dashboard_auth)) -> str:
+        return _page(
+            "Online Learning",
+            _learner_page("Online learning", ("SHADOW", "RECOMMEND", "LIVE_BOUNDED", "FROZEN")),
+        )
+
+    @app.get("/dashboard/rl", response_class=HTMLResponse)
+    def dashboard_rl(user: str = Depends(require_dashboard_auth)) -> str:
+        return _page("RL", _learner_page("RL", ("SHADOW", "RECOMMEND", "LIVE_BOUNDED", "FROZEN")))
+
+    # ----- Settings (#23) ------------------------------------------------- #
+    @app.get("/dashboard/settings", response_class=HTMLResponse)
+    def dashboard_settings(user: str = Depends(require_dashboard_auth)) -> str:
+        versions = settings.versions()
+        body = (
+            _kv_card(
+                "Environment & mode",
+                [
+                    ("app_env", settings.app_env.value),
+                    ("trading_mode", settings.trading_mode.value),
+                    ("live_trading_allowed", settings.live_trading_allowed),
+                    ("enable_live_trading", settings.enable_live_trading),
+                    ("exchange / env", f"{settings.exchange_id} / {settings.exchange_env}"),
+                    ("order_client_id_prefix", settings.order_client_id_prefix),
+                ],
+            )
+            + _kv_card("Versions", list(versions.items()))
+            + '<p class="meta">Read-only. Settings are env-validated (src/config/settings.py); '
+            "changing them is a new config version + freeze + approval (CONFIG-FREEZE / LIVE).</p>"
+        )
+        return _page("Settings", body)
+
+    # ----- dedicated Strategy / Regime / Session analytics (#12–14) ------- #
+    def _one_breakdown(title: str, attr: str, group_header: str, period: str) -> str:
+        from src.api.stats import get_aggregate_stats
+
+        t = get_aggregate_stats(period).trading
+        return (
+            _period_selector(f"/dashboard/{attr}", period)
+            + _kpi_row(t)
+            + _breakdown_table(title, getattr(t, f"by_{attr}"), group_header)
+        )
+
+    @app.get("/dashboard/strategy", response_class=HTMLResponse)
+    def dashboard_strategy(period: str = "all", user: str = Depends(require_dashboard_auth)) -> str:
+        return _page(
+            "Strategy Analytics", _one_breakdown("By Strategy", "strategy", "Strategy", period)
+        )
+
+    @app.get("/dashboard/regime", response_class=HTMLResponse)
+    def dashboard_regime(period: str = "all", user: str = Depends(require_dashboard_auth)) -> str:
+        return _page("Regime Analytics", _one_breakdown("By Regime", "regime", "Regime", period))
+
+    @app.get("/dashboard/session-analytics", response_class=HTMLResponse)
+    def dashboard_session_analytics(
+        period: str = "all", user: str = Depends(require_dashboard_auth)
+    ) -> str:
+        return _page(
+            "Session Analytics", _one_breakdown("By Session", "session", "Session", period)
         )
 
     @app.get("/api/me")
