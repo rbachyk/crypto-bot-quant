@@ -30,13 +30,7 @@ from src.strategies.promotion import is_strategy_promoted
 _DEFAULT_HOLD_BARS = 12  # forward horizon for the realized move when a signal omits one
 
 
-def _regime(row: dict) -> str:
-    slope = float(row.get("trend_slope", 0.0))
-    if slope > 1e-4:
-        return "trend_up"
-    if slope < -1e-4:
-        return "trend_down"
-    return "range"
+from src.regime import detect_regime
 
 
 def build_lake_paper_inputs(
@@ -103,6 +97,7 @@ def build_lake_paper_inputs(
             exit_bar = min(entry_bar + hold_bars, n - 1)
             exit_price = float(si.bars[exit_bar]["close"])
             exit_move_frac = exit_price / entry_price - 1.0 if entry_price > 0 else 0.0
+            spread_bps = si.spread_bps_at(int(row["decision_ts"]))
             cand = Candidate(
                 symbol=si.symbol,
                 strategy=strat_id,
@@ -111,7 +106,9 @@ def build_lake_paper_inputs(
                 entry_price=entry_price,
                 stop_frac=sig.stop_frac,
                 tp_frac=sig.tp_frac,
-                regime=_regime(row),
+                # Deterministic Section-11 regime (emits R-codes so the no-trade protection
+                # in the setup-quality gate can actually fire).
+                regime=detect_regime(row, spread_bps=spread_bps, data_ok=True),
                 session=int(row.get("session_code", 0)),
                 features={
                     "atr_pct": float(row.get("atr_pct", 0.0)),
@@ -121,7 +118,7 @@ def build_lake_paper_inputs(
                 signal_strength=min(1.0, abs(float(row.get("ret_short", 0.0))) / 0.02),
                 confirmation=0.6,
                 expected_edge_frac=sig.tp_frac,
-                spread_bps=si.spread_bps_at(int(row["decision_ts"])),
+                spread_bps=spread_bps,
                 slippage_est=0.0005,
                 latency_ms=5.0,
                 # Research/shadow context flags (mirrors the synthetic paper session); live

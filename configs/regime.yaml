@@ -1,0 +1,39 @@
+# regime.yaml — deterministic v1 regime detection (AGENTS.md Section 11).
+#
+# `priority` is the single source of the resolution order (safest wins) shared by the
+# detector and the tests. The numeric suffix Rn is a stable identifier, not a rank.
+# Thresholds are on the normalized, decision-time features (ATR% percentile rank, directional
+# efficiency, trend slope, vol z-score) — never raw ATR.
+
+version: 1
+
+regime:
+  # Resolution priority — when several conditions match, the first in this list wins.
+  priority:
+    - R8_DATA_UNSAFE
+    - R7_TOXIC_EXECUTION
+    - R6_LIQUIDATION_EVENT
+    - R3_HIGH_VOL_EXPANSION
+    - R4_HIGH_VOL_CHOP
+    - R5_MARKET_WIDE_IMPULSE
+    - R2_TREND
+    - R1_LOW_VOL_RANGE
+
+  # No strategy may trade in these (Section 11 default protection regimes).
+  no_trade:
+    - R8_DATA_UNSAFE
+    - R7_TOXIC_EXECUTION
+    - R4_HIGH_VOL_CHOP
+
+  thresholds:
+    high_vol_rank: 0.80         # ATR% percentile rank ≥ this ⇒ high volatility
+    trend_dir_efficiency: 0.55  # directional efficiency ≥ this ⇒ directional/expansion
+    chop_dir_efficiency: 0.35   # directional efficiency ≤ this ⇒ choppy
+    toxic_spread_bps: 25.0      # spread above this ⇒ toxic execution (no-trade)
+    impulse_vol_z: 3.0          # volume z-score ≥ this ⇒ market-wide impulse
+    liquidation_ret: 0.05       # |single-bar return| ≥ this in high vol ⇒ liquidation-like spike
+    trend_slope_min: 0.0008     # |normalized trend slope| ≥ this ⇒ trending
+
+  # Anti-whipsaw: a tradeable regime must persist this many bars before switching.
+  # Protective / no-trade regimes engage immediately (safety is never delayed).
+  min_persist_bars: 3

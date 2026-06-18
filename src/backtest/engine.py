@@ -160,12 +160,11 @@ class _Open:
     next_funding_idx: int
 
 
-def _regime_of(row: dict) -> str:
-    """Coarse volatility/trend regime label from decision-time features."""
-    rank = float(row.get("atr_pct_rank", 0.5))
-    vol = "high_vol" if rank >= 0.66 else ("low_vol" if rank <= 0.33 else "mid_vol")
-    trend = "up" if float(row.get("trend_slope", 0.0)) >= 0 else "down"
-    return f"{vol}_{trend}"
+def _regime_of(row: dict, spread_bps: float = 0.0) -> str:
+    """Deterministic Section-11 regime label (R-code) from decision-time features."""
+    from src.regime import detect_regime
+
+    return detect_regime(row, spread_bps=spread_bps, data_ok=True)
 
 
 class BacktestEngine:
@@ -405,7 +404,7 @@ class BacktestEngine:
             entry_fee=entry_fee,
             funding=0.0,
             slippage_cost=entry_slip_cost,
-            regime=_regime_of(row),
+            regime=_regime_of(row, sym_in.spread_bps_at(decision_ts)),
             session=int(row.get("session_code", 0)),
             next_funding_idx=self._first_funding_after(sym_in, decision_ts),
         )

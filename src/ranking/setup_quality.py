@@ -20,10 +20,9 @@ from src.exchange.metadata import MetadataConfig
 from src.ranking.candidate import Candidate
 from src.ranking.config import RankingConfig
 
-# Default no-trade / protection regimes (Section 11): no strategy may trade here.
-NO_TRADE_REGIMES: frozenset[str] = frozenset(
-    {"R8_DATA_UNSAFE", "R7_TOXIC_EXECUTION", "R4_HIGH_VOL_CHOP"}
-)
+# Default no-trade / protection regimes (Section 11). The canonical set is declared in
+# configs/regime.yaml and owned by src.regime, so detection and this gate never drift.
+from src.regime.detector import NO_TRADE_REGIMES
 
 
 @dataclass(frozen=True, slots=True)
