@@ -74,9 +74,12 @@ def meets_bar(row: BacktestRun, kc: KillCriteria) -> bool:
 
 
 def _sort_key(row: BacktestRun, kc: KillCriteria) -> tuple:
-    # Clears-the-bar first, then strongest expectancy / PF, smallest DD, most trades.
+    # Clears-the-bar first; then runs that ACTUALLY TRADED rank above no-trade runs (a
+    # 0-trade run is "no signal", not a neutral result); then strongest expectancy / PF,
+    # smallest DD, most trades.
     return (
         0 if meets_bar(row, kc) else 1,
+        0 if row.trade_count > 0 else 1,
         -row.expectancy_r,
         -min(row.profit_factor, 1e9),
         row.max_drawdown,

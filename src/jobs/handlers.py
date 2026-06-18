@@ -677,6 +677,7 @@ def _run_lake_backtest(ctx: JobContext, params: dict) -> dict:
     data_cfg = load_data_config(config_path)
     timeframe = params.get("timeframe") or None
     symbols = params.get("symbols") or None
+    candidate_id = params.get("candidate_id") or params.get("strategy") or None
     label = str(params.get("label") or "lake")
     dataset_version = params.get("dataset_version") or None
     ctx.log(f"real-data backtest over {data_cfg.exchange_id}/{data_cfg.data_version}")
@@ -685,6 +686,7 @@ def _run_lake_backtest(ctx: JobContext, params: dict) -> dict:
         data_cfg,
         timeframe=timeframe,
         symbols=symbols,
+        candidate_id=candidate_id,
         dataset_version=dataset_version,
         label=label,
     )

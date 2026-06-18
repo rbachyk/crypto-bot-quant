@@ -165,6 +165,18 @@ def test_best_per_iteration_collapses_reruns() -> None:
     assert {e.run_id for e in every} == {"lb_w", "lb_better"}
 
 
+def test_zero_trade_runs_rank_below_runs_that_traded() -> None:
+    sid = "lb_zero"
+    # A no-trade run has expectancy 0; a losing run has negative expectancy. The losing
+    # run is more informative for finding an edge, so it must rank ABOVE the no-trade one.
+    _insert("lb_notrade", strategy_id=sid, dataset_version="ds_nt", expectancy_r=0.0,
+            profit_factor=0.0, max_drawdown=0.0, trade_count=0)
+    _insert("lb_losing", strategy_id=sid, dataset_version="ds_loss", expectancy_r=-0.30,
+            profit_factor=0.5, max_drawdown=0.20, trade_count=12)
+    board = build_leaderboard(strategy_id=sid)
+    assert [e.run_id for e in board] == ["lb_losing", "lb_notrade"]
+
+
 def test_leaderboard_filters_by_dataset_version() -> None:
     sid = "lb_filter"
     _insert(

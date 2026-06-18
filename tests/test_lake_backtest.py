@@ -8,8 +8,9 @@ runs on them. Also covers the per-series OI grid override (``oi_timeframe``).
 
 from __future__ import annotations
 
+import pytest
 from src.backtest.config import load_backtest_config
-from src.backtest.service import build_lake_inputs, run_engine
+from src.backtest.service import build_lake_inputs, lake_candidate_strategy, run_engine
 from src.config.settings import REPO_ROOT
 from src.data.config import DataConfig, ValidationThresholds, load_data_config
 from src.data.schema import (
@@ -83,6 +84,38 @@ def test_build_lake_inputs_round_trip_and_engine_run(tmp_path) -> None:
     assert result.report.trade_count >= 0
 
 
+def test_lake_inputs_rebased_to_zero_based_and_engine_trades(tmp_path) -> None:
+    """Regression: real lake data carries absolute epoch ts; the engine indexes bars
+    0-based (entry_bar = decision_ts // iv). build_lake_inputs must rebase, else every
+    signal maps past the end of the bars array and NOTHING ever trades."""
+    store = SeriesStore(tmp_path)
+    iv = timeframe_ms(TF)
+    h1 = timeframe_ms("1h")
+    start = (1_700_000_000_000 // h1) * h1  # realistic recent epoch, 1h+5m aligned
+    end = start + 400 * iv
+    _seed_lake(store, start, end)
+
+    inputs = build_lake_inputs(
+        store,
+        exchange_id=EX,
+        symbols=[SYM],
+        timeframe=TF,
+        base_timeframe=BASE,
+        funding_timeframe=FUND,
+        start_ms=start,
+        end_ms=end,
+        oi_timeframe=OI_TF,
+    )
+    si = inputs[0]
+    assert si.bars[0]["ts"] == 0  # rebased to a 0-based grid
+    assert si.bars[1]["ts"] - si.bars[0]["ts"] == iv
+    # The engine's entry-bar mapping must land inside the bars array for every row.
+    assert all(r["decision_ts"] // iv < len(si.bars) for r in si.frame.rows)
+    # Signals therefore reach the engine and execute (the bug produced zero trades).
+    result = run_engine(load_backtest_config(), load_metadata_config(), inputs, label="rebase")
+    assert result.report.trade_count > 0
+
+
 def test_build_lake_inputs_skips_symbols_without_history(tmp_path) -> None:
     store = SeriesStore(tmp_path)
     start, end = 0, 50 * timeframe_ms(TF)
@@ -153,3 +186,16 @@ def test_bybit_config_file_uses_1h_oi() -> None:
     assert cfg.oi_grid == "1h"
     oi_key = next(k for k in cfg.required_keys(SYM) if k.data_type == OPEN_INTEREST)
     assert oi_key.timeframe == "1h"
+
+
+def test_lake_candidate_strategy_builds_real_strategy() -> None:
+    """Real-data backtests can run the configured research library (families A/B/G)."""
+    strat, sid, version = lake_candidate_strategy("basis_reversion")
+    assert sid == "basis_reversion"
+    assert version
+    assert hasattr(strat, "evaluate")  # family B is a per-row Strategy
+
+
+def test_lake_candidate_strategy_unknown_id_raises() -> None:
+    with pytest.raises(ValueError, match="unknown candidate strategy"):
+        lake_candidate_strategy("does_not_exist")

@@ -73,8 +73,14 @@ Run real-data iterations and compare them on a leaderboard (each run is tagged w
 
 ```bash
 uv run python -m src.cli.main backtest-lake --config configs/data.bybit.yaml --timeframe 1h
+uv run python -m src.cli.main backtest-lake --strategy basis_reversion --timeframe 1h  # real candidate
 uv run python -m src.cli.main leaderboard            # ranked by the profitability bar
 ```
+
+`--strategy <candidate_id>` runs a real research strategy (families A/B/G) instead of the
+reference self-test; omit it for the reference momentum baseline. (Note: candidate thresholds
+are tuned for the synthetic fixtures — e.g. `basis_reversion`'s 15bps premium trigger exceeds
+the real Bybit BTC basis of ≈5–8bps — so expect to retune params on real data via the leaderboard.)
 
 The leaderboard ranks the best run per (strategy, snapshot, timeframe) by the profitability
 bar (expectancy ≥ 0.03R, PF ≥ 1.10, max-DD ≤ 0.25, enough trades) — see the **Leaderboard**

@@ -188,7 +188,34 @@ def build_lake_inputs(
                 activation_ts=0,
             )
         )
-    return inputs
+    if not inputs:
+        return inputs
+    # The engine indexes bars 0-based (entry_bar = decision_ts // iv), as the reference
+    # series is. Real lake data carries absolute epoch timestamps, so rebase the whole
+    # window to a 0-based grid (offset aligned to the decision interval, ≤ every sample).
+    iv = timeframe_ms(timeframe)
+    lo = (start_ms // iv) * iv
+    return rebase_window(inputs, lo, end_ms)
+
+
+def lake_candidate_strategy(
+    candidate_id: str,
+) -> tuple[Strategy | PortfolioStrategy, str, str]:
+    """Build a configured research candidate by id → (strategy, strategy_id, version).
+
+    Lets real-data backtests run the actual strategy library (families A/B/G) rather
+    than only the reference self-test. Family B is single-symbol; A/G are cross-asset
+    (need a multi-symbol universe to produce signals)."""
+    from src.strategies.candidates import build_strategy
+    from src.strategies.config import load_strategies_config
+
+    scfg = load_strategies_config()
+    cand = scfg.candidate(candidate_id)
+    if cand is None:
+        known = ", ".join(c.id for c in scfg.candidates) or "(none)"
+        raise ValueError(f"unknown candidate strategy {candidate_id!r}; known: {known}")
+    strategy = build_strategy(cand, scfg.strategy_version, cand.params)
+    return strategy, cand.id, scfg.strategy_version
 
 
 def run_lake_backtest(
@@ -199,14 +226,17 @@ def run_lake_backtest(
     settings: Settings | None = None,
     timeframe: str | None = None,
     symbols: list[str] | None = None,
+    strategy: Strategy | PortfolioStrategy | None = None,
     label: str = "lake",
 ) -> BacktestRunResult:
     """Run the event-based engine over real lake data for a ``DATA_VERSION`` snapshot.
 
     Reads the downloaded series from the configured data lake (``data.bybit.yaml``
     et al.), builds inputs through the one feature pipeline and runs the engine.
-    Fees fall back to the backtest-config defaults for symbols without verified
-    exchange metadata (research-grade; verified metadata is a live/META concern).
+    ``strategy`` defaults to the reference momentum self-test; pass a real candidate
+    (see :func:`lake_candidate_strategy`) to research an actual edge. Fees fall back to
+    the backtest-config defaults for symbols without verified exchange metadata
+    (research-grade; verified metadata is a live/META concern).
     """
     settings = settings or get_settings()
     data_cfg = data_cfg or load_data_config()
@@ -231,7 +261,7 @@ def run_lake_backtest(
             "no lake inputs for the configured window — download a DATA_VERSION "
             "snapshot first (qbot download ...)"
         )
-    return run_engine(cfg, meta, inputs, label=label)
+    return run_engine(cfg, meta, inputs, strategy=strategy, label=label)
 
 
 def run_and_persist_lake_backtest(
@@ -242,6 +272,7 @@ def run_and_persist_lake_backtest(
     settings: Settings | None = None,
     timeframe: str | None = None,
     symbols: list[str] | None = None,
+    candidate_id: str | None = None,
     dataset_version: str | None = None,
     label: str = "lake",
     kind: str = "backtest",
@@ -251,15 +282,29 @@ def run_and_persist_lake_backtest(
     Writes the report to the reports lake and upserts a ``backtest_runs`` index row
     tagged with the ``DATA_VERSION`` it ran over, so the leaderboard can rank this
     iteration against others and no prior iteration is lost (each distinct
-    snapshot/strategy/symbols combination is its own immutable row).
+    snapshot/strategy/symbols combination is its own immutable row). ``candidate_id``
+    selects a real research strategy (families A/B/G); default is the reference
+    momentum self-test.
     """
     settings = settings or get_settings()
     data_cfg = data_cfg or load_data_config()
     cfg = cfg or load_backtest_config()
     tf = timeframe or data_cfg.base_timeframe
     syms = symbols or data_cfg.active_symbols()
+    strategy: Strategy | PortfolioStrategy | None = None
+    strat_id = cfg.reference_strategy.name
+    strat_ver = cfg.reference_strategy.strategy_version
+    if candidate_id:
+        strategy, strat_id, strat_ver = lake_candidate_strategy(candidate_id)
     out = run_lake_backtest(
-        data_cfg, cfg, meta, settings=settings, timeframe=tf, symbols=syms, label=label
+        data_cfg,
+        cfg,
+        meta,
+        settings=settings,
+        timeframe=tf,
+        symbols=syms,
+        strategy=strategy,
+        label=label,
     )
     report_path = write_report(settings, out.report.payload, kind=kind)
     rid = persist_backtest_run(
@@ -269,7 +314,8 @@ def run_and_persist_lake_backtest(
         report_path=report_path,
         settings=settings,
         passed=out.report.expectancy_r > 0,  # display flag; the bar lives on the leaderboard
-        strategy_id=cfg.reference_strategy.name,
+        strategy_id=strat_id,
+        strategy_version=strat_ver,
         dataset_version=dataset_version or data_cfg.data_version,
         symbols=syms,
         summary_extra={

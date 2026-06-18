@@ -190,6 +190,9 @@ def backtest_lake(
     timeframe: str = typer.Option(
         "", "--timeframe", help="decision timeframe ('' = config base_timeframe)"
     ),
+    strategy: str = typer.Option(
+        "", "--strategy", help="research candidate id (e.g. basis_reversion); '' = reference"
+    ),
     label: str = typer.Option("lake", "--label", help="run label"),
     dataset_version: str = typer.Option(
         "", "--dataset-version", help="snapshot id to tag the run ('' = config data_version)"
@@ -199,6 +202,7 @@ def backtest_lake(
 
     Requires a downloaded snapshot for the config window (``qbot download --config ...``).
     Each iteration is an immutable ``backtest_runs`` row tagged with its DATA_VERSION.
+    Pass ``--strategy <candidate_id>`` to backtest a real strategy (families A/B/G).
     """
     from src.backtest.service import run_and_persist_lake_backtest
     from src.data.config import load_data_config
@@ -209,6 +213,7 @@ def backtest_lake(
         data_cfg,
         timeframe=timeframe or None,
         symbols=syms,
+        candidate_id=strategy or None,
         dataset_version=dataset_version or None,
         label=label,
     )
