@@ -44,9 +44,14 @@ make health                  # probe db / redis / storage / kill switch  → sta
 make test lint typecheck     # full quality suite (must be clean)
 ```
 
-> macOS note: if a local (Homebrew) PostgreSQL already owns port 5432 it will
-> shadow the docker one and `make migrate` will hit the wrong database — stop it
-> (`brew services stop postgresql@<v>`) or remap the published port.
+> macOS notes:
+> - If a local (Homebrew) PostgreSQL already owns port 5432 it will shadow the docker one and
+>   `make migrate` will hit the wrong database — stop it (`brew services stop postgresql@<v>`) or
+>   remap the published port.
+> - The dockerised `caddy` publishes **443** for the dashboard (`https://localhost`); if another
+>   local web server holds 443, change the published port or skip Caddy and hit the backend
+>   directly (`uv run uvicorn src.api.app:app --reload` → `http://localhost:8000`). The host-side
+>   gate / health / CLI flow used for live-readiness does not need Caddy.
 
 Once healthy you can exercise the system end-to-end without an exchange:
 
@@ -168,6 +173,30 @@ Run a gate:
 make run-gate GATE=INFRA          # or: python -m src.gates.runner --gate INFRA --json
 make run-all-gates                # all gates in dependency order
 ```
+
+## Going through the gates (Road to Live)
+
+The intended loop is **run gate → read remediation → fix → re-run → green → advance** until every
+`blocks_live` gate passes (Section 27). Locally on a Mac:
+
+```bash
+make docker-up && make migrate && make health     # deps healthy
+make run-all-gates                                 # full chain in dependency order (31 gates)
+make run-gate GATE=BT                              # re-run a single gate after a fix
+uv run uvicorn src.api.app:app --reload            # then open https://localhost → Road to Live
+```
+
+The **Road to Live** dashboard page shows the live-readiness score (% of `blocks_live` gates passed),
+the blocking criterion + next action for each gate, and a re-run button; at 100% it exposes a
+*Request live-activation approval* button (the operator sign-off the `LiveActivationGuard` requires).
+
+> **Important — a green gate run is not, by itself, "ready for real money."** All 31 gates PASS in a
+> clean local checkout, but several `LIVE`-gate criteria are operator-attested or run against
+> synthetic/seeded data, and several AGENTS.md requirements are **not** asserted by any gate. Read
+> **[`docs/spec_compliance.md`](docs/spec_compliance.md)** for the honest status: what is complete,
+> the known gaps/divergences (incl. two safety items — regime no-trade protection and the learner
+> revert path), and the concrete list of what real live additionally needs (a profitable edge,
+> `[VERIFIED]` metadata, a real-time data feed, real testnet creds, and the operator sign-off).
 
 ## Docker (single-node MVP topology — Appendix B.12)
 

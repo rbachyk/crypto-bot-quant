@@ -2862,7 +2862,7 @@ Required commands:
 - `make run-worker-ml`
 - `make run-worker-rl`
 - `make run-paper`
-- `make run-gate --gate <id>` (run a specific gate)
+- `make run-gate GATE=<id>` (run a specific gate)
 - `make run-all-gates` (run all gates in dependency order)
 - `make kill` (CLI kill switch, independent of dashboard)
 
@@ -3018,7 +3018,7 @@ Each phase is **done** only when **all** boxes below are checked. The Reviewer A
 ### E.1 The loop (authoritative protocol)
 1. **Orchestrator** composes the Phase N prompt (E.4) and dispatches it to the **Coding Agent**.
 2. Coding Agent implements Phase N, runs `make test`/`make lint`/`make typecheck` and the phase's gates, writes a **Completion Report** (E.2).
-3. **Reviewer Agent** reads: this AGENTS.md, the Phase N prompt, the diff, the tests, the Completion Report — **and independently re-runs the phase gates** (`make run-gate --gate <id>`); it never trusts the report alone.
+3. **Reviewer Agent** reads: this AGENTS.md, the Phase N prompt, the diff, the tests, the Completion Report — **and independently re-runs the phase gates** (`make run-gate GATE=<id>`); it never trusts the report alone.
 4. Reviewer writes a **Review Report** (E.3): `PASS` / `FAIL` / `BLOCKED`, critical issues, required fixes, optional improvements, and the **exact acceptance criteria (Appendix D) / gate ids that failed**.
 5. Coding Agent fixes **only** the required issues (no scope creep).
 6. Reviewer re-verifies fixes and re-runs the affected gates.
