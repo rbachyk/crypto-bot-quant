@@ -287,22 +287,50 @@ def check_learn_promo_l(settings: Settings) -> list[Criterion]:
             policy_restored = OnlineLogRegPolicy()
             policy_restored.load(ff_blob)
 
-            revert_ok = (
+            snapshot_ok = (
                 ff_blob == blob
                 and policy_restored.learner_id == "test_revert_v1"
                 and meta.snapshot_id is not None
             )
 
+            # Exercise the ACTUAL rollback.revert() orchestration: it must freeze the
+            # controller onto the frozen fallback, cancel learner orders, alert, and log.
+            from src.adaptation.rollback import RollbackEvent
+
+            controller = LearnerController(
+                policy=OnlineLogRegPolicy(learner_id="live_v1"),
+                bounds=ActionBounds(),
+                frozen_policy=policy_restored,
+                mode=LearnerMode.LIVE_BOUNDED,
+            )
+            alerts: list = []
+            logs: list[RollbackEvent] = []
+            guard = RollbackGuard(
+                alert_sink=type("Sink", (), {"send": lambda self, a: alerts.append(a) or True})(),
+                cancel_orders=lambda: 3,
+                log_writer=logs.append,
+            )
+            ev = guard.revert(controller, trigger="manual_kill", detail="gate self-test")
+            revert_ok = (
+                snapshot_ok
+                and controller.is_frozen()
+                and controller.mode is LearnerMode.FROZEN
+                and ev.fallback_active
+                and ev.orders_cancelled == 3
+                and len(alerts) == 1
+                and len(logs) == 1
+            )
+
         out.append(
             Criterion.ok(
                 "frozen_fallback_revert",
-                "frozen fallback save → load → restore into new policy instance verified; "
-                "rollback.revert() path is functional",
+                "rollback.revert() freezes onto the frozen fallback, cancels learner orders, "
+                "alerts and writes learner_log; snapshot save→load→restore verified",
             )
             if revert_ok
             else Criterion.fail(
                 "frozen_fallback_revert",
-                f"revert_ok={revert_ok}; learner_id mismatch or blob mismatch",
+                f"revert_ok={revert_ok}: snapshot or atomic-revert side effects missing",
             )
         )
     except Exception as exc:  # noqa: BLE001
