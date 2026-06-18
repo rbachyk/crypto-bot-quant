@@ -193,5 +193,10 @@ def run_replay_session(
         candidate_id=candidate_id,
         settings=settings,
     )
+    # Real-money mode is bounded by the activation guard (gates + sign-off + caps).
+    if guard is None and mode == "live":
+        from src.live.guard import LiveActivationGuard
+
+        guard = LiveActivationGuard(settings)
     loop = LiveLoop(mode=mode, settings=settings, guard=guard)
     return loop.run(feed, session_name=data_cfg.data_version, max_ticks=max_ticks)

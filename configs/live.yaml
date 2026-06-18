@@ -1,0 +1,18 @@
+# live.yaml — bounded-live envelope (AGENTS.md Sections 2, 27, 35).
+#
+# These caps bound the FIRST live orders to a small, recoverable footprint even after
+# every gate passes and an operator signs off. They are an extra belt-and-suspenders on
+# top of the immutable risk envelope (Section 17) — not a replacement for it. Live order
+# placement is refused unless ALL of these hold (LiveActivationGuard):
+#   * settings.live_trading_allowed (TRADING_MODE=LIVE + APP_ENV=production + ENABLE_LIVE_TRADING=true)
+#   * every blocks_live gate currently PASSes (Road to Live = 100%)
+#   * an APPROVED live_activation sign-off exists (a second operator)
+#   * the per-order / per-session caps below are not exceeded.
+
+version: 1
+
+live:
+  max_orders_per_session: 5      # hard cap on live entries before a manual review
+  max_open_positions: 2          # concurrent live positions
+  max_order_notional_pct: 0.05   # ≤ 5% of equity notional per order
+  account_equity: 10000.0        # reference equity for notional caps until a live balance is read

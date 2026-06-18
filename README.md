@@ -98,8 +98,27 @@ uv run python -m src.cli.main ml-shadow-lake --config configs/data.bybit.yaml --
 paper pipeline (ranking → risk → execution → SimulatedVenue), persisting real `paper_trades`
 (shown on the **Paper** page). `ml-shadow-lake` scores those real candidates with the shadow
 ML meta-labeler, logging every prediction with `applied=False` (never influences trading).
-Until a live/replay feed exists (later milestone), this is how paper/shadow forward-test on
-real downloaded data.
+
+The **live trading loop** drives that same pipeline one decision time at a time against a
+chosen venue:
+
+```bash
+uv run python -m src.cli.main live --mode paper    --config configs/data.bybit.yaml --timeframe 1h
+uv run python -m src.cli.main live --mode testnet  --config configs/data.bybit.yaml --timeframe 1h  # real sandbox orders, no funds
+# --mode live is real money and is REFUSED unless every safety condition holds (below)
+```
+
+- `paper` uses the offline `SimulatedVenue`; `testnet` uses the real ccxt venue in sandbox
+  mode (`CcxtLiveVenue`, default `EXCHANGE_ENV=testnet`) — orders are placed for real but
+  with no real funds; the entry carries its exchange-resident stop-loss/take-profit
+  **atomically** (Section 2.2) and the bot's ownership prefix as `clientOrderId` (Section 7).
+- `live` (real-money mainnet) order placement passes through the **`LiveActivationGuard`**,
+  which refuses unless ALL hold: `TRADING_MODE=LIVE` + `APP_ENV=production` +
+  `ENABLE_LIVE_TRADING=true`; **every `blocks_live` gate PASSes** (Road to Live = 100%); an
+  **APPROVED `live_activation` sign-off** exists; and the order is within the bounded-live
+  caps in `configs/live.yaml` (max orders/session, max open positions, max notional %). A
+  refused live order is a graceful non-placement, never a trade. There is still no "go live"
+  button — live stays off by default.
 
 Run the control center and a worker:
 
