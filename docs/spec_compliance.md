@@ -8,10 +8,15 @@ not mistaken for full spec compliance or true live-readiness. Audited 2026-06-18
 
 - **You can run everything locally on a Mac and pass the full gate chain** (`make run-all-gates`
   → 31/31 PASS incl. `LIVE`). The gate system and local setup are complete and consistent.
-- **Gate-green is NOT the same as "ready for real money."** Several `LIVE`-gate criteria are
+- **Spec compliance is now essentially complete.** The original audit's gaps (items 1–9) plus the
+  websocket feed, real-time live-loop mode, entity-scoped stats filters and the report envelope
+  have all been implemented and tested. What remains is **by design** (the learner stays
+  shadow-only until promoted) or **refinements** (per-tick streaming of point-in-time series),
+  listed under "Remaining" below.
+- **Gate-green is still NOT the same as "ready for real money."** Several `LIVE`-gate criteria are
   operator-attested or run against synthetic/seeded data and PASS deterministically in this
-  environment. And several AGENTS.md sections that the gates do **not** assert are incomplete
-  (below). Real live trading additionally requires the items in "Before real live" at the end.
+  environment. Real live trading additionally requires the items in "Before real live" at the end
+  (a profitable edge, `[VERIFIED]` metadata, real testnet creds, and the operator sign-off).
 
 ## Complete / strong (matches spec)
 
@@ -72,13 +77,27 @@ not mistaken for full spec compliance or true live-readiness. Audited 2026-06-18
    backtest report writer. (Residual: not yet applied to every report writer, and a few named
    reports — live, RL, online-learning, live-readiness, daily-review — still lack dedicated generators.)
 
-### Residual gaps (after items 1–7 + websocket feed + real-time mode)
+### Resolved (continued)
 
-- **Entity-scoped time filters** (Section 25) — by run/session/config/universe/strategy/model version.
-- **Report envelope coverage** (Section 34) — apply to all writers; add the missing report generators.
-- The learner remains **shadow-only / not wired to the live trading path** (by design until promoted).
-- The real-time feed streams **OHLCV** + REST-seeded point-in-time series; per-tick streaming of
-  mark/index/funding/OI is a refinement, not a correctness gap.
+- **Entity-scoped stats filters (Section 25) — RESOLVED.** `compute_trading_stats` + the
+  Performance/Analytics pages now scope by **strategy** and **session** (paper or live/testnet)
+  in addition to symbol + time period; `/api/stats/scopes` + a period/strategy/session selector.
+  Version-scoped analytics (by config/universe/model version) live on the Leaderboard's
+  `dataset_version`/`strategy` filters.
+- **Report envelope + missing reports (Section 34) — RESOLVED.** `src/reports.py` generates the
+  previously-missing named reports (live, online_learning, rl_simulation, rl_shadow,
+  live_readiness, daily_review) wrapped in the standard envelope (`qbot reports`); the envelope
+  is also wired into the paper and data-quality report writers.
+
+### Remaining (by design / refinements only)
+
+- The learner is **shadow-only / not wired to the live trading path** — intentional per Section 21
+  until it is promoted through the LEARN-PROMO gates + manual review.
+- The real-time feed streams **OHLCV** and REST-seeds the point-in-time series (mark/index/
+  funding/OI); per-tick streaming of those is a refinement, not a correctness gap.
+- Per-trade version columns (config/universe/model version) aren't stored on `paper_trades`, so
+  version-scoped *trade* filtering is served via the run-level Leaderboard rather than the
+  per-trade stats — as complete as the data model supports.
 
 ## Doc inconsistencies (fixed / noted)
 
