@@ -161,9 +161,22 @@ into two nav groups (Section 25):
   (`shadow_logs`, applied-count = 0 enforcement), **Remediation**, **Approvals**, **Audit Logs**,
   **Health**.
 
-Background work is routed to dedicated per-class workers (`data`/`backtest`/`ml`/`rl`/`gates`/`default`),
-and the `scheduler` service enqueues recurring shadow-only jobs (research re-validation, paper
-sessions, ML shadow passes) gated by the `ENABLE_*` toggles.
+Background work is routed to dedicated per-class workers
+(`data`/`backtest`/`ml`/`rl`/`live`/`gates`/`default`), and the `scheduler` service enqueues
+recurring shadow-only jobs (research re-validation, paper sessions, ML shadow passes) gated by
+the `ENABLE_*` toggles.
+
+**Dashboard-only demo/live operation (no terminal).** Everything the `qbot live` command does is
+also driven from the **Live Trading** page: a **Start** button enqueues a `run_live_session` job
+on the dedicated `live` worker, the page streams its per-tick progress, and a **Stop** button
+halts it cleanly (whatever executed is still saved) so you can restart any time. Each run is
+tagged by `EXCHANGE_ENV` — a Bybit **demo** run lands under `demo:` session ids — so its
+statistics stay **separated** from paper/testnet/live. When `EXCHANGE_ENV=demo`, the page also
+shows a **Reset demo statistics** button that zeroes only the `demo:` runs/trades/decision-logs/
+explainability (leaving every other environment intact) — press it for a clean slate before a
+fresh demo-testing run. So a full demo cycle is: set `EXCHANGE_ENV=demo` + your demo
+`EXCHANGE_API_KEY/SECRET` in `.env`, `make docker-up`, open **Live Trading** → *Reset demo
+statistics* → *Start demo session* → watch progress / *Stop*.
 
 End-to-end research flow: **research promotes candidates → `strategy_promotions` registry →
 paper sources promoted strategies → `paper_trades` → dashboard**. Alerts deliver to the log/

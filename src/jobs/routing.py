@@ -24,13 +24,16 @@ DEFAULT_CLASS = "default"
 # Queue classes a worker can serve, in the priority order a "serve everything" worker
 # (the default, and any single dev worker) drains them — heavy classes first so they are
 # never starved, ``default`` last.
-ALL_CLASSES: tuple[str, ...] = ("ml", "rl", "backtest", "data", "gates", DEFAULT_CLASS)
+ALL_CLASSES: tuple[str, ...] = ("ml", "rl", "backtest", "live", "data", "gates", DEFAULT_CLASS)
 
 # job_type -> class. Each entry is an exact name or a ``prefix_`` (trailing underscore =
 # startswith match). Evaluated in order; first match wins, else DEFAULT_CLASS.
 _CLASS_MEMBERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("ml", ("build_ml_", "train_ml_", "run_ml_", "run_lake_ml_", "evaluate_ml_models")),
     ("rl", ("train_rl_", "run_rl_", "simulate_rl_", "rl_")),
+    # A live/demo run is a long-lived loop; give it a dedicated worker so it never blocks
+    # (or is blocked by) backtest/data jobs. reset_env_stats rides the same class (light).
+    ("live", ("run_live_session", "reset_env_stats")),
     (
         "backtest",
         (

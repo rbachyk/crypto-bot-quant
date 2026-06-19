@@ -157,6 +157,21 @@ services:
       redis:
         condition: service_healthy
 
+  # Dedicated worker for the dashboard-driven live/demo trading loop. A demo session is a
+  # long-lived loop, so it gets its own worker (it must never block — or be blocked by —
+  # backtest/data/gate jobs); the dashboard Start/Stop/Reset controls drive it end to end.
+  worker-live:
+    <<: *app-build
+    environment:
+      <<: *app-env
+      SERVICE_NAME: worker-live
+    command: ["python", "-m", "src.cli.main", "worker", "--queues", "live"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
   scheduler:
     <<: *app-build
     environment:

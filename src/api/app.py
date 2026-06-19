@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import desc, select
 
 from src.api.auth import require_dashboard_auth
@@ -573,45 +573,177 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ----- Live Trading (#9) ---------------------------------------------- #
     @app.get("/dashboard/live", response_class=HTMLResponse)
     def dashboard_live(user: str = Depends(require_dashboard_auth)) -> str:
-        from src.db.models import PaperRun
+        from src.db.models import JobStatus, PaperRun
+        from src.live.admin import summarize_env_stats
 
+        env = settings.exchange_env
+        is_demo = env == "demo"
         with session_scope() as s:
             runs = list(
                 s.execute(select(PaperRun).order_by(desc(PaperRun.created_at))).scalars().all()
             )
-            live_runs = [r for r in runs if str(r.session_id).startswith(("live:", "testnet:"))][
-                :50
-            ]
+            live_runs = [
+                r
+                for r in runs
+                if str(r.session_id).startswith(("live:", "testnet:", "demo:"))
+            ][:50]
             rows = [
                 [
                     f"<code>{_esc(r.session_id)}</code>",
+                    r.created_at.strftime("%Y-%m-%d %H:%M"),
                     r.executed_count,
                     f"{r.net_pnl:+.2f}",
                     f"{r.win_rate * 100:.1f}%",
                 ]
                 for r in live_runs
             ]
+            # Live-session jobs (running first), so the operator sees progress + can Stop.
+            jobs = list(
+                s.execute(
+                    select(Job)
+                    .where(Job.job_type == "run_live_session")
+                    .order_by(desc(Job.created_at))
+                    .limit(20)
+                )
+                .scalars()
+                .all()
+            )
+            job_rows = []
+            active_ids = []
+            for j in jobs:
+                active = j.status in (JobStatus.QUEUED, JobStatus.RUNNING)
+                if active:
+                    active_ids.append(j.job_id)
+                prog = f"{j.progress_current}/{j.progress_total}" if j.progress_total else "-"
+                stop = (
+                    f"<form method='post' action='/api/jobs/{j.job_id}/cancel' "
+                    f"style='display:inline'><button class='btn btn-danger' type='submit'>"
+                    f"&#9632; Stop</button></form>"
+                    if active
+                    else "-"
+                )
+                job_rows.append(
+                    [
+                        f"<a href='/dashboard/jobs/{j.job_id}'>{j.job_id[:12]}…</a>",
+                        _status_badge(j.status.value),
+                        prog,
+                        _esc(j.progress_message or ""),
+                        stop,
+                    ]
+                )
+
+        demo_stats = summarize_env_stats("demo")
         status = _kv_card(
             "Live status",
             [
                 ("trading_mode", settings.trading_mode.value),
                 ("app_env", settings.app_env.value),
                 ("live_trading_allowed", settings.live_trading_allowed),
-                ("exchange / env", f"{settings.exchange_id} / {settings.exchange_env}"),
+                ("exchange / env", f"{settings.exchange_id} / {env}"),
             ],
         )
+
+        # --- Demo / testnet control panel (dashboard-only operation) ------------ #
+        env_note = {
+            "demo": "Bybit <b>demo</b> trading (mainnet market data + virtual funds, "
+            "api-demo.bybit.com). No real money; safe for testing.",
+            "testnet": "Bybit <b>testnet</b> (separate test network, virtual funds).",
+            "live": "Bybit <b>live</b> (REAL MONEY) — every order is gated by the activation "
+            "guard (gates green + sign-off + caps).",
+        }.get(env, f"environment {_esc(env)}")
+        running = bool(active_ids)
+        start_disabled = " disabled" if running else ""
+        controls = (
+            '<div class="card"><h2>Demo / live control</h2>'
+            f'<p class="meta">Current environment: <b>{_esc(env)}</b> — {env_note}</p>'
+            '<form method="post" action="/api/live/start" style="display:inline;margin-right:8px">'
+            f'<button class="btn" type="submit"{start_disabled}>&#9654; Start '
+            f"{_esc(env)} session</button></form>"
+            + (
+                '<form method="post" action="/api/live/reset" style="display:inline" '
+                "onsubmit=\"return confirm('Zero ALL demo statistics? This deletes every "
+                "demo: run, trade, decision log and explainability row. Paper/testnet/live "
+                "data is untouched.');\">"
+                '<input type="hidden" name="confirm" value="true">'
+                '<button class="btn btn-danger" type="submit">&#10227; Reset demo statistics</button>'
+                "</form>"
+                if is_demo
+                else ""
+            )
+            + (
+                '<p class="meta" style="margin-top:8px">A session runs in the background on the '
+                "<code>live</code> worker; watch its progress below and press Stop to halt it "
+                "cleanly (whatever executed is still saved). Restart any time.</p>"
+            )
+            + (
+                f'<p class="meta">Demo statistics currently stored: {demo_stats.runs} runs, '
+                f"{demo_stats.trades} trades, {demo_stats.decision_logs} decision logs, "
+                f"{demo_stats.explainability} explainability rows. Reset to zero before a fresh "
+                "demo-testing run so its statistics start clean and separated.</p>"
+                if is_demo
+                else ""
+            )
+            + (
+                '<p class="meta" style="color:#b45309">A session is already running — Stop it '
+                "before starting another.</p>"
+                if running
+                else ""
+            )
+            + "</div>"
+        )
+
+        jobs_card = (
+            f'<div class="card"><h2>Live sessions — jobs ({len(job_rows)})</h2>'
+            + _rows_table(
+                ["Job", "Status", "Progress", "Message", ""],
+                job_rows,
+                "No live sessions started yet — click Start above.",
+            )
+            + "</div>"
+        )
+
         body = (
-            status + '<p class="meta">Live trading is hard-gated: it requires TRADING_MODE=LIVE + '
+            status
+            + controls
+            + jobs_card
+            + '<p class="meta">Live (real-money) trading is hard-gated: TRADING_MODE=LIVE + '
             "APP_ENV=production + ENABLE_LIVE_TRADING=true, all blocks_live gates PASS, an "
             "approved live_activation sign-off, and bounded-live caps (configs/live.yaml). "
-            "Run loops via <code>qbot live --mode paper|testnet|live</code>.</p>"
-            + f'<div class="card"><h2>Live / testnet sessions ({len(rows)})</h2>'
+            "Demo and testnet use virtual funds and need no activation guard.</p>"
+            + f'<div class="card"><h2>Demo / testnet / live sessions ({len(rows)})</h2>'
             + _rows_table(
-                ["Session", "Executed", "Net P&L", "Win rate"], rows, "No live/testnet runs yet."
+                ["Session", "Created", "Executed", "Net P&L", "Win rate"],
+                rows,
+                "No demo/testnet/live runs yet.",
             )
             + "</div>"
         )
         return _page("Live Trading", body)
+
+    # ----- live/demo session controls (dashboard-only operation) ---------- #
+    @app.post("/api/live/start")
+    def live_start(user: str = Depends(require_dashboard_auth)) -> RedirectResponse:
+        """Start a dashboard-driven live/demo/testnet session on the dedicated live worker."""
+        from src.jobs import JobQueue
+
+        JobQueue(settings).enqueue("run_live_session", {"requested_by": user}, requested_by=user)
+        _audit("run_live_session", target=settings.exchange_env, actor=user, detail={})
+        return RedirectResponse(url="/dashboard/live", status_code=303)
+
+    @app.post("/api/live/reset")
+    def live_reset(
+        confirm: bool = False, user: str = Depends(require_dashboard_auth)
+    ) -> RedirectResponse:
+        """Zero the demo environment's statistics (runs/trades/logs/explainability)."""
+        if not confirm:
+            raise HTTPException(status_code=400, detail="reset requires confirm=true")
+        from src.live.admin import reset_env_stats
+
+        removed = reset_env_stats("demo")
+        _audit(
+            "reset_env_stats", target="demo", actor=user, detail={"removed": removed.to_dict()}
+        )
+        return RedirectResponse(url="/dashboard/live", status_code=303)
 
     # ----- Execution Quality (#15) ---------------------------------------- #
     @app.get("/dashboard/execution", response_class=HTMLResponse)

@@ -33,6 +33,12 @@ reports/risk/
 reports/execution/
 reports/paper/
 reports/ml_shadow/
+reports/live/
+reports/live_readiness/
+reports/online_learning/
+reports/rl_shadow/
+reports/rl_simulation/
+reports/daily_review/
 reports/phase_10/
 reports/phase_11/
 reports/phase_12/

@@ -613,6 +613,107 @@ def _run_paper_session(ctx: JobContext, params: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Live / demo trading loop (dashboard-triggered; runs on the dedicated `live`  #
+# queue). Lets the operator start, watch, stop, and restart a demo/testnet run #
+# entirely from the dashboard — no terminal command required.                  #
+# --------------------------------------------------------------------------- #
+def _live_loop_mode(exchange_env: str, override: str | None) -> str:
+    """Map the EXCHANGE_ENV to the live-loop venue mode (the venue selector, Section 18).
+
+    ``demo`` and ``testnet`` both use the real ccxt venue with virtual funds (no activation
+    guard); only ``live`` is real-money and stays fully guarded. ``paper`` forces the offline
+    SimulatedVenue. An explicit ``mode`` param overrides the mapping."""
+    if override in ("paper", "testnet", "live"):
+        return override
+    if exchange_env == "live":
+        return "live"
+    if exchange_env in ("demo", "testnet"):
+        return "testnet"  # real ccxt venue; EXCHANGE_ENV routes the endpoint (demo vs testnet)
+    return "paper"
+
+
+@job_handler("run_live_session")
+def _run_live_session(ctx: JobContext, params: dict) -> dict:
+    """Run + persist a live/demo/testnet trading session driven from the dashboard.
+
+    The venue is chosen from EXCHANGE_ENV (demo/testnet = virtual funds; live = guarded
+    real money); the session is tagged with the environment prefix (``demo:``…) so its
+    statistics stay separated. Progress is streamed per tick to the Job row and the loop
+    polls the job's cancel flag every tick, so the dashboard Stop button halts it cleanly.
+    Whatever executed before a stop/cancel/error is still persisted."""
+    from src.config import get_settings
+    from src.data.config import load_data_config
+    from src.live.loop import persist_live_run, run_replay_session
+
+    settings = get_settings()
+    config_path = str(params.get("config_path") or "configs/data.bybit.yaml")
+    data_cfg = load_data_config(config_path)
+    mode = _live_loop_mode(settings.exchange_env, params.get("mode"))
+    realtime = bool(params.get("realtime", True))
+    transport = params.get("transport") or ("rest" if realtime else None)
+    timeframe = params.get("timeframe") or None
+    symbols = params.get("symbols") or None
+    candidate_id = params.get("candidate_id") or params.get("strategy") or None
+    max_ticks = int(params.get("max_ticks") or 200)
+
+    ctx.log(
+        f"starting live session: env={settings.exchange_env} venue_mode={mode} "
+        f"realtime={realtime} transport={transport} max_ticks={max_ticks}"
+    )
+    ctx.progress(0, max_ticks, "starting live loop")
+
+    def _on_tick(tick, i: int) -> None:
+        ctx.progress(
+            i + 1, max_ticks, f"tick {i + 1}: {tick.executed} exec / {tick.rejected} rej"
+        )
+
+    result = run_replay_session(
+        data_cfg,
+        mode=mode,
+        timeframe=timeframe,
+        symbols=symbols,
+        candidate_id=candidate_id,
+        transport=transport,
+        realtime=realtime,
+        max_ticks=max_ticks,
+        on_tick=_on_tick,
+        should_stop=ctx.is_cancelled,  # dashboard Stop → cancel flag → clean halt
+    )
+    session_id = persist_live_run(result, settings)
+    net = sum(t.pnl for t in result.session.trades)
+    status = "halted/stopped" if result.halted else "completed"
+    ctx.progress(len(result.ticks), max_ticks, f"{status}: {result.executed} executed")
+    return {
+        "message": f"live session {session_id} {status}: {result.executed} executed / "
+        f"{result.rejected} rejected, net_pnl={net:.2f}",
+        "session_id": session_id,
+        "env": settings.exchange_env,
+        "mode": mode,
+        "executed": result.executed,
+        "rejected": result.rejected,
+        "ticks": len(result.ticks),
+        "halted": result.halted,
+    }
+
+
+@job_handler("reset_env_stats")
+def _reset_env_stats(ctx: JobContext, params: dict) -> dict:
+    """Zero one environment's persisted statistics (default ``demo``) — runs+trades+decision
+    logs+explainability — leaving other environments untouched (Section 26)."""
+    from src.live.admin import reset_env_stats
+
+    env = str(params.get("env") or "demo")
+    ctx.log(f"resetting persisted statistics for environment {env!r}")
+    removed = reset_env_stats(env)
+    ctx.progress(1, 1, f"removed {removed.total} rows for {env}")
+    return {
+        "message": f"reset {env} stats: removed {removed.total} rows "
+        f"({removed.runs} runs, {removed.trades} trades)",
+        **removed.to_dict(),
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Backtesting (dashboard-triggered, runs on the dedicated `backtest` queue)    #
 # --------------------------------------------------------------------------- #
 @job_handler("run_backtest")

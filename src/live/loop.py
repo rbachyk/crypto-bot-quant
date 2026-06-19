@@ -21,7 +21,7 @@ live-safety condition (settings + gates + sign-off) enforced at the venue/guard 
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -137,14 +137,35 @@ class LiveLoop:
             venue=self.venue,
         )
 
+    @property
+    def env_label(self) -> str:
+        """Session-id prefix identifying the trading environment, so statistics separate
+        cleanly per environment (demo vs testnet vs live vs offline paper). ``paper`` mode is
+        always the offline SimulatedVenue; any real-venue mode is labelled by EXCHANGE_ENV, so a
+        Bybit **demo** run is tagged ``demo:`` and never mixed with testnet/live history."""
+        return "paper" if self.mode == "paper" else self.settings.exchange_env
+
     def run(
-        self, feed: MarketFeed, *, session_name: str = "live", max_ticks: int | None = None
+        self,
+        feed: MarketFeed,
+        *,
+        session_name: str = "live",
+        max_ticks: int | None = None,
+        on_tick: Callable[[LiveTick, int], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> LiveRunResult:
-        """Process feed groups one tick at a time; halt on kill switch / foreign orders."""
-        session = self.engine.new_session(f"{self.mode}:{session_name}")
+        """Process feed groups one tick at a time; halt on kill switch / foreign orders.
+
+        ``on_tick(tick, index)`` is called after each processed tick (for live progress
+        reporting); ``should_stop()`` is polled before each tick so an external operator
+        (e.g. a dashboard Stop button via the job-cancel flag) can halt the loop cleanly."""
+        session = self.engine.new_session(f"{self.env_label}:{session_name}")
         result = LiveRunResult(session=session, mode=self.mode)
         for i, (decision_ts, group) in enumerate(feed.groups()):
             if max_ticks is not None and i >= max_ticks:
+                break
+            if should_stop is not None and should_stop():
+                result.halted = True
                 break
             if self.kill_switch.engaged():
                 result.halted = True
@@ -160,23 +181,25 @@ class LiveLoop:
             # a foreign order halts the loop.
             if self.engine.run_reconciliation(session):
                 result.halted = True
-                result.ticks.append(
-                    LiveTick(
-                        decision_ts,
-                        len(group),
-                        session.executed_count - before_exec,
-                        session.rejected_count - before_rej,
-                    )
-                )
-                break
-            result.ticks.append(
-                LiveTick(
+                tick = LiveTick(
                     decision_ts,
                     len(group),
                     session.executed_count - before_exec,
                     session.rejected_count - before_rej,
                 )
+                result.ticks.append(tick)
+                if on_tick is not None:
+                    on_tick(tick, i)
+                break
+            tick = LiveTick(
+                decision_ts,
+                len(group),
+                session.executed_count - before_exec,
+                session.rejected_count - before_rej,
             )
+            result.ticks.append(tick)
+            if on_tick is not None:
+                on_tick(tick, i)
         return result
 
 
@@ -192,6 +215,8 @@ def run_replay_session(
     guard: LiveOrderGuard | None = None,
     transport: str | None = None,
     realtime: bool = False,
+    on_tick: Callable[[LiveTick, int], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> LiveRunResult:
     """Run the live loop over a snapshot **replay** or the **real-time** live feed in ``mode``.
 
@@ -245,4 +270,30 @@ def run_replay_session(
             data_cfg, timeframe=tf, symbols=syms, candidate_id=candidate_id, settings=settings
         )
         loop = LiveLoop(mode=mode, settings=settings, guard=guard, data_manager=data_manager)
-    return loop.run(feed, session_name=data_cfg.data_version, max_ticks=max_ticks)
+    return loop.run(
+        feed,
+        session_name=data_cfg.data_version,
+        max_ticks=max_ticks,
+        on_tick=on_tick,
+        should_stop=should_stop,
+    )
+
+
+def persist_live_run(
+    result: LiveRunResult, settings: Settings | None = None
+) -> str:
+    """Persist a finished live/demo/testnet loop the same way a paper session is persisted.
+
+    Writes the run summary + per-trade rows + decision logs + trade explainability so the
+    dashboard reads demo/testnet/live trades through the exact same tables as paper, while the
+    ``env:`` session-id prefix keeps each environment's statistics separated (Section 26/34)."""
+    from datetime import UTC, datetime
+
+    from src.paper.report import build_paper_report
+    from src.paper.run import persist_paper_session
+
+    session = result.session
+    if session.ended_at is None:
+        session.ended_at = datetime.now(UTC)
+    report = build_paper_report(session)
+    return persist_paper_session(session, report, settings)
