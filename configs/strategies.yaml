@@ -29,6 +29,10 @@ strategies:
   # (Section 16 long/short breakdown; Appendix D Phase 5 "losing side disabled").
   min_side_expectancy_r: 0.0
 
+  # The live/demo engine runs at most this many promoted strategies at once — the top-N by
+  # validated expectancy_r — so the live ensemble stays small and diversified (0 = no cap).
+  max_active_strategies: 5
+
   candidates:
     # ----------------------------------------------------------------------- #
     # Family A — Cross-Asset Lead-Lag (Section 12.A)                           #

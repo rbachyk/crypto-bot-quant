@@ -654,11 +654,29 @@ def _run_live_session(ctx: JobContext, params: dict) -> dict:
     timeframe = params.get("timeframe") or None
     symbols = params.get("symbols") or None
     candidate_id = params.get("candidate_id") or params.get("strategy") or None
+    # By default run the ACTIVE PROMOTED ENSEMBLE (top-N strategies) — demo behaves exactly like
+    # live. An explicit candidate_id pins the run to one strategy instead.
+    multi_strategy = candidate_id is None
     max_ticks = int(params.get("max_ticks") or 200)
 
+    if multi_strategy:
+        from src.paper.lake import resolve_active_strategies
+
+        active, skipped = resolve_active_strategies(settings)
+        ctx.log(
+            f"active promoted strategies: {[sid for _s, sid, _v in active] or 'NONE'}"
+            + (f" (skipped cross-asset: {skipped})" if skipped else "")
+        )
+        if not active:
+            ctx.log(
+                "no promoted strategies are active — run strategy validation and promote at "
+                "least one before trading (live trades nothing without a promoted strategy).",
+                level="WARNING",
+            )
     ctx.log(
         f"starting live session: env={settings.exchange_env} venue_mode={mode} "
-        f"realtime={realtime} transport={transport} max_ticks={max_ticks}"
+        f"realtime={realtime} transport={transport} max_ticks={max_ticks} "
+        f"multi_strategy={multi_strategy}"
     )
     ctx.progress(0, max_ticks, "starting live loop")
 
@@ -673,6 +691,7 @@ def _run_live_session(ctx: JobContext, params: dict) -> dict:
         timeframe=timeframe,
         symbols=symbols,
         candidate_id=candidate_id,
+        multi_strategy=multi_strategy,
         transport=transport,
         realtime=realtime,
         max_ticks=max_ticks,

@@ -279,6 +279,7 @@ _NAV_GROUPS: list[tuple[str, list[tuple[str, str, str, list[str]]]]] = [
     (
         "Research & Testing",
         [
+            ("Strategies", "/dashboard/strategies", "strategy", ["Strategies"]),
             ("Backtests", "/dashboard/backtests", "backtest", ["Backtests"]),
             ("Leaderboard", "/dashboard/leaderboard", "leaderboard", ["Leaderboard"]),
             ("Paper Trading", "/dashboard/paper", "paper", ["Paper Trading"]),
@@ -2435,6 +2436,95 @@ def create_app(settings: Settings | None = None) -> FastAPI:
   </table>
 </div>"""
         return _page("Paper Trading", body)
+
+    # ----- Strategies (sourcing, validation, active promoted set) ---------- #
+    @app.post("/api/strategies/validate")
+    def validate_strategies(user: str = Depends(require_dashboard_auth)) -> RedirectResponse:
+        """Source + validate the candidate pool: run every enabled candidate through the
+        research gate loop (backtest + walk-forward + fee/slippage stress + noise control) and
+        persist promote/shelve verdicts. The live engine then runs the top-N promoted."""
+        from src.jobs import JobQueue
+
+        JobQueue(settings).enqueue("run_strategy_validation", {}, requested_by=user)
+        _audit("run_strategy_validation", target="strategies", actor=user, detail={})
+        return RedirectResponse(url="/dashboard/strategies", status_code=303)
+
+    @app.get("/dashboard/strategies", response_class=HTMLResponse)
+    def dashboard_strategies(user: str = Depends(require_dashboard_auth)) -> str:
+        from src.strategies.config import load_strategies_config
+        from src.strategies.promotion import promoted_strategy_details
+
+        scfg = load_strategies_config()
+        cap = scfg.max_active_strategies
+        details = promoted_strategy_details(scfg.strategy_version)
+        active = [d for d in details if d.active]
+        enabled_pool = scfg.enabled_candidates()
+
+        def _sides(d) -> str:
+            s = []
+            if d.allow_long:
+                s.append("long")
+            if d.allow_short:
+                s.append("short")
+            return "/".join(s) or "—"
+
+        promoted_rows = [
+            [
+                f"<code>{_esc(d.candidate_id)}</code>",
+                _esc(d.family),
+                f"{d.expectancy_r:+.4f}",
+                _sides(d),
+                (
+                    '<span class="badge pass">ACTIVE</span>'
+                    if d.active
+                    else '<span class="badge not_run">BENCHED</span>'
+                ),
+            ]
+            for d in details
+        ]
+        pool_rows = [
+            [f"<code>{_esc(c.id)}</code>", _esc(c.family), _esc(c.exit_profile)]
+            for c in enabled_pool
+        ]
+
+        status = _kv_card(
+            "Live strategy set",
+            [
+                ("candidate pool (enabled in config)", len(enabled_pool)),
+                ("promoted (passed gates)", len(details)),
+                ("active cap (max_active_strategies)", cap),
+                ("running now (top-N by expectancy)", len(active)),
+            ],
+        )
+        body = (
+            status
+            + '<div class="card"><h2>Source &amp; validate strategies</h2>'
+            '<form method="post" action="/api/strategies/validate" style="margin-bottom:10px">'
+            '<button class="btn" type="submit">&#9654; Source &amp; validate strategies</button>'
+            "</form>"
+            '<p class="meta">Runs every <b>enabled</b> candidate from '
+            "<code>configs/strategies.yaml</code> through the research gate loop (backtest + "
+            "walk-forward + fee/slippage stress + noise control) and writes promote/shelve "
+            "verdicts. The live/demo engine then runs the <b>top "
+            f"{cap}</b> promoted strategies by validated expectancy. Adding genuinely new "
+            "strategy ideas means adding candidates to that config (a human hypothesis — there "
+            "is no random strategy search, by design); this button re-sources and re-ranks the "
+            "existing pool.</p></div>"
+            '<div class="card"><h2>Promoted strategies (ranked)</h2>'
+            + _rows_table(
+                ["Candidate", "Family", "Expectancy R", "Sides", "State"],
+                promoted_rows,
+                "Nothing promoted yet — click Source & validate, then promote passing candidates.",
+            )
+            + f'<p class="meta">The top {cap} (ACTIVE) trade in live/demo; the rest stay '
+            "promoted-but-benched until they rank into the top set.</p></div>"
+            '<div class="card"><h2>Candidate pool (enabled in config)</h2>'
+            + _rows_table(
+                ["Candidate", "Family", "Exit profile"], pool_rows, "No enabled candidates."
+            )
+            + "</div>"
+        )
+        return _page("Strategies", body)
 
     # ----- ML shadow ------------------------------------------------------- #
     @app.post("/api/shadow/run")

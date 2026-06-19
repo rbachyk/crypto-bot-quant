@@ -186,7 +186,22 @@ shows a **Reset demo statistics** button that zeroes only the `demo:` runs/trade
 explainability (leaving every other environment intact) — press it for a clean slate before a
 fresh demo-testing run. So a full demo cycle is: set `EXCHANGE_ENV=demo` + your demo
 `EXCHANGE_API_KEY/SECRET` in `.env`, `make docker-up`, open **Live Trading** → *Reset demo
-statistics* → *Start demo session* → watch progress / *Stop*.
+statistics* → *Start demo session* → watch progress / *Stop*. (Demo uses virtual funds, so keep
+`TRADING_MODE=PAPER`; `EXCHANGE_ENV=demo` is what selects the demo account.)
+
+**Multi-strategy ensemble (demo mirrors live).** A live/demo run is **not** a single strategy — it
+runs the **active promoted ensemble**: every promoted strategy emits signals concurrently and the
+engine arbitrates them through the same pipeline as everything else — setup-quality → ranking →
+risk, with **one open position per symbol** across all strategies (`max_concurrent_per_symbol=1`,
+Section 17) plus the portfolio caps (heat, net-beta-to-BTC, max positions). Only **promoted**
+strategies are eligible, and at most **`max_active_strategies`** of them run at once — the top-N by
+validated expectancy (`configs/strategies.yaml`, default 5) — so the live engine stays small and
+diversified. The new **Strategies** page (Research & Testing group) shows the candidate pool, the
+promoted set ranked by expectancy with ACTIVE/BENCHED state, and a **Source & validate strategies**
+button that runs the whole pool through the research gate loop and refreshes promotions. The
+candidate pool itself is human-authored in `configs/strategies.yaml` (a hypothesis per family —
+there is no random strategy search, by design); the button re-sources and re-ranks that pool. With
+nothing promoted yet, a demo/live run simply trades nothing — faithful to live.
 
 End-to-end research flow: **research promotes candidates → `strategy_promotions` registry →
 paper sources promoted strategies → `paper_trades` → dashboard**. Alerts deliver to the log/

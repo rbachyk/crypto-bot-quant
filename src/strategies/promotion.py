@@ -9,9 +9,10 @@ to a report and read by nothing.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import desc, select
 
 from src.config import get_settings
 from src.db.base import session_scope
@@ -63,6 +64,61 @@ def promoted_strategies(strategy_version: str | None = None) -> list[str]:
         if strategy_version:
             q = q.where(StrategyPromotion.strategy_version == strategy_version)
         return [r.candidate_id for r in session.execute(q).scalars().all()]
+
+
+@dataclass(frozen=True, slots=True)
+class PromotedStrategy:
+    """A promoted candidate with the validated score the live engine ranks the top-N by."""
+
+    candidate_id: str
+    family: str
+    strategy_version: str
+    expectancy_r: float
+    allow_long: bool
+    allow_short: bool
+    active: bool = False  # within the top-N the live/demo engine actually runs
+
+
+def promoted_strategy_details(strategy_version: str | None = None) -> list[PromotedStrategy]:
+    """All promoted strategies, ranked by validated expectancy_r (desc).
+
+    The first ``max_active_strategies`` are flagged ``active=True`` — the set the live/demo
+    engine runs concurrently (Section 13). The rest are promoted-but-benched."""
+    from src.strategies.config import load_strategies_config
+
+    cap = load_strategies_config().max_active_strategies
+    with session_scope() as session:
+        q = select(StrategyPromotion).where(StrategyPromotion.promoted.is_(True))
+        if strategy_version:
+            q = q.where(StrategyPromotion.strategy_version == strategy_version)
+        rows = list(
+            session.execute(q.order_by(desc(StrategyPromotion.expectancy_r))).scalars().all()
+        )
+    out: list[PromotedStrategy] = []
+    for i, r in enumerate(rows):
+        out.append(
+            PromotedStrategy(
+                candidate_id=r.candidate_id,
+                family=r.family,
+                strategy_version=r.strategy_version,
+                expectancy_r=float(r.expectancy_r),
+                allow_long=bool(r.allow_long),
+                allow_short=bool(r.allow_short),
+                active=(cap <= 0 or i < cap),
+            )
+        )
+    return out
+
+
+def active_strategy_ids(
+    strategy_version: str | None = None, *, limit: int | None = None
+) -> list[str]:
+    """candidate_ids of the strategies the live/demo engine runs — the top-N promoted by
+    expectancy_r (``limit`` overrides ``max_active_strategies``; ``None``/0 = the config cap)."""
+    details = [d for d in promoted_strategy_details(strategy_version) if d.active]
+    if limit is not None and limit > 0:
+        details = details[:limit]
+    return [d.candidate_id for d in details]
 
 
 def is_strategy_promoted(candidate_id: str, strategy_version: str | None = None) -> bool:

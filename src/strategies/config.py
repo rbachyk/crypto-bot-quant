@@ -64,6 +64,10 @@ class StrategiesConfig:
     strategy_version: str
     min_side_expectancy_r: float
     candidates: tuple[CandidateConfig, ...]
+    # Cap on how many promoted strategies the live/demo engine runs concurrently — the top-N by
+    # validated expectancy (Section 13). Keeps the live ensemble small/diversified rather than
+    # firing every promoted candidate at once. 0 = no cap.
+    max_active_strategies: int = 5
 
     def enabled_candidates(self) -> list[CandidateConfig]:
         return [c for c in self.candidates if c.enabled]
@@ -122,4 +126,5 @@ def load_strategies_config(path: str | None = None) -> StrategiesConfig:
         strategy_version=str(data.get("strategy_version", "strat_0001")),
         min_side_expectancy_r=float(data.get("min_side_expectancy_r", 0.0)),
         candidates=candidates,
+        max_active_strategies=int(data.get("max_active_strategies", 5)),
     )

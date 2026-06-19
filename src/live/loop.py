@@ -210,6 +210,7 @@ def run_replay_session(
     timeframe: str | None = None,
     symbols: list[str] | None = None,
     candidate_id: str | None = None,
+    multi_strategy: bool = False,
     max_ticks: int | None = None,
     settings: Settings | None = None,
     guard: LiveOrderGuard | None = None,
@@ -223,11 +224,24 @@ def run_replay_session(
     ``transport`` ('ws' | 'rest') attaches a live :class:`LiveDataManager` so an exchange-wide
     data-integrity failure halts the loop (Section 8). ``realtime=True`` (requires a transport)
     drives the candidate stream from the live feed — a rolling window → the one feature pipeline
-    → the strategy on each newly-closed bar — instead of replaying the snapshot."""
+    → the strategy on each newly-closed bar — instead of replaying the snapshot.
+
+    ``multi_strategy=True`` runs the **active promoted strategy ensemble** (top-N by validated
+    expectancy_r) concurrently instead of a single ``candidate_id`` — this is how demo/live
+    behave: every active promoted strategy emits signals, the engine arbitrates via ranking +
+    the one-position-per-symbol cap. With nothing promoted yet, the feed simply has no
+    candidates (no trades) — faithful to live."""
     settings = settings or get_settings()
     data_cfg = data_cfg or load_data_config()
     tf = timeframe or data_cfg.base_timeframe
     syms = symbols or data_cfg.active_symbols()
+
+    strategies = None
+    if multi_strategy:
+        from src.paper.lake import resolve_active_strategies
+
+        active, _skipped = resolve_active_strategies(settings)
+        strategies = active
     # Real-money mode is bounded by the activation guard (gates + sign-off + caps).
     if guard is None and mode == "live":
         from src.live.guard import LiveActivationGuard
@@ -260,11 +274,20 @@ def run_replay_session(
             timeframe=tf,
             symbols=syms,
             candidate_id=candidate_id,
+            strategies=strategies,
             settings=settings,
             max_groups=max_ticks,
         )
         # The real-time feed owns the data-manager halt; don't double-poll at the loop level.
         loop = LiveLoop(mode=mode, settings=settings, guard=guard)
+    elif multi_strategy:
+        from src.paper.lake import build_active_lake_inputs
+
+        inputs, _ids = build_active_lake_inputs(
+            data_cfg, timeframe=tf, symbols=syms, settings=settings
+        )
+        feed = ReplayFeed(inputs)
+        loop = LiveLoop(mode=mode, settings=settings, guard=guard, data_manager=data_manager)
     else:
         feed = replay_feed_from_lake(
             data_cfg, timeframe=tf, symbols=syms, candidate_id=candidate_id, settings=settings

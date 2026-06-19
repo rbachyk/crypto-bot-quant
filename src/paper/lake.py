@@ -126,13 +126,35 @@ def build_lake_paper_inputs(
     )
     iv = timeframe_ms(timeframe)
     promoted = is_strategy_promoted(strat_id, strat_ver)
+    out = _eval_strategy_over_lake(
+        strategy, strat_id, strat_ver, lake_inputs, iv=iv, hold_bars=hold_bars,
+        equity=equity, promoted=promoted,
+    )
+    return out, strat_id, strat_ver
+
+
+def _eval_strategy_over_lake(
+    strategy,
+    strat_id: str,
+    strat_ver: str,
+    lake_inputs,
+    *,
+    iv: int,
+    hold_bars: int,
+    equity: float,
+    promoted: bool,
+) -> list[PaperCandidateInput]:
+    """Evaluate ONE per-row strategy over pre-built lake feature frames → candidate inputs.
+
+    Factored out so the single-strategy and multi-strategy (active-set) builders share the
+    exact same Candidate construction and forward-move accounting (Parity Rule)."""
     out: list[PaperCandidateInput] = []
     for si in lake_inputs:
         n = len(si.bars)
         for row in si.frame.rows:
             if row["decision_ts"] < si.activation_ts:
                 continue
-            sig = strategy.evaluate(row)  # type: ignore[union-attr]
+            sig = strategy.evaluate(row)
             if sig is None:
                 continue
             entry_bar = row["decision_ts"] // iv
@@ -161,7 +183,77 @@ def build_lake_paper_inputs(
                     hold_bars=min(hold_bars, exit_bar - entry_bar),
                 )
             )
-    return out, strat_id, strat_ver
+    return out
+
+
+def resolve_active_strategies(settings: Settings | None = None) -> tuple[list[tuple], list[str]]:
+    """Resolve the ACTIVE promoted strategy set the live/demo engine runs (Section 13).
+
+    Returns ``([(strategy, strat_id, strat_ver), ...], skipped_ids)`` — the top-N promoted
+    candidates by validated expectancy_r, skipping cross-asset (portfolio) strategies the
+    per-row live path cannot run yet (they need the multi-symbol portfolio engine)."""
+    from src.strategies.promotion import active_strategy_ids
+
+    settings = settings or get_settings()
+    out: list[tuple] = []
+    skipped: list[str] = []
+    for cid in active_strategy_ids(settings.strategy_version):
+        try:
+            strategy, sid, ver = lake_candidate_strategy(cid)
+        except ValueError:
+            # A promoted id no longer in configs/strategies.yaml (config changed under it) must
+            # not crash the live engine — skip it. It re-appears once re-validated.
+            skipped.append(cid)
+            continue
+        if hasattr(strategy, "evaluate_portfolio"):
+            skipped.append(cid)  # cross-asset family — not supported by the per-row live path
+            continue
+        out.append((strategy, sid, ver))
+    return out, skipped
+
+
+def build_active_lake_inputs(
+    data_cfg: DataConfig,
+    *,
+    timeframe: str,
+    symbols: list[str],
+    settings: Settings | None = None,
+    store: SeriesStore | None = None,
+    equity: float = 10_000.0,
+    hold_bars: int = _DEFAULT_HOLD_BARS,
+) -> tuple[list[PaperCandidateInput], list[str]]:
+    """Build candidate inputs for the ACTIVE promoted strategy set over one snapshot.
+
+    Runs every active promoted strategy over the same feature frames and concatenates their
+    candidates; the engine then arbitrates via ranking + the one-position-per-symbol cap. This
+    is the multi-strategy ensemble the live/demo loop uses so demo mirrors live. Returns
+    ``(inputs, active_strategy_ids)``; an empty list means nothing is promoted yet."""
+    settings = settings or get_settings()
+    active, _skipped = resolve_active_strategies(settings)
+    if not active:
+        return [], []
+    series_store = store if store is not None else SeriesStore(settings.data_lake_path)
+    lake_inputs = build_lake_inputs(
+        series_store,
+        exchange_id=data_cfg.exchange_id,
+        symbols=symbols,
+        timeframe=timeframe,
+        base_timeframe=data_cfg.base_timeframe,
+        funding_timeframe=data_cfg.funding_timeframe,
+        start_ms=data_cfg.window_start_ms,
+        end_ms=data_cfg.window_end_ms,
+        oi_timeframe=data_cfg.oi_grid,
+    )
+    iv = timeframe_ms(timeframe)
+    out: list[PaperCandidateInput] = []
+    for strategy, sid, ver in active:
+        out.extend(
+            _eval_strategy_over_lake(
+                strategy, sid, ver, lake_inputs, iv=iv, hold_bars=hold_bars,
+                equity=equity, promoted=True,
+            )
+        )
+    return out, [sid for _s, sid, _v in active]
 
 
 def run_lake_paper_session(

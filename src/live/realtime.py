@@ -77,6 +77,7 @@ class LiveCandidateFeed:
         timeframe: str | None = None,
         symbols: list[str] | None = None,
         candidate_id: str | None = None,
+        strategies: list[tuple] | None = None,
         data_manager=None,
         settings: Settings | None = None,
         window_bars: int = 300,
@@ -105,22 +106,31 @@ class LiveCandidateFeed:
             lake_candidate_strategy,
             make_strategy,
         )
-
-        if candidate_id:
-            self.strategy, self.strat_id, self.strat_ver = lake_candidate_strategy(candidate_id)
-        else:
-            bt = load_backtest_config()
-            self.strategy = make_strategy(bt)
-            self.strat_id = bt.reference_strategy.name
-            self.strat_ver = bt.reference_strategy.strategy_version
-        if hasattr(self.strategy, "evaluate_portfolio"):
-            raise ValueError(
-                "live real-time mode supports per-row strategies (reference or family B)"
-            )
-        self.feat_cfg = _lake_feature_config(self.timeframe)
         from src.strategies.promotion import is_strategy_promoted
 
-        self._promoted = is_strategy_promoted(self.strat_id, self.strat_ver)
+        # The active strategy ensemble: (strategy, strat_id, strat_ver, promoted). Either an
+        # explicit promoted set (live/demo runs the top-N promoted strategies concurrently) or a
+        # single strategy from candidate_id / the reference self-test (back-compat / one-off).
+        self._strategies: list[tuple] = []
+        if strategies:
+            for strat, sid, ver in strategies:
+                if hasattr(strat, "evaluate_portfolio"):
+                    continue  # cross-asset family needs the portfolio path, not this one
+                self._strategies.append((strat, sid, ver, True))
+        else:
+            if candidate_id:
+                strat, sid, ver = lake_candidate_strategy(candidate_id)
+            else:
+                bt = load_backtest_config()
+                strat = make_strategy(bt)
+                sid = bt.reference_strategy.name
+                ver = bt.reference_strategy.strategy_version
+            if hasattr(strat, "evaluate_portfolio"):
+                raise ValueError(
+                    "live real-time mode supports per-row strategies (reference or family B)"
+                )
+            self._strategies.append((strat, sid, ver, is_strategy_promoted(sid, ver)))
+        self.feat_cfg = _lake_feature_config(self.timeframe)
         self._toxic_spread = load_regime_config().toxic_spread_bps  # default estimate floor
 
     def seed(self, rest_source: DataSource | None = None) -> None:
@@ -183,27 +193,34 @@ class LiveCandidateFeed:
                 if not frame.rows:
                     continue
                 row = frame.rows[-1]
-                sig = self.strategy.evaluate(row)  # type: ignore[union-attr]
-                if sig is None:
+                # Evaluate EVERY active strategy on this bar; their signals on the same symbol
+                # compete in one group so the engine's ranking + one-position-per-symbol cap
+                # arbitrates (only one trade per symbol across all strategies).
+                cands: list[PaperCandidateInput] = []
+                for strat, sid, ver, promoted in self._strategies:
+                    sig = strat.evaluate(row)
+                    if sig is None:
+                        continue
+                    cand = build_candidate(
+                        sym,
+                        row,
+                        sig,
+                        strat_id=sid,
+                        strat_ver=ver,
+                        entry_price=float(bar["close"]),
+                        spread_bps=self._toxic_spread / 5.0,
+                        promoted=promoted,
+                        data_ok=True,
+                    )
+                    # Real exits are exchange-side (bracket SL/TP) → no forward move in live mode.
+                    cands.append(
+                        PaperCandidateInput(candidate=cand, equity=self.equity, exit_move_frac=0.0)
+                    )
+                if not cands:
                     continue
-                cand = build_candidate(
-                    sym,
-                    row,
-                    sig,
-                    strat_id=self.strat_id,
-                    strat_ver=self.strat_ver,
-                    entry_price=float(bar["close"]),
-                    spread_bps=self._toxic_spread / 5.0,
-                    promoted=self._promoted,
-                    data_ok=True,
-                )
                 emitted += 1
                 progressed = True
-                # Real exits are exchange-side (bracket SL/TP) → no forward move in live mode.
-                yield (
-                    int(row["decision_ts"]),
-                    [PaperCandidateInput(candidate=cand, equity=self.equity, exit_move_frac=0.0)],
-                )
+                yield (int(row["decision_ts"]), cands)
                 if self.max_groups is not None and emitted >= self.max_groups:
                     return
             if not progressed:
