@@ -662,9 +662,14 @@ def _run_lake_strategy_validation(ctx: JobContext, params: dict) -> dict:
 
     config_path = str(params.get("config_path") or "configs/data.bybit.yaml")
     data_cfg = load_data_config(config_path)
-    ctx.log(f"validating candidates on REAL data ({data_cfg.exchange_id}/{data_cfg.data_version})")
+    timeframe = params.get("timeframe") or None
+    tf = timeframe or data_cfg.base_timeframe
+    ctx.log(
+        f"validating candidates on REAL data ({data_cfg.exchange_id}/{data_cfg.data_version}) "
+        f"on timeframe {tf}"
+    )
     ctx.progress(0, 1, "running real-data validation (backtest + walk-forward + stress)")
-    validations = validate_all_on_lake(data_cfg)
+    validations = validate_all_on_lake(data_cfg, timeframe=timeframe)
     written = persist_validations(validations, data_source="lake")
     promoted = [v.candidate_id for v in validations if v.promoted]
     ctx.progress(1, 1, f"{len(promoted)}/{written} promoted on real data")

@@ -543,6 +543,45 @@ _PERIODS = [
 ]
 
 
+def _data_timeframes() -> tuple[list[str], str]:
+    """The decision timeframes available to trade/backtest on — the ones the data config collects
+    (only a downloaded timeframe can be used). Returns ``(timeframes, base_timeframe)``."""
+    try:
+        from src.data.config import load_data_config
+
+        dc = load_data_config("configs/data.bybit.yaml")
+        tfs = list(dc.timeframes) or [dc.base_timeframe]
+        return tfs, dc.base_timeframe
+    except Exception:  # noqa: BLE001 - the control must render even if the config is unreadable
+        return ["5m", "1h", "4h"], "5m"
+
+
+def _tf_select(select_id: str) -> str:
+    """A timeframe ``<select>`` (the strategy decision timeframe) defaulting to the base
+    timeframe. A run-action form reads it by ``select_id`` and appends ``?timeframe=`` to its
+    POST action on submit (no extra server dependency)."""
+    tfs, base = _data_timeframes()
+    opts = "".join(
+        f'<option value="{_esc(tf)}"{" selected" if tf == base else ""}>{_esc(tf)}</option>'
+        for tf in tfs
+    )
+    return (
+        '<label style="margin-right:6px">Decision timeframe</label>'
+        f'<select id="{_esc(select_id)}" style="margin-right:10px">{opts}</select>'
+    )
+
+
+def _tf_submit(action: str, select_id: str) -> str:
+    """onsubmit attribute that appends the chosen timeframe to a POST action (query param)."""
+    return f"onsubmit=\"this.action='{action}?timeframe='+document.getElementById('{select_id}').value\""
+
+
+def _valid_timeframe(tf: str) -> str:
+    """Accept only a configured timeframe (else '' → the job uses the base timeframe)."""
+    tfs, _ = _data_timeframes()
+    return tf if tf in tfs else ""
+
+
 def _period_selector(action: str, period: str) -> str:
     """A custom segmented pill control that re-renders the page per time period (Section 25).
 
@@ -1224,8 +1263,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         controls = (
             '<div class="card"><h2>Demo / live control</h2>'
             f'<p class="meta">Current environment: <b>{_esc(env)}</b> — {env_note}</p>'
-            '<form method="post" action="/api/live/start" style="display:inline;margin-right:8px">'
-            f'<button class="btn" type="submit"{start_disabled}>&#9654; Start '
+            '<div class="form-row" style="margin-bottom:8px">' + _tf_select("live-tf")
+            + '<span class="meta">the decision timeframe the strategies trade on</span></div>'
+            + '<form method="post" action="/api/live/start" style="display:inline;margin-right:8px" '
+            + _tf_submit("/api/live/start", "live-tf")
+            + f'><button class="btn" type="submit"{start_disabled}>&#9654; Start '
             f"{_esc(env)} session</button></form>"
             + (
                 '<form method="post" action="/api/live/reset" style="display:inline" '
@@ -1290,12 +1332,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ----- live/demo session controls (dashboard-only operation) ---------- #
     @app.post("/api/live/start")
-    def live_start(user: str = Depends(require_dashboard_auth)) -> RedirectResponse:
-        """Start a dashboard-driven live/demo/testnet session on the dedicated live worker."""
+    def live_start(
+        timeframe: str = "", user: str = Depends(require_dashboard_auth)
+    ) -> RedirectResponse:
+        """Start a dashboard-driven live/demo/testnet session on the dedicated live worker, on the
+        chosen decision ``timeframe``."""
         from src.jobs import JobQueue
 
-        JobQueue(settings).enqueue("run_live_session", {"requested_by": user}, requested_by=user)
-        _audit("run_live_session", target=settings.exchange_env, actor=user, detail={})
+        params = {"requested_by": user}
+        if _valid_timeframe(timeframe):
+            params["timeframe"] = timeframe
+        JobQueue(settings).enqueue("run_live_session", params, requested_by=user)
+        _audit(
+            "run_live_session", target=settings.exchange_env, actor=user,
+            detail={"timeframe": timeframe},
+        )
         return RedirectResponse(url="/dashboard/live", status_code=303)
 
     @app.post("/api/live/reset")
@@ -2602,32 +2653,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"job_id": job_id}
 
     @app.post("/api/backtests/run-lake")
-    def run_lake_backtest_ep(user: str = Depends(require_dashboard_auth)) -> RedirectResponse:
+    def run_lake_backtest_ep(
+        timeframe: str = "", user: str = Depends(require_dashboard_auth)
+    ) -> RedirectResponse:
         """Enqueue a REAL-DATA backtest over the downloaded Bybit snapshot (Parity-Rule twin of
-        the reference backtest). Requires data to be downloaded first (Data page)."""
+        the reference backtest), on the chosen decision ``timeframe``. Requires data downloaded."""
         from src.jobs import JobQueue
 
-        JobQueue(settings).enqueue(
-            "run_lake_backtest",
-            {"config_path": "configs/data.bybit.yaml", "label": "dashboard_lake"},
-            requested_by=user,
-        )
-        _audit("run_lake_backtest", target="data.bybit", actor=user, detail={})
+        params = {"config_path": "configs/data.bybit.yaml", "label": "dashboard_lake"}
+        if _valid_timeframe(timeframe):
+            params["timeframe"] = timeframe
+        JobQueue(settings).enqueue("run_lake_backtest", params, requested_by=user)
+        _audit("run_lake_backtest", target="data.bybit", actor=user, detail={"timeframe": timeframe})
         return RedirectResponse(url="/dashboard/backtests", status_code=303)
 
     @app.post("/api/backtests/run-ensemble")
-    def run_ensemble_backtest_ep(user: str = Depends(require_dashboard_auth)) -> RedirectResponse:
+    def run_ensemble_backtest_ep(
+        timeframe: str = "", user: str = Depends(require_dashboard_auth)
+    ) -> RedirectResponse:
         """Real-data backtest of the ACTIVE PROMOTED ENSEMBLE (all strategies, one run, one
-        position per symbol) over the downloaded snapshot — the offline twin of the live engine.
-        Persists ONE session (lakebt:…:ensemble) viewable on Statistics → Session filter."""
+        position per symbol) over the downloaded snapshot — the offline twin of the live engine,
+        on the chosen decision ``timeframe``. Persists ONE session (lakebt:…:ensemble)."""
         from src.jobs import JobQueue
 
-        JobQueue(settings).enqueue(
-            "run_lake_paper_session",
-            {"config_path": "configs/data.bybit.yaml", "multi_strategy": True},
-            requested_by=user,
-        )
-        _audit("run_lake_ensemble", target="data.bybit", actor=user, detail={})
+        params: dict = {"config_path": "configs/data.bybit.yaml", "multi_strategy": True}
+        if _valid_timeframe(timeframe):
+            params["timeframe"] = timeframe
+        JobQueue(settings).enqueue("run_lake_paper_session", params, requested_by=user)
+        _audit("run_lake_ensemble", target="data.bybit", actor=user, detail={"timeframe": timeframe})
         return RedirectResponse(url="/dashboard/backtests", status_code=303)
 
     @app.get("/api/backtests")
@@ -2734,14 +2787,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         <td>your downloaded Bybit snapshot (<code>configs/data.bybit.yaml</code>) — real prices
             </td><td>{_esc(lake_syms)}</td></tr>
   </table>
+  <div class="form-row" style="margin-bottom:8px">{_tf_select("bt-tf")}
+    <span class="meta">applies to the real-data runs below</span></div>
   <form method="post" action="/api/backtests/run" style="display:inline;margin-right:8px">
-    <input type="text" name="label" placeholder="label (optional)" style="width:170px">
+    <input type="text" name="label" placeholder="label (optional)" style="width:150px">
     <button class="btn btn-neutral" type="submit">&#9654; Reference backtest</button>
   </form>
-  <form method="post" action="/api/backtests/run-lake" style="display:inline;margin-right:8px">
+  <form method="post" action="/api/backtests/run-lake" style="display:inline;margin-right:8px"
+        {_tf_submit("/api/backtests/run-lake", "bt-tf")}>
     <button class="btn btn-neutral" type="submit">&#9654; Real-data backtest (per&#8209;strategy)</button>
   </form>
-  <form method="post" action="/api/backtests/run-ensemble" style="display:inline">
+  <form method="post" action="/api/backtests/run-ensemble" style="display:inline"
+        {_tf_submit("/api/backtests/run-ensemble", "bt-tf")}>
     <button class="btn" type="submit">&#9654; Real-data backtest — ALL strategies (ensemble)</button>
   </form>
   <p class="meta" style="margin-top:8px"><b>Backtests ignore the Environment selector</b> — they
@@ -2890,17 +2947,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return RedirectResponse(url="/dashboard/strategies", status_code=303)
 
     @app.post("/api/strategies/validate-lake")
-    def validate_strategies_lake(user: str = Depends(require_dashboard_auth)) -> RedirectResponse:
-        """Validate candidates on REAL downloaded data (not fixtures) and persist verdicts
-        tagged data_source='lake'. Requires a snapshot to be downloaded first."""
+    def validate_strategies_lake(
+        timeframe: str = "", user: str = Depends(require_dashboard_auth)
+    ) -> RedirectResponse:
+        """Validate candidates on REAL downloaded data (not fixtures) on the chosen decision
+        ``timeframe`` and persist verdicts tagged data_source='lake'. Requires a snapshot first."""
         from src.jobs import JobQueue
 
-        JobQueue(settings).enqueue(
-            "run_lake_strategy_validation",
-            {"config_path": "configs/data.bybit.yaml"},
-            requested_by=user,
+        params = {"config_path": "configs/data.bybit.yaml"}
+        if _valid_timeframe(timeframe):
+            params["timeframe"] = timeframe
+        JobQueue(settings).enqueue("run_lake_strategy_validation", params, requested_by=user)
+        _audit(
+            "run_lake_strategy_validation", target="strategies", actor=user,
+            detail={"timeframe": timeframe},
         )
-        _audit("run_lake_strategy_validation", target="strategies", actor=user, detail={})
         return RedirectResponse(url="/dashboard/strategies", status_code=303)
 
     @app.get("/dashboard/strategies", response_class=HTMLResponse)
@@ -2972,11 +3033,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             status
             + '<div class="card"><h2>Source &amp; validate strategies</h2>'
             + real_warn
+            + '<div class="form-row" style="margin-bottom:8px">' + _tf_select("val-tf")
+            + '<span class="meta">applies to the real-data validation</span></div>'
             + '<form method="post" action="/api/strategies/validate" style="display:inline;'
             'margin-right:8px"><button class="btn btn-neutral" type="submit">'
             "&#9654; Validate on fixtures (quick)</button></form>"
-            '<form method="post" action="/api/strategies/validate-lake" style="display:inline">'
-            '<button class="btn" type="submit">&#9654; Validate on REAL data</button></form>'
+            '<form method="post" action="/api/strategies/validate-lake" style="display:inline" '
+            + _tf_submit("/api/strategies/validate-lake", "val-tf")
+            + '><button class="btn" type="submit">&#9654; Validate on REAL data</button></form>'
             '<p class="meta" style="margin-top:10px"><b>Validate on fixtures</b> runs the research '
             "gate loop on synthetic deterministic data — fast, proves the strategy logic, but is "
             "<b>not</b> evidence of a real edge. <b>Validate on REAL data</b> runs the same gates "
