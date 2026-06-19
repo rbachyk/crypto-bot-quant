@@ -303,10 +303,18 @@ def check_learn_promo_l(settings: Settings) -> list[Criterion]:
                 frozen_policy=policy_restored,
                 mode=LearnerMode.LIVE_BOUNDED,
             )
+            from src.monitoring.alerts import Alert, AlertSink
+
             alerts: list = []
             logs: list[RollbackEvent] = []
+
+            class _Sink(AlertSink):
+                def send(self, alert: Alert) -> bool:
+                    alerts.append(alert)
+                    return True
+
             guard = RollbackGuard(
-                alert_sink=type("Sink", (), {"send": lambda self, a: alerts.append(a) or True})(),
+                alert_sink=_Sink(),
                 cancel_orders=lambda: 3,
                 log_writer=logs.append,
             )

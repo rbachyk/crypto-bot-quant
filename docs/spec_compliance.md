@@ -35,43 +35,46 @@ not mistaken for full spec compliance or true live-readiness. Audited 2026-06-18
 
 ## Known gaps & divergences (NOT asserted by the gates)
 
-Priority order. "Safety-critical" = must fix before real money.
+### Resolved (audit items 1–7, 2026-06-19)
 
-1. **[SAFETY] Regime detection is largely missing (Section 11).** There is no deterministic
-   regime engine and no `regime_priority` config. The pipeline emits ad-hoc labels
-   (`trend_up`/`range`, `high_vol_up`/`low_vol_down`) and **never** the `R*` codes, so the
-   no-trade protection `NO_TRADE_REGIMES = {R8_DATA_UNSAFE, R7_TOXIC_EXECUTION, R4_HIGH_VOL_CHOP}`
-   (`src/ranking/setup_quality.py:24`) **can never fire** — it is dead code against the real
-   pipeline. (Toxic spread / stale data are still caught separately in execution revalidation, so
-   there is partial overlapping protection, but the regime layer itself is inert.)
-2. **[SAFETY] Learner `rollback.revert()` is freeze-only (Section 21.7).** `src/adaptation/rollback.py`
-   freezes the learner but does not restore the last-good frozen config, cancel orders, or alert;
-   the Phase-13 check that reports "revert path functional" only round-trips a snapshot. Misleading
-   green. (Not reachable today — the learner is shadow-only and not wired to the trading path.)
-3. **Live Data Manager missing (Section 8).** No websocket feed, stale-stream/disconnect detection,
-   or ws-vs-REST cross-check. The live loop (`src/live/loop.py`) is snapshot **replay** only; a
-   real-time feed must be built behind the existing `MarketFeed` Protocol before live operation.
-   `candidate.data_fresh` is a static input, not produced by a staleness monitor.
-4. **Explainability not persisted (Section 24).** `decision_log` is an in-memory dataclass
-   serialized into the paper-session JSON, not a queryable DB table; the `TradeExplainability`
-   schema ("no trade without it") is not implemented.
-5. **Dashboard: 7 of 23 spec pages have no dedicated route (Section 25).** Missing: Data Coverage,
-   Universe, Live Trading, Execution Quality, Risk, Online Learning, RL, Settings. Strategy/Regime/
-   Session analytics are folded into one `/dashboard/analytics` page. Time-period selector and the
-   persistent gate-status widget are on the performance pages but not literally every page; the 7
-   entity-scoped time filters (by run / session / config / universe / strategy / model version) are
-   not implemented.
-6. **Anti-overfitting controls partial (Section 16).** Deflated Sharpe / multiple-testing
-   correction, effective sample size, and purged+embargoed CV are absent (walk-forward + locked
-   hold-out + stress + shuffle guard ARE present).
-7. **Risk checklist partial (Section 17).** Liquidation-distance, margin-availability, weekly-loss
-   limit and funding circuit-breaker are not implemented; circuit breakers are portfolio-level, not
-   per-symbol.
-8. **`LiveActivationRequest` typed schema missing (Section 27).** The activation request is a generic
-   `Approval` row (`subject_type="live_activation"`) without the typed version fields.
-9. **Reporting envelope not enforced (Section 34).** Reports lack the required
-   methodology/limitations/recommendations/versions envelope; a few named reports (live, RL,
-   online-learning, live-readiness, daily-review) have no dedicated generator.
+1. **Regime detection (Section 11) — RESOLVED.** `src/regime/` is a deterministic engine
+   emitting the 8 `R*` codes with `configs/regime.yaml` `priority` (safest wins) + anti-whipsaw
+   tracker; `NO_TRADE_REGIMES` is the canonical set the pipeline now emits, so the setup-quality
+   no-trade guard actually fires. (`src/ranking/setup_quality.py`, `src/paper/lake.py`, `src/backtest/engine.py`)
+2. **Learner `rollback.revert()` (Section 21.7) — RESOLVED.** `revert()` now freezes onto the
+   frozen fallback, cancels learner orders, alerts, and writes `learner_log`; the Phase-13 gate
+   actually exercises it. (`src/adaptation/rollback.py`, `src/gates/phase13.py`)
+3. **Live Data Manager (Section 8) — RESOLVED.** `src/live/data_manager.py` does staleness +
+   disconnect detection, REST backfill-after-reconnect, ws-vs-REST compare, and symbol/exchange
+   halts; the live loop halts on exchange-wide integrity failure. (Real-time **websocket** feed
+   still pluggable behind `FeedSource`/`MarketFeed`; the production source polls REST.)
+4. **Explainability (Section 24) — RESOLVED.** `decision_logs` + `trade_explainability` are real
+   DB tables (migration 0009); `TradeExplainability.ensure_complete()` blocks any trade it can't
+   explain; the paper engine builds one per executed trade. (`src/explainability.py`)
+5. **Dashboard pages (Section 25) — RESOLVED.** All previously-missing pages exist (Data Coverage,
+   Universe, Live Trading, Execution Quality, Risk, Online Learning, RL, Settings) plus dedicated
+   Strategy/Regime/Session analytics. (Residual: the 7 **entity-scoped** time filters — by
+   run/session/config/universe/strategy/model version — remain partial; period + symbol + strategy
+   scope exist.)
+6. **Anti-overfitting (Section 16) — RESOLVED.** `src/backtest/overfitting.py`: deflated Sharpe,
+   probabilistic Sharpe, effective sample size, purged+embargoed CV, sample adequacy; surfaced in
+   the walk-forward report.
+7. **Risk checklist (Section 17) — RESOLVED.** weekly-loss / funding / **per-symbol** breakers +
+   liquidation-distance + margin-availability pre-trade checks (`src/risk/breakers.py`).
+8. **`LiveActivationRequest` (Section 27) — RESOLVED.** Typed `src/live/activation.py` record built
+   only when gates are 100%, attached as the live_activation approval's evidence.
+9. **Report envelope (Section 34) — PARTIAL.** `src/reporting.py` provides the standard envelope
+   (versions/period/methodology/results/limitations/recommendations) + validator, wired into the
+   backtest report writer. (Residual: not yet applied to every report writer, and a few named
+   reports — live, RL, online-learning, live-readiness, daily-review — still lack dedicated generators.)
+
+### Residual gaps (after items 1–7)
+
+- Real-time **websocket** market feed (Section 8) — the data manager + replay feed exist; a
+  ccxt.pro/websocket `FeedSource` is the remaining piece for true live operation.
+- **Entity-scoped time filters** (Section 25) — by run/session/config/universe/strategy/model version.
+- **Report envelope coverage** (Section 34) — apply to all writers; add the missing report generators.
+- The learner remains **shadow-only / not wired to the live trading path** (by design until promoted).
 
 ## Doc inconsistencies (fixed / noted)
 
