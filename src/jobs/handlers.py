@@ -167,10 +167,14 @@ def _run_feature_leakage_test(ctx: JobContext, params: dict) -> dict:
 # Data platform jobs (Appendix B.7 data jobs; Phase 2)                        #
 # --------------------------------------------------------------------------- #
 def _download_series(ctx: JobContext, data_types: list[str]) -> dict:
-    """Shared body for the per-series historical download jobs."""
+    """Shared body for the per-series historical download jobs.
+
+    ``config_path`` (job param) selects the dataset config — e.g. ``configs/data.bybit.yaml``
+    for REAL Bybit history (the ccxt source); absent → the default config."""
     from src.data import DataPlatform, load_data_config
 
-    cfg = load_data_config()
+    cfg_path = str(ctx.params.get("config_path")) if ctx.params.get("config_path") else None
+    cfg = load_data_config(cfg_path)
     platform = DataPlatform(cfg=cfg)
     keys = [k for k in cfg.all_required_keys() if k.data_type in data_types]
     written = 0
@@ -260,8 +264,9 @@ def _build_dataset_version(ctx: JobContext, params: dict) -> dict:
     """Ensure coverage, validate, and produce an immutable dataset snapshot."""
     from src.data import DataPlatform, load_data_config
 
-    platform = DataPlatform(cfg=load_data_config())
-    ctx.log("ensuring coverage + building dataset snapshot")
+    cfg_path = str(params.get("config_path")) if params.get("config_path") else None
+    platform = DataPlatform(cfg=load_data_config(cfg_path))
+    ctx.log(f"ensuring coverage + building dataset snapshot ({cfg_path or 'default config'})")
     run = platform.run_full(repair=True, source_jobs=["job:build_dataset_version"])
     ctx.progress(1, 1, f"snapshot {run.snapshot.snapshot_id}")
     return {
@@ -585,6 +590,38 @@ def _run_strategy_validation(ctx: JobContext, params: dict) -> dict:
         "promoted": promoted,
         "shelved": [v.candidate_id for v in validations if not v.promoted],
         "total": written,
+    }
+
+
+@job_handler("run_lake_strategy_validation")
+def _run_lake_strategy_validation(ctx: JobContext, params: dict) -> dict:
+    """Validate candidates on REAL downloaded data and persist promote/shelve verdicts.
+
+    The real-data twin of run_strategy_validation: backtest + side decision + walk-forward +
+    fee/slippage stress over a downloaded snapshot (the live market is the control, so the
+    synthetic noise step is dropped). Promotions are tagged data_source='lake'. Requires the
+    snapshot to be downloaded first (Data page → Download real history)."""
+    from src.data.config import load_data_config
+    from src.strategies.lake_research import validate_all_on_lake
+    from src.strategies.promotion import persist_validations
+
+    config_path = str(params.get("config_path") or "configs/data.bybit.yaml")
+    data_cfg = load_data_config(config_path)
+    ctx.log(f"validating candidates on REAL data ({data_cfg.exchange_id}/{data_cfg.data_version})")
+    ctx.progress(0, 1, "running real-data validation (backtest + walk-forward + stress)")
+    validations = validate_all_on_lake(data_cfg)
+    written = persist_validations(validations, data_source="lake")
+    promoted = [v.candidate_id for v in validations if v.promoted]
+    ctx.progress(1, 1, f"{len(promoted)}/{written} promoted on real data")
+    return {
+        "message": f"real-data validation: {len(promoted)}/{written} promoted",
+        "promoted": promoted,
+        "shelved": [
+            {"id": v.candidate_id, "reasons": v.shelved_reasons}
+            for v in validations
+            if not v.promoted
+        ],
+        "data_source": "lake",
     }
 
 

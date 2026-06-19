@@ -1,0 +1,149 @@
+"""Real-data strategy validation (AGENTS.md Section 13/16 — the Parity-Rule twin of
+``src.strategies.research`` on REAL downloaded market data).
+
+``src.strategies.research.validate_candidate`` validates on synthetic deterministic *fixtures*
+(it plants a known causal structure to prove the harness). This module runs the SAME gates —
+full backtest, side decision, walk-forward, fee/slippage stress — over a downloaded
+``DATA_VERSION`` snapshot via the one feature pipeline (``build_lake_inputs``), so a promotion
+here is established on REAL prices, not fixtures. The only fixture-specific step that is dropped
+is the synthetic "noise control" (there is no structureless control series for real data — the
+real market IS the test of whether the edge survives).
+
+Requires a snapshot to be downloaded first (dashboard Data page → Download, or
+``qbot download --config configs/data.bybit.yaml``). Verdicts are persisted with
+``data_source="lake"`` so the dashboard distinguishes real-data promotions from fixture ones.
+"""
+
+from __future__ import annotations
+
+from src.backtest.config import BacktestConfig, load_backtest_config
+from src.backtest.service import build_lake_inputs, run_engine
+from src.backtest.stress import fee_stress, slippage_stress
+from src.backtest.walkforward import run_walk_forward
+from src.config import Settings, get_settings
+from src.data.config import DataConfig
+from src.data.store import SeriesStore
+from src.exchange.metadata import MetadataConfig, load_metadata_config
+from src.strategies.candidates import build_strategy
+from src.strategies.config import CandidateConfig, StrategiesConfig, load_strategies_config
+from src.strategies.research import CandidateValidation, SideDecision, _decide_sides
+
+# A real-data promotion needs enough executed trades to be more than noise (Section 13/16).
+_MIN_REAL_TRADES = 20
+
+
+def _shelved(cand: CandidateConfig, version: str, reason: str) -> CandidateValidation:
+    return CandidateValidation(
+        candidate_id=cand.id, family=cand.family, strategy_version=version, promoted=False,
+        status="shelved", shelved_reasons=[reason],
+        side_decision=SideDecision(False, False, 0.0, 0.0, 0, 0, ["long", "short"]),
+        hypothesis={}, report={"expectancy_r": 0.0}, walk_forward={}, fee_stress={},
+        slippage_stress={}, noise_control={"skipped": "real-data validation"},
+    )
+
+
+def validate_candidate_on_lake(
+    cand: CandidateConfig,
+    strat_cfg: StrategiesConfig,
+    cfg: BacktestConfig,
+    meta: MetadataConfig,
+    lake_inputs: list,
+) -> CandidateValidation:
+    """Validate ONE candidate over real lake inputs (same gates as the fixture harness,
+    minus the synthetic noise control)."""
+    both = build_strategy(cand, strat_cfg.strategy_version, cand.params)
+    full_both = run_engine(
+        cfg, meta, lake_inputs, strategy=both, label=f"{cand.id}_lake_both"
+    ).report
+    side_decision = _decide_sides(full_both, strat_cfg.min_side_expectancy_r)
+
+    shelved: list[str] = []
+    if not (side_decision.allow_long or side_decision.allow_short):
+        shelved.append("both sides have non-positive expectancy on real data")
+
+    promoted_params = cand.params.with_sides(
+        allow_long=side_decision.allow_long, allow_short=side_decision.allow_short
+    )
+    strategy = build_strategy(cand, strat_cfg.strategy_version, promoted_params)
+    promoted_report = run_engine(
+        cfg, meta, lake_inputs, strategy=strategy, label=f"{cand.id}_lake"
+    ).report
+
+    if promoted_report.trade_count < _MIN_REAL_TRADES:
+        shelved.append(
+            f"insufficient trades on real data ({promoted_report.trade_count} < {_MIN_REAL_TRADES})"
+        )
+
+    wf = run_walk_forward(cfg, meta, lake_inputs, strategy=strategy)
+    base_e = promoted_report.expectancy_r
+    fee = fee_stress(cfg, meta, lake_inputs, baseline_expectancy_r=base_e, strategy=strategy)
+    slip = slippage_stress(cfg, meta, lake_inputs, baseline_expectancy_r=base_e, strategy=strategy)
+    if not wf.passed:
+        shelved.append(f"walk-forward failed on real data: {wf.reasons}")
+    if not fee.survives:
+        shelved.append(f"fee stress failed (expectancy_r={fee.stressed_expectancy_r})")
+    if not slip.survives:
+        shelved.append(f"slippage stress failed (expectancy_r={slip.stressed_expectancy_r})")
+
+    promoted = not shelved
+    return CandidateValidation(
+        candidate_id=cand.id,
+        family=cand.family,
+        strategy_version=strat_cfg.strategy_version,
+        promoted=promoted,
+        status="promoted" if promoted else "shelved",
+        shelved_reasons=shelved,
+        side_decision=side_decision,
+        hypothesis=strategy.hypothesis.to_dict(),
+        report=promoted_report.payload,
+        walk_forward=wf.to_dict(),
+        fee_stress=fee.to_dict(),
+        slippage_stress=slip.to_dict(),
+        noise_control={"skipped": "real-data validation (the live market is the control)"},
+    )
+
+
+def validate_all_on_lake(
+    data_cfg: DataConfig,
+    *,
+    timeframe: str | None = None,
+    symbols: list[str] | None = None,
+    store: SeriesStore | None = None,
+    settings: Settings | None = None,
+) -> list[CandidateValidation]:
+    """Validate every enabled candidate over a downloaded snapshot. One candidate failing
+    (e.g. a cross-asset family needing a shape this path can't build) shelves only that one."""
+    settings = settings or get_settings()
+    strat_cfg = load_strategies_config()
+    cfg = load_backtest_config()
+    meta = load_metadata_config()
+    tf = timeframe or data_cfg.base_timeframe
+    syms = symbols or data_cfg.active_symbols()
+    store = store if store is not None else SeriesStore(settings.data_lake_path)
+
+    lake_inputs = build_lake_inputs(
+        store,
+        exchange_id=data_cfg.exchange_id,
+        symbols=syms,
+        timeframe=tf,
+        base_timeframe=data_cfg.base_timeframe,
+        funding_timeframe=data_cfg.funding_timeframe,
+        start_ms=data_cfg.window_start_ms,
+        end_ms=data_cfg.window_end_ms,
+        oi_timeframe=data_cfg.oi_grid,
+    )
+    if not lake_inputs or all(not getattr(s, "bars", None) for s in lake_inputs):
+        raise ValueError(
+            "no real data in the lake for this window — download a snapshot first "
+            "(Data page → Download real history)"
+        )
+
+    out: list[CandidateValidation] = []
+    for cand in strat_cfg.enabled_candidates():
+        try:
+            out.append(validate_candidate_on_lake(cand, strat_cfg, cfg, meta, lake_inputs))
+        except Exception as exc:  # noqa: BLE001 - one bad candidate must not abort the batch
+            out.append(
+                _shelved(cand, strat_cfg.strategy_version, f"real-data validation error: {exc}")
+            )
+    return out

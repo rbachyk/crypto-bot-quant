@@ -56,27 +56,36 @@ def _promote(
 
 
 @requires_db
-def test_active_set_is_top_n_by_expectancy() -> None:
-    # Isolate from the shared dev DB by pinning these promotions to a unique strategy_version,
-    # so only our 7 candidates compete for the top-5 active slots (cap = max_active_strategies).
+def test_active_set_is_top_n_by_expectancy(monkeypatch) -> None:
+    # The registry is filtered to KNOWN config candidates, so use the 3 real ids and force the
+    # cap to 2 to exercise the top-N boundary (on a unique version to isolate the shared DB).
+    import dataclasses
+
+    from src.strategies.config import load_strategies_config
+
+    capped = dataclasses.replace(load_strategies_config(), max_active_strategies=2)
+    monkeypatch.setattr("src.strategies.config.load_strategies_config", lambda *a, **k: capped)
+
     ver = f"msver_{uuid.uuid4().hex[:8]}"
-    ids = [f"ms_{i}" for i in range(7)]
-    for i, cid in enumerate(ids):
-        _promote(cid, expectancy_r=0.01 * (i + 1), version=ver)  # ascending expectancy
+    scores = {"basis_reversion": 0.10, "xsection_rs": 0.20, "lead_lag_xasset": 0.30}
+    for cid, e in scores.items():
+        _promote(cid, expectancy_r=e, version=ver)
     details = {d.candidate_id: d for d in promoted_strategy_details(ver)}
-    assert len(details) == 7
+    assert set(details) == set(scores)  # all known + promoted; ranked by expectancy
     active = active_strategy_ids(ver)
-    assert len(active) == 5  # capped to the top-5
-    assert ids[6] in active and ids[2] in active  # highest survive
-    assert ids[0] not in active and ids[1] not in active  # lowest two benched
-    assert details[ids[6]].active and not details[ids[0]].active
+    assert len(active) == 2  # capped to the top-2
+    assert "lead_lag_xasset" in active and "xsection_rs" in active  # highest two
+    assert "basis_reversion" not in active  # lowest is benched
+    assert details["lead_lag_xasset"].active and not details["basis_reversion"].active
 
 
 @requires_db
-def test_shelved_strategies_never_active() -> None:
+def test_unknown_and_shelved_strategies_never_active() -> None:
     ver = f"msver_{uuid.uuid4().hex[:8]}"
-    cid = "shelved_one"
-    _promote(cid, expectancy_r=0.5, version=ver, promoted=False)  # high score but NOT promoted
+    # Unknown candidate id (not in config) is filtered out even if promoted=True...
+    _promote("not_a_real_candidate", expectancy_r=0.9, version=ver, promoted=True)
+    # ...and a real candidate that is NOT promoted never appears either.
+    _promote("basis_reversion", expectancy_r=0.5, version=ver, promoted=False)
     assert active_strategy_ids(ver) == []
     assert promoted_strategy_details(ver) == []
 

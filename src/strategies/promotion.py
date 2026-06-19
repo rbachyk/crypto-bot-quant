@@ -20,8 +20,14 @@ from src.db.models import StrategyPromotion
 from src.strategies.research import CandidateValidation
 
 
-def persist_validations(validations: Iterable[CandidateValidation]) -> int:
-    """Upsert a StrategyPromotion row per validation (keyed by candidate + version)."""
+def persist_validations(
+    validations: Iterable[CandidateValidation], *, data_source: str = "reference"
+) -> int:
+    """Upsert a StrategyPromotion row per validation (keyed by candidate + version).
+
+    ``data_source`` records the PROVENANCE of the verdict — ``reference`` (synthetic
+    deterministic fixtures) vs ``lake`` (real downloaded market data) — so the dashboard can
+    show whether a promotion has been established on real prices, not just fixtures."""
     versions = get_settings().versions()
     written = 0
     with session_scope() as session:
@@ -50,11 +56,20 @@ def persist_validations(validations: Iterable[CandidateValidation]) -> int:
             row.allow_long = bool(v.side_decision.allow_long)
             row.allow_short = bool(v.side_decision.allow_short)
             row.shelved_reasons = list(v.shelved_reasons)
-            row.summary = {"side_decision": v.side_decision.to_dict()}
+            row.summary = {"side_decision": v.side_decision.to_dict(), "data_source": data_source}
             row.validated_at = datetime.now(UTC)
             row.related_versions = versions
             written += 1
     return written
+
+
+def _known_candidate_ids() -> set[str]:
+    """candidate_ids defined in configs/strategies.yaml — the registry is filtered to these so
+    stale/test rows (a candidate removed from config, or a leftover test promotion) never leak
+    into the live engine or the dashboard."""
+    from src.strategies.config import load_strategies_config
+
+    return {c.id for c in load_strategies_config().candidates}
 
 
 def promoted_strategies(strategy_version: str | None = None) -> list[str]:
@@ -77,23 +92,30 @@ class PromotedStrategy:
     allow_long: bool
     allow_short: bool
     active: bool = False  # within the top-N the live/demo engine actually runs
+    data_source: str = "reference"  # provenance: 'reference' (fixtures) | 'lake' (real data)
 
 
 def promoted_strategy_details(strategy_version: str | None = None) -> list[PromotedStrategy]:
-    """All promoted strategies, ranked by validated expectancy_r (desc).
+    """All promoted strategies (that still exist in config), ranked by expectancy_r (desc).
 
     The first ``max_active_strategies`` are flagged ``active=True`` — the set the live/demo
-    engine runs concurrently (Section 13). The rest are promoted-but-benched."""
+    engine runs concurrently (Section 13). The rest are promoted-but-benched. Rows whose
+    candidate_id is not in configs/strategies.yaml (stale / test artifacts) are excluded."""
     from src.strategies.config import load_strategies_config
 
     cap = load_strategies_config().max_active_strategies
+    known = _known_candidate_ids()
     with session_scope() as session:
         q = select(StrategyPromotion).where(StrategyPromotion.promoted.is_(True))
         if strategy_version:
             q = q.where(StrategyPromotion.strategy_version == strategy_version)
-        rows = list(
-            session.execute(q.order_by(desc(StrategyPromotion.expectancy_r))).scalars().all()
-        )
+        rows = [
+            r
+            for r in session.execute(q.order_by(desc(StrategyPromotion.expectancy_r)))
+            .scalars()
+            .all()
+            if r.candidate_id in known
+        ]
     out: list[PromotedStrategy] = []
     for i, r in enumerate(rows):
         out.append(
@@ -105,6 +127,7 @@ def promoted_strategy_details(strategy_version: str | None = None) -> list[Promo
                 allow_long=bool(r.allow_long),
                 allow_short=bool(r.allow_short),
                 active=(cap <= 0 or i < cap),
+                data_source=str((r.summary or {}).get("data_source", "reference")),
             )
         )
     return out

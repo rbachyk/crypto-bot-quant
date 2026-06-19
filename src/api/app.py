@@ -984,15 +984,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 for r in rows
             ]
         body = (
-            f'<div class="card"><h2>Data Coverage — DATA_VERSION snapshots ({len(data)})</h2>'
+            '<div class="card"><h2>Download real market data</h2>'
+            '<form method="post" action="/api/data/download" style="margin-bottom:8px">'
+            '<button class="btn" type="submit">&#11015; Download real history + build dataset'
+            "</button></form>"
+            '<p class="meta">Fetches REAL Bybit history (the ccxt source) for the symbols/window '
+            "in <code>configs/data.bybit.yaml</code>, validates it, and builds a versioned "
+            "snapshot — all in the background on the <code>data</code> worker. This is the data "
+            "the real-data backtests and the <b>Validate on REAL data</b> step (Strategies page) "
+            "run on. Edit symbols/window in that config; keep the window recent (OI retention).</p>"
+            "</div>"
+            f'<div class="card"><h2>DATA_VERSION snapshots ({len(data)})</h2>'
             + _rows_table(
                 ["Snapshot", "Data Version", "Exchange", "Valid", "Symbols", "Rows"],
                 data,
-                "No snapshots — run `qbot download`.",
+                "No snapshots yet — click Download real history above.",
             )
             + "</div>"
         )
         return _page("Data Coverage", body)
+
+    @app.post("/api/data/download")
+    def download_data(user: str = Depends(require_dashboard_auth)) -> RedirectResponse:
+        """Enqueue a real-data download + dataset build (Bybit ccxt source, bybit config)."""
+        from src.jobs import JobQueue
+
+        JobQueue(settings).enqueue(
+            "build_dataset_version",
+            {"config_path": "configs/data.bybit.yaml"},
+            requested_by=user,
+        )
+        _audit("build_dataset_version", target="data.bybit", actor=user, detail={})
+        return RedirectResponse(url="/dashboard/data-coverage", status_code=303)
 
     # ----- Universe (#3) -------------------------------------------------- #
     @app.get("/dashboard/universe", response_class=HTMLResponse)
@@ -2687,6 +2710,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _audit("run_strategy_validation", target="strategies", actor=user, detail={})
         return RedirectResponse(url="/dashboard/strategies", status_code=303)
 
+    @app.post("/api/strategies/validate-lake")
+    def validate_strategies_lake(user: str = Depends(require_dashboard_auth)) -> RedirectResponse:
+        """Validate candidates on REAL downloaded data (not fixtures) and persist verdicts
+        tagged data_source='lake'. Requires a snapshot to be downloaded first."""
+        from src.jobs import JobQueue
+
+        JobQueue(settings).enqueue(
+            "run_lake_strategy_validation",
+            {"config_path": "configs/data.bybit.yaml"},
+            requested_by=user,
+        )
+        _audit("run_lake_strategy_validation", target="strategies", actor=user, detail={})
+        return RedirectResponse(url="/dashboard/strategies", status_code=303)
+
     @app.get("/dashboard/strategies", response_class=HTMLResponse)
     def dashboard_strategies(user: str = Depends(require_dashboard_auth)) -> str:
         from src.strategies.config import load_strategies_config
@@ -2706,12 +2743,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 s.append("short")
             return "/".join(s) or "—"
 
+        def _provenance(src: str) -> str:
+            return (
+                '<span class="badge pass">REAL DATA</span>'
+                if src == "lake"
+                else '<span class="badge blocked">reference only</span>'
+            )
+
         promoted_rows = [
             [
                 f"<code>{_esc(d.candidate_id)}</code>",
                 _esc(d.family),
                 f"{d.expectancy_r:+.4f}",
                 _sides(d),
+                _provenance(d.data_source),
                 (
                     '<span class="badge pass">ACTIVE</span>'
                     if d.active
@@ -2720,6 +2765,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ]
             for d in details
         ]
+        real_n = sum(1 for d in details if d.data_source == "lake")
         pool_rows = [
             [f"<code>{_esc(c.id)}</code>", _esc(c.family), _esc(c.exit_profile)]
             for c in enabled_pool
@@ -2730,32 +2776,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             [
                 ("candidate pool (enabled in config)", len(enabled_pool)),
                 ("promoted (passed gates)", len(details)),
+                ("promoted on REAL data", real_n),
                 ("active cap (max_active_strategies)", cap),
                 ("running now (top-N by expectancy)", len(active)),
             ],
         )
+        real_warn = (
+            ""
+            if real_n
+            else '<p class="meta" style="color:#f5c451">⚠ No strategy has been validated on '
+            "REAL data yet — the promotions below are from synthetic fixtures. Download real "
+            "history (Data page) then click <b>Validate on REAL data</b> before trusting a "
+            "demo/live run.</p>"
+        )
         body = (
             status
             + '<div class="card"><h2>Source &amp; validate strategies</h2>'
-            '<form method="post" action="/api/strategies/validate" style="margin-bottom:10px">'
-            '<button class="btn" type="submit">&#9654; Source &amp; validate strategies</button>'
-            "</form>"
-            '<p class="meta">Runs every <b>enabled</b> candidate from '
-            "<code>configs/strategies.yaml</code> through the research gate loop (backtest + "
-            "walk-forward + fee/slippage stress + noise control) and writes promote/shelve "
-            "verdicts. The live/demo engine then runs the <b>top "
-            f"{cap}</b> promoted strategies by validated expectancy. Adding genuinely new "
-            "strategy ideas means adding candidates to that config (a human hypothesis — there "
-            "is no random strategy search, by design); this button re-sources and re-ranks the "
-            "existing pool.</p></div>"
+            + real_warn
+            + '<form method="post" action="/api/strategies/validate" style="display:inline;'
+            'margin-right:8px"><button class="btn btn-neutral" type="submit">'
+            "&#9654; Validate on fixtures (quick)</button></form>"
+            '<form method="post" action="/api/strategies/validate-lake" style="display:inline">'
+            '<button class="btn" type="submit">&#9654; Validate on REAL data</button></form>'
+            '<p class="meta" style="margin-top:10px"><b>Validate on fixtures</b> runs the research '
+            "gate loop on synthetic deterministic data — fast, proves the strategy logic, but is "
+            "<b>not</b> evidence of a real edge. <b>Validate on REAL data</b> runs the same gates "
+            "(backtest + walk-forward + fee/slippage stress) over your downloaded snapshot — "
+            "this is what should gate a live decision (download first on the Data page). Both "
+            "write promote/shelve verdicts; the live/demo engine runs the <b>top "
+            f"{cap}</b> promoted by expectancy. New ideas = new candidates in "
+            "<code>configs/strategies.yaml</code> (human hypotheses; no random search by "
+            "design).</p></div>"
             '<div class="card"><h2>Promoted strategies (ranked)</h2>'
             + _rows_table(
-                ["Candidate", "Family", "Expectancy R", "Sides", "State"],
+                ["Candidate", "Family", "Expectancy R", "Sides", "Validated on", "State"],
                 promoted_rows,
-                "Nothing promoted yet — click Source & validate, then promote passing candidates.",
+                "Nothing promoted yet — download real data, then Validate on REAL data.",
             )
             + f'<p class="meta">The top {cap} (ACTIVE) trade in live/demo; the rest stay '
-            "promoted-but-benched until they rank into the top set.</p></div>"
+            "promoted-but-benched. <b>reference only</b> = validated on fixtures (no real-data "
+            "evidence yet); <b>REAL DATA</b> = validated on your downloaded snapshot.</p></div>"
             '<div class="card"><h2>Candidate pool (enabled in config)</h2>'
             + _rows_table(
                 ["Candidate", "Family", "Exit profile"], pool_rows, "No enabled candidates."

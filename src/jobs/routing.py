@@ -43,6 +43,7 @@ _CLASS_MEMBERS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "run_walk_forward",
             "build_dataset_version",
             "run_strategy_validation",
+            "run_lake_strategy_validation",
         ),
     ),
     (
