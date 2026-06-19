@@ -330,10 +330,10 @@ def test_reports_list(client: TestClient) -> None:
 def test_overview_page_renders(client: TestClient) -> None:
     resp = client.get("/", auth=_AUTH)
     assert resp.status_code == 200
-    # Performance overview (TradeZella-style): KPI cards + equity curve + gate widget.
+    # Performance overview (TradeZella-style): KPI cards + interactive equity chart + gate widget.
     assert "Performance Overview" in resp.text
     assert "Win rate" in resp.text and "Profit factor" in resp.text
-    assert "Equity Curve" in resp.text
+    assert "Equity curve" in resp.text and "QChart.render" in resp.text  # interactive chart
     assert "Live readiness" in resp.text  # persistent gate-status widget (Section 25)
 
 

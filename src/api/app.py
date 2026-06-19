@@ -201,6 +201,20 @@ pre{background:#0b0e16;padding:13px;border-radius:10px;overflow-x:auto;font-size
 .segment a:hover{color:#fff;background:var(--elev)}
 .segment a.on{background:linear-gradient(180deg,#7491ff,#6c8cff);color:#fff;
   box-shadow:0 1px 4px rgba(108,140,255,.4)}
+/* radio-styled pill group (keeps form state across changes) */
+.pillset{display:inline-flex;background:var(--surface-2);border:1px solid var(--border);
+  border-radius:10px;padding:3px;gap:2px}
+.pillset input{position:absolute;opacity:0;width:0;height:0}
+.pillset label{padding:6px 13px;border-radius:7px;font-size:12.5px;font-weight:550;
+  color:var(--text-dim);cursor:pointer;white-space:nowrap;transition:.12s}
+.pillset label:hover{color:#fff;background:var(--elev)}
+.pillset input:checked+label{background:linear-gradient(180deg,#7491ff,#6c8cff);color:#fff;
+  box-shadow:0 1px 4px rgba(108,140,255,.4)}
+.toolbar{display:flex;flex-wrap:wrap;gap:14px 22px;align-items:center;background:var(--surface);
+  border:1px solid var(--border);border-radius:var(--radius);padding:14px 18px;margin-bottom:18px}
+.toolbar .grp{display:flex;flex-direction:column;gap:6px}
+.toolbar .grp>span{font-size:10.5px;font-weight:600;letter-spacing:.6px;text-transform:uppercase;
+  color:var(--muted)}
 
 /* ---- KPI cards ---- */
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:14px;margin-bottom:18px}
@@ -214,6 +228,11 @@ pre{background:#0b0e16;padding:13px;border-radius:10px;overflow-x:auto;font-size
 .pos{color:var(--green)}
 .neg{color:var(--red)}
 .chart{background:#0b0e16;border:1px solid var(--border);border-radius:11px;padding:10px}
+.qchart{position:relative}
+.qchart svg{display:block;cursor:crosshair}
+.qtip{position:absolute;transform:translate(-50%,-130%);background:#0b0e16;border:1px solid var(--accent);
+  color:var(--text);font-size:11.5px;padding:6px 9px;border-radius:7px;pointer-events:none;opacity:0;
+  white-space:nowrap;z-index:5;box-shadow:0 4px 14px rgba(0,0,0,.5);transition:opacity .08s}
 
 @media(max-width:820px){
   .sidebar{position:static;width:100%;height:auto;border-right:none;border-bottom:1px solid var(--border)}
@@ -222,6 +241,95 @@ pre{background:#0b0e16;padding:13px;border-radius:10px;overflow-x:auto;font-size
 }
 </style>
 """
+
+
+_CHART_JS = """
+<script>
+window.QChart=(function(){
+ var NS="http://www.w3.org/2000/svg";
+ function el(t,a){var e=document.createElementNS(NS,t);for(var k in a)e.setAttribute(k,a[k]);return e;}
+ function fmt(n){return (n>=0?"+":"")+Number(n).toLocaleString(undefined,{maximumFractionDigits:2});}
+ function dkey(ts,g){var d=new Date(ts);
+  if(g==="day")return d.getUTCFullYear()+"-"+String(d.getUTCMonth()+1).padStart(2,"0")+"-"+String(d.getUTCDate()).padStart(2,"0");
+  if(g==="week"){var oneJan=new Date(Date.UTC(d.getUTCFullYear(),0,1));var wk=Math.ceil(((d-oneJan)/86400000+oneJan.getUTCDay()+1)/7);return d.getUTCFullYear()+"-W"+String(wk).padStart(2,"0");}
+  if(g==="month")return d.getUTCFullYear()+"-"+String(d.getUTCMonth()+1).padStart(2,"0");
+  return ""+d.getUTCFullYear();}
+ function clear(n){while(n.firstChild)n.removeChild(n.firstChild);}
+ function tip(host){var t=host.querySelector(".qtip");if(!t){t=document.createElement("div");t.className="qtip";host.appendChild(t);}return t;}
+ function equity(host,series,base){clear(host);var W=1000,H=300,pad=6;
+  var eq=[],cum=base;for(var i=0;i<series.length;i++){cum+=series[i][1];eq.push([series[i][0],cum]);}
+  if(eq.length<2){host.innerHTML='<p class="meta" style="padding:16px">Not enough trades in this scope to chart.</p>';return;}
+  var lo=Math.min.apply(null,eq.map(function(p){return p[1];})),hi=Math.max.apply(null,eq.map(function(p){return p[1];}));
+  var sp=(hi-lo)||1,n=eq.length;
+  function X(i){return pad+i/(n-1)*(W-2*pad);}function Y(v){return H-pad-(v-lo)/sp*(H-2*pad);}
+  var svg=el("svg",{viewBox:"0 0 "+W+" "+H,width:"100%",height:H,preserveAspectRatio:"none"});
+  var up=eq[n-1][1]>=eq[0][1],col=up?"#3ddc97":"#ff6b6b";
+  var area="M"+X(0)+","+Y(eq[0][1]);for(var j=1;j<n;j++)area+=" L"+X(j)+","+Y(eq[j][1]);
+  var fill=area+" L"+X(n-1)+","+H+" L"+X(0)+","+H+" Z";
+  var grad=el("linearGradient",{id:"qg",x1:"0",y1:"0",x2:"0",y2:"1"});
+  grad.appendChild(el("stop",{offset:"0",["stop-color"]:col,["stop-opacity"]:"0.25"}));
+  grad.appendChild(el("stop",{offset:"1",["stop-color"]:col,["stop-opacity"]:"0"}));
+  var defs=el("defs",{});defs.appendChild(grad);svg.appendChild(defs);
+  svg.appendChild(el("path",{d:fill,fill:"url(#qg)",stroke:"none"}));
+  svg.appendChild(el("path",{d:area,fill:"none",stroke:col,["stroke-width"]:"2"}));
+  var vline=el("line",{x1:0,y1:pad,x2:0,y2:H-pad,stroke:"#79849a",["stroke-width"]:"1",["stroke-dasharray"]:"3 3",opacity:"0"});
+  var dot=el("circle",{r:"4",fill:col,opacity:"0"});svg.appendChild(vline);svg.appendChild(dot);
+  host.appendChild(svg);var tp=tip(host);
+  svg.addEventListener("mousemove",function(ev){var r=svg.getBoundingClientRect();
+   var rx=(ev.clientX-r.left)/r.width*W;var idx=Math.round((rx-pad)/(W-2*pad)*(n-1));idx=Math.max(0,Math.min(n-1,idx));
+   var px=X(idx),py=Y(eq[idx][1]);vline.setAttribute("x1",px);vline.setAttribute("x2",px);vline.setAttribute("opacity","1");
+   dot.setAttribute("cx",px);dot.setAttribute("cy",py);dot.setAttribute("opacity","1");
+   var d=new Date(eq[idx][0]);tp.style.opacity="1";tp.style.left=(ev.clientX-r.left)+"px";tp.style.top=(py/H*r.height)+"px";
+   tp.innerHTML="<b>"+d.toISOString().slice(0,10)+"</b><br>Equity "+fmt(eq[idx][1])+"<br>Trade "+fmt(series[idx][1]);});
+  svg.addEventListener("mouseleave",function(){vline.setAttribute("opacity","0");dot.setAttribute("opacity","0");tp.style.opacity="0";});}
+ function bars(host,series,g){clear(host);var W=1000,H=300,pad=6;
+  var buckets={},order=[];for(var i=0;i<series.length;i++){var k=dkey(series[i][0],g);if(!(k in buckets)){buckets[k]=0;order.push(k);}buckets[k]+=series[i][1];}
+  if(!order.length){host.innerHTML='<p class="meta" style="padding:16px">No trades in this scope.</p>';return;}
+  var vals=order.map(function(k){return buckets[k];});var mx=Math.max.apply(null,vals.map(Math.abs))||1;
+  var n=order.length,bw=(W-2*pad)/n;var svg=el("svg",{viewBox:"0 0 "+W+" "+H,width:"100%",height:H,preserveAspectRatio:"none"});
+  var zero=H/2;svg.appendChild(el("line",{x1:pad,y1:zero,x2:W-pad,y2:zero,stroke:"#222b3d",["stroke-width"]:"1"}));
+  var tp=tip(host);
+  for(var j=0;j<n;j++){var v=buckets[order[j]];var h=Math.abs(v)/mx*(H/2-pad);
+   var x=pad+j*bw+bw*0.12,w=bw*0.76,y=v>=0?zero-h:zero;var col=v>=0?"#3ddc97":"#ff6b6b";
+   var rect=el("rect",{x:x,y:y,width:Math.max(1,w),height:Math.max(1,h),fill:col,rx:"2",opacity:"0.9"});
+   (function(k,val,rc){rc.addEventListener("mousemove",function(ev){var r=host.getBoundingClientRect();
+     tp.style.opacity="1";tp.style.left=(ev.clientX-r.left)+"px";tp.style.top=(ev.clientY-r.top)+"px";
+     tp.innerHTML="<b>"+k+"</b><br>P&L "+fmt(val);});
+    rc.addEventListener("mouseleave",function(){tp.style.opacity="0";});})(order[j],v,rect);
+   svg.appendChild(rect);}
+  host.appendChild(svg);}
+ return {render:function(cid,series,base){
+   var eqHost=document.getElementById(cid+"-eq");if(eqHost)equity(eqHost,series,base);
+   var barHost=document.getElementById(cid+"-bar");
+   function draw(g){bars(barHost,series,g);var btns=document.querySelectorAll("#"+cid+"-seg a");
+     btns.forEach(function(b){b.className=(b.getAttribute("data-g")===g)?"on":"";});}
+   if(barHost){draw("day");var seg=document.getElementById(cid+"-seg");
+    if(seg)seg.querySelectorAll("a").forEach(function(b){b.addEventListener("click",function(e){e.preventDefault();draw(b.getAttribute("data-g"));});});}
+ }};
+})();
+</script>
+"""
+
+
+def _interactive_charts(series: list, base: float, *, cid: str = "c0") -> str:
+    """Two self-contained interactive charts (no external deps): a hover equity curve and a
+    P&L-by-period bar chart with a day/week/month/year toggle. ``series`` is [(epoch_ms,pnl)]."""
+    import json as _json
+
+    data = _json.dumps(series)
+    return (
+        '<div class="card"><h2>Equity curve</h2>'
+        f'<div class="chart qchart" id="{cid}-eq"></div>'
+        '<p class="meta">Hover for date / equity / trade P&amp;L.</p></div>'
+        '<div class="card"><div style="display:flex;justify-content:space-between;'
+        'align-items:center;flex-wrap:wrap;gap:10px"><h2 style="margin:0;border:none">'
+        "P&amp;L by period</h2>"
+        f'<div class="segment" id="{cid}-seg">'
+        '<a href="#" data-g="day" class="on">Day</a><a href="#" data-g="week">Week</a>'
+        '<a href="#" data-g="month">Month</a><a href="#" data-g="year">Year</a></div></div>'
+        f'<div class="chart qchart" id="{cid}-bar" style="margin-top:12px"></div></div>'
+        f'<script>QChart.render("{cid}",{data},{base});</script>'
+    )
 
 
 def _icon(key: str) -> str:
@@ -355,6 +463,7 @@ def _page(title: str, body: str, *, env_chip: str = "") -> str:
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         f"<title>{_esc(title)} — Quant Bot</title>"
         f"{_CSS}"
+        f"{_CHART_JS}"
         "</head><body>"
         '<div class="app">'
         f"{_render_sidebar(title)}"
@@ -410,33 +519,84 @@ def _period_selector(action: str, period: str) -> str:
     return f'<div class="form-row"><label>Period</label><div class="segment">{pills}</div></div>'
 
 
-def _scope_selector(action: str, period: str, strategy: str, session: str) -> str:
-    """Period + entity-scope (strategy / paper-or-live session) selector (Section 25)."""
-    from src.api.stats import get_trade_scopes
+_ENV_LABELS = [
+    ("all", "All"),
+    ("paper", "Paper"),
+    ("demo", "Demo"),
+    ("testnet", "Testnet"),
+    ("live", "Live"),
+]
+
+
+def _pillset(name: str, options: list[tuple[str, str]], selected: str) -> str:
+    """A radio-styled pill group inside a form (custom control; preserves state on submit)."""
+    out = '<div class="pillset">'
+    for i, (value, label) in enumerate(options):
+        rid = f"{name}_{i}"
+        chk = " checked" if value == selected else ""
+        out += (
+            f'<input type="radio" id="{rid}" name="{name}" value="{_esc(value)}"{chk} '
+            'onchange="this.form.submit()">'
+            f'<label for="{rid}">{_esc(label)}</label>'
+        )
+    out += "</div>"
+    return out
+
+
+def _scope_selector(
+    action: str,
+    *,
+    env: str = "all",
+    period: str = "all",
+    symbol: str = "",
+    strategy: str = "",
+    session: str = "",
+    show_symbol: bool = True,
+) -> str:
+    """Unified scope toolbar (Section 25): environment + period as custom pill controls, plus
+    symbol / strategy / session selects — all in one GET form so changing any one re-renders the
+    scope while preserving the others. ``env`` keeps paper/demo/testnet/live SEPARATED."""
+    from src.api.stats import get_trade_scopes, get_traded_symbols
 
     try:
         scopes = get_trade_scopes()
-    except Exception:  # noqa: BLE001 - selector must render even if the DB is unavailable
-        scopes = {"strategies": [], "sessions": []}
+        symbols = get_traded_symbols(env if env != "all" else None) if show_symbol else []
+    except Exception:  # noqa: BLE001 - toolbar must render even if the DB is unavailable
+        scopes, symbols = {"strategies": [], "sessions": []}, []
 
-    def _opts(values: list[str], selected: str, all_label: str) -> str:
-        out = f'<option value=""{" selected" if not selected else ""}>{all_label}</option>'
+    def _select(name: str, values: list[str], selected: str, all_label: str) -> str:
+        opts = f'<option value=""{" selected" if not selected else ""}>{all_label}</option>'
         for v in values:
-            out += f'<option value="{_esc(v)}"{" selected" if v == selected else ""}>{_esc(v)}</option>'
-        return out
+            sel = " selected" if v == selected else ""
+            opts += f'<option value="{_esc(v)}"{sel}>{_esc(v)}</option>'
+        return (
+            f'<select name="{name}" onchange="this.form.submit()">{opts}</select>'
+        )
 
-    pers = "".join(
-        f'<option value="{value}"{" selected" if value == period else ""}>{label}</option>'
-        for value, label in _PERIODS
+    grps = [
+        f'<div class="grp"><span>Environment</span>{_pillset("env", _ENV_LABELS, env)}</div>',
+        f'<div class="grp"><span>Period</span>{_pillset("period", _PERIODS, period)}</div>',
+    ]
+    if show_symbol:
+        grps.append(
+            '<div class="grp"><span>Symbol</span>'
+            + _select("symbol", symbols, symbol, "All symbols")
+            + "</div>"
+        )
+    grps.append(
+        '<div class="grp"><span>Strategy</span>'
+        + _select("strategy", scopes["strategies"], strategy, "All strategies")
+        + "</div>"
+    )
+    grps.append(
+        '<div class="grp"><span>Session / run</span>'
+        + _select("session", scopes["sessions"], session, "All sessions")
+        + "</div>"
     )
     return (
-        f'<form method="get" action="{action}" class="form-row">'
-        f'<label class="meta">Period</label><select name="period" onchange="this.form.submit()">{pers}</select>'
-        f'<label class="meta">Strategy</label><select name="strategy" onchange="this.form.submit()">'
-        f"{_opts(scopes['strategies'], strategy, 'All strategies')}</select>"
-        f'<label class="meta">Session</label><select name="session" onchange="this.form.submit()">'
-        f"{_opts(scopes['sessions'], session, 'All sessions')}</select>"
-        '<noscript><button class="btn" type="submit">Apply</button></noscript></form>'
+        f'<form method="get" action="{action}" class="toolbar">'
+        + "".join(grps)
+        + '<noscript><button class="btn" type="submit">Apply</button></noscript></form>'
     )
 
 
@@ -553,60 +713,142 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def livez() -> dict[str, str]:
         return {"status": "ok"}
 
+    def _activity_strip() -> str:
+        """What's running right now — explains why the numbers move (the scheduler enqueues
+        recurring shadow-only jobs). Lists active jobs with a link to the Jobs page."""
+        from src.db.models import JobStatus as _JS
+
+        with session_scope() as s:
+            active = list(
+                s.execute(
+                    select(Job)
+                    .where(Job.status.in_([_JS.RUNNING, _JS.QUEUED]))
+                    .order_by(desc(Job.created_at))
+                    .limit(8)
+                )
+                .scalars()
+                .all()
+            )
+        sched = (
+            "on" if settings.scheduler_enabled and settings.enable_background_research_jobs else "off"
+        )
+        if active:
+            chips = "".join(
+                f'<a href="/dashboard/jobs/{j.job_id}" class="badge '
+                f'{"running" if j.status.value == "running" else "not_run"}" '
+                f'style="text-decoration:none">{_esc(j.job_type)}'
+                f'{" · " + (j.progress_message or "") if j.progress_message else ""}</a> '
+                for j in active
+            )
+            inner = f'<p style="margin:6px 0 0">{chips}</p>'
+        else:
+            inner = '<p class="meta" style="margin:6px 0 0">Nothing running right now.</p>'
+        return (
+            '<div class="card"><div style="display:flex;justify-content:space-between;'
+            'align-items:center;gap:10px;flex-wrap:wrap"><h2 style="margin:0;border:none">'
+            "Activity</h2>"
+            f'<span class="meta">background scheduler: <b>{sched}</b> · '
+            '<a href="/dashboard/jobs">All jobs →</a></span></div>'
+            + inner
+            + '<p class="meta" style="margin-top:8px">When the scheduler is on it periodically '
+            "runs research re-validation + paper sessions, so paper numbers grow on their own. "
+            "Set <code>ENABLE_BACKGROUND_RESEARCH_JOBS=false</code> (or "
+            "<code>SCHEDULER_ENABLED=false</code>) to keep a static dataset while demo-testing.</p>"
+            "</div>"
+        )
+
+    def _env_summary_card(current: str) -> str:
+        """Per-environment trade counts + net P&L — the separation at a glance."""
+        from src.api.stats import get_environment_summary
+
+        rows = []
+        for e in get_environment_summary():
+            here = e["env"] == current
+            rows.append(
+                [
+                    (f'<b>{_esc(e["env"])}</b>' if here else _esc(e["env"])),
+                    e["trades"],
+                    _money(e["net_pnl"]),
+                    f'{e["win_rate"] * 100:.1f}%',
+                ]
+            )
+        return (
+            '<div class="card"><h2>Environments (separated)</h2>'
+            + _rows_table(["Environment", "Trades", "Net P&L", "Win rate"], rows, "No trades yet.")
+            + '<p class="meta">Each environment\'s statistics are kept separate by session tag — '
+            "pick one in the Environment selector above. Demo can be zeroed on the "
+            "<a href=\"/dashboard/live\">Live Trading</a> page.</p></div>"
+        )
+
     # ----- dashboard overview (authenticated) ------------------------------ #
     @app.get("/", response_class=HTMLResponse)
     def dashboard(
+        env: str = "all",
         period: str = "all",
+        symbol: str = "",
         strategy: str = "",
         session: str = "",
         user: str = Depends(require_dashboard_auth),
     ) -> str:
-        """Performance overview (TradeZella-style) over the chosen period + entity scope.
+        """Performance overview (TradeZella-style) over the chosen environment + period + scope.
 
-        Sourced from real ``paper_trades`` (shadow-only). The operational control
-        center (gates, jobs, universe, kill switch) lives under System → Control Center.
+        Sourced from real ``paper_trades`` (shadow-only) and SEPARATED by environment
+        (paper / demo / testnet / live). Operational control lives under System → Control Center.
         """
-        from src.api.stats import get_aggregate_stats
+        from src.api.stats import _PAPER_BASE_EQUITY, get_aggregate_stats
 
-        env_info = (
-            f"Signed in as <b>{_esc(user)}</b> · env={settings.app_env.value} · "
-            f"mode={settings.trading_mode.value} · live_allowed={settings.live_trading_allowed}"
-        )
         try:
-            agg = get_aggregate_stats(period, strategy=strategy or None, session_id=session or None)
+            agg = get_aggregate_stats(
+                period,
+                env=env if env != "all" else None,
+                symbol=symbol or None,
+                strategy=strategy or None,
+                session_id=session or None,
+            )
             t = agg.trading
             body = (
-                f"<p class='meta'>{env_info}</p>"
-                + _gate_status_line(agg.gates)
-                + _scope_selector("/", period, strategy, session)
+                _gate_status_line(agg.gates)
+                + _scope_selector(
+                    "/", env=env, period=period, symbol=symbol, strategy=strategy, session=session
+                )
+                + _activity_strip()
                 + _kpi_row(t)
-                + f'<div class="card"><h2>Equity Curve</h2>{_equity_svg(t.equity_curve)}</div>'
+                + _interactive_charts(t.trade_series, _PAPER_BASE_EQUITY, cid="ov")
+                + _env_summary_card(env)
                 + _breakdown_table("By Strategy", t.by_strategy, "Strategy")
                 + _breakdown_table("By Symbol", t.by_symbol, "Symbol")
-                + '<p class="meta">Realized performance from <code>paper_trades</code> '
-                "(shadow-only; live still gated). Run sessions via Paper or "
-                "<code>qbot paper-lake</code>. "
-                f"config_version={settings.config_version} · data_version={settings.data_version}</p>"
             )
         except Exception as exc:  # noqa: BLE001 - dashboard must render even if stats fail
-            body = f"<p class='meta'>{env_info}</p><div class='card'><p class='meta'>Stats unavailable: {_esc(exc)}</p></div>"
+            body = f"<div class='card'><p class='meta'>Stats unavailable: {_esc(exc)}</p></div>"
         return _page("Performance Overview", body)
 
     @app.get("/dashboard/analytics", response_class=HTMLResponse)
     def dashboard_analytics(
+        env: str = "all",
         period: str = "all",
+        symbol: str = "",
         strategy: str = "",
         session: str = "",
         user: str = Depends(require_dashboard_auth),
     ) -> str:
         """Performance broken down by strategy / regime / session / symbol (Section 25)."""
-        from src.api.stats import get_aggregate_stats
+        from src.api.stats import _PAPER_BASE_EQUITY, get_aggregate_stats
 
-        agg = get_aggregate_stats(period, strategy=strategy or None, session_id=session or None)
+        agg = get_aggregate_stats(
+            period,
+            env=env if env != "all" else None,
+            symbol=symbol or None,
+            strategy=strategy or None,
+            session_id=session or None,
+        )
         t = agg.trading
         body = (
-            _scope_selector("/dashboard/analytics", period, strategy, session)
+            _scope_selector(
+                "/dashboard/analytics",
+                env=env, period=period, symbol=symbol, strategy=strategy, session=session,
+            )
             + _kpi_row(t)
+            + _interactive_charts(t.trade_series, _PAPER_BASE_EQUITY, cid="an")
             + _breakdown_table("By Strategy", t.by_strategy, "Strategy")
             + _breakdown_table("By Regime", t.by_regime, "Regime")
             + _breakdown_table("By Session", t.by_session, "Session (UTC)")
@@ -1166,112 +1408,108 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ----- stats dashboard pages ------------------------------------------- #
     @app.get("/dashboard/stats", response_class=HTMLResponse)
     def dashboard_stats(
+        env: str = "all",
         period: str = "all",
-        from_ts: str | None = None,
-        to_ts: str | None = None,
+        symbol: str = "",
+        strategy: str = "",
+        session: str = "",
         user: str = Depends(require_dashboard_auth),
     ) -> str:
-        from src.api.stats import get_aggregate_stats, get_symbols_list
+        from src.api.stats import (
+            _PAPER_BASE_EQUITY,
+            get_aggregate_stats,
+            get_traded_symbols,
+        )
 
         try:
-            agg = get_aggregate_stats(period, from_ts, to_ts)
-            symbols = get_symbols_list()
-            symbol_links = (
-                " · ".join(f'<a href="/dashboard/stats/{_esc(s)}">{_esc(s)}</a>' for s in symbols)
-                if symbols
-                else '<span class="meta">no symbols yet</span>'
+            agg = get_aggregate_stats(
+                period,
+                env=env if env != "all" else None,
+                symbol=symbol or None,
+                strategy=strategy or None,
+                session_id=session or None,
             )
-            g = agg.gates
-            j = agg.jobs
-            score_cls = (
-                "score"
-                if g.live_readiness_score >= 80
-                else ("score score-mid" if g.live_readiness_score >= 50 else "score score-low")
+            t = agg.trading
+            traded = get_traded_symbols(env if env != "all" else None)
+            sym_links = (
+                " · ".join(
+                    f'<a href="/dashboard/stats/{_esc(s)}?env={_esc(env)}">{_esc(s)}</a>'
+                    for s in traded
+                )
+                if traded
+                else '<span class="meta">no symbols traded in this scope yet</span>'
             )
-            body = f"""
-<div class="form-row">
-  <label>Period:</label>
-  <form method="get">
-    <select name="period" onchange="this.form.submit()">
-      {"".join(f'<option value="{p}"{" selected" if p == period else ""}>{p}</option>' for p in TIME_PERIODS)}
-    </select>
-    {f'<input type="text" name="from_ts" value="{from_ts or ""}" placeholder="from (ISO)" style="width:200px">' if period == "custom" else ""}
-    {f'<input type="text" name="to_ts" value="{to_ts or ""}" placeholder="to (ISO)" style="width:200px">' if period == "custom" else ""}
-    <button type="submit">Apply</button>
-  </form>
-</div>
-<div class="card">
-  <h2>Aggregate Statistics — {period}</h2>
-  {f'<p class="meta">Window: {agg.window_start} → {agg.window_end}</p>' if agg.window_start else ""}
-  <table>
-    <tr><th>Metric</th><th>Value</th></tr>
-    <tr><td>Live Readiness Score</td><td><span class="{score_cls}">{g.live_readiness_score:.1f}%</span></td></tr>
-    <tr><td>Gates Passed</td><td>{g.passed}</td></tr>
-    <tr><td>Gates Failed</td><td>{g.failed}</td></tr>
-    <tr><td>Gates Blocked</td><td>{g.blocked}</td></tr>
-    <tr><td>Gates Not Run</td><td>{g.not_run}</td></tr>
-    <tr><td>Jobs (total)</td><td>{j.total}</td></tr>
-    <tr><td>Jobs Succeeded</td><td>{j.succeeded}</td></tr>
-    <tr><td>Jobs Failed</td><td>{j.failed}</td></tr>
-    <tr><td>Active Symbols</td><td>{agg.universe.active_symbols}</td></tr>
-    <tr><td>Open Remediation Items</td><td>{agg.open_remediation_items}</td></tr>
-    <tr><td>Total Trades (Phase 8)</td><td>{agg.trading.total_trades}</td></tr>
-    <tr><td>Win Rate (Phase 8)</td><td>{agg.trading.win_rate:.1%}</td></tr>
-    <tr><td>Expectancy R (Phase 8)</td><td>{agg.trading.expectancy_r:.4f}</td></tr>
-    <tr><td>Max Drawdown % (Phase 8)</td><td>{agg.trading.max_drawdown_pct:.1%}</td></tr>
-  </table>
-</div>
-<p class="meta">Trading metrics (PnL, win-rate, drawdown, fees, slippage, funding) populate in Phase 8.</p>
-<p><b>Per-Symbol Stats →</b> {symbol_links}</p>"""
-        except Exception as exc:
-            body = f'<div class="card"><p class="meta">Error: {exc}</p></div>'
+            body = (
+                _scope_selector(
+                    "/dashboard/stats",
+                    env=env, period=period, symbol=symbol, strategy=strategy, session=session,
+                )
+                + _kpi_row(t)
+                + _interactive_charts(t.trade_series, _PAPER_BASE_EQUITY, cid="st")
+                + _breakdown_table("By Symbol", t.by_symbol, "Symbol")
+                + _breakdown_table("By Strategy", t.by_strategy, "Strategy")
+                + f'<div class="card"><h2>Per-symbol drill-down</h2><p>{sym_links}</p></div>'
+            )
+        except Exception as exc:  # noqa: BLE001
+            body = f'<div class="card"><p class="meta">Error: {_esc(exc)}</p></div>'
         return _page("General Statistics", body)
 
     @app.get("/dashboard/stats/{symbol}", response_class=HTMLResponse)
     def dashboard_per_symbol_stats(
         symbol: str,
+        env: str = "all",
         period: str = "all",
-        from_ts: str | None = None,
-        to_ts: str | None = None,
         user: str = Depends(require_dashboard_auth),
     ) -> str:
-        from src.api.stats import get_per_symbol_stats, get_symbols_list
+        from src.api.stats import _PAPER_BASE_EQUITY, get_per_symbol_stats, get_traded_symbols
 
-        symbols = get_symbols_list()
         try:
-            stats = get_per_symbol_stats(symbol, period, from_ts, to_ts)
+            stats = get_per_symbol_stats(symbol, period, env=env if env != "all" else None)
             t = stats["trading"]
-            body = f"""
-<div class="form-row">
-  <label>Symbol:</label>
-  <form method="get">
-    <select name="..." onchange="window.location='/dashboard/stats/'+this.value">
-      {"".join(f"<option{'  selected' if s == symbol else ''}>{s}</option>" for s in (symbols or [symbol]))}
-    </select>
-    <label style="margin-left:8px">Period:</label>
-    <select name="period" onchange="this.form.submit()">
-      {"".join(f'<option value="{p}"{" selected" if p == period else ""}>{p}</option>' for p in TIME_PERIODS)}
-    </select>
-    <button type="submit">Apply</button>
-  </form>
-</div>
-<div class="card">
-  <h2>Per-Symbol Statistics — {symbol} — {period}</h2>
-  <table>
-    <tr><th>Metric</th><th>Value</th></tr>
-    <tr><td>Total Trades</td><td>{t["total_trades"]}</td></tr>
-    <tr><td>Win Rate</td><td>{t["win_rate"]:.1%}</td></tr>
-    <tr><td>Expectancy R</td><td>{t["expectancy_r"]:.4f}</td></tr>
-    <tr><td>Realized PnL</td><td>{t["realized_pnl"]:.4f}</td></tr>
-    <tr><td>Total Fees</td><td>{t["total_fees_paid"]:.4f}</td></tr>
-    <tr><td>Total Slippage</td><td>{t["total_slippage"]:.4f}</td></tr>
-    <tr><td>Funding Paid</td><td>{t["total_funding_paid"]:.4f}</td></tr>
-    <tr><td>Max Drawdown %</td><td>{t["max_drawdown_pct"]:.1%}</td></tr>
-  </table>
-  <p class="meta">{stats.get("note", "")}</p>
-</div>"""
-        except Exception as exc:
-            body = f'<div class="card"><p class="meta">Error: {exc}</p></div>'
+            summary = stats["summary"]
+            others = [s for s in get_traded_symbols(env if env != "all" else None) if s != symbol]
+            jump = (
+                " · ".join(
+                    f'<a href="/dashboard/stats/{_esc(s)}?env={_esc(env)}">{_esc(s)}</a>'
+                    for s in others
+                )
+                or '<span class="meta">none</span>'
+            )
+
+            class _T:  # adapt the dict to the object _kpi_row expects
+                realized_pnl = t["realized_pnl"]
+                win_rate = t["win_rate"]
+                expectancy_r = t["expectancy_r"]
+                profit_factor = t["profit_factor"]
+                max_drawdown_pct = t["max_drawdown_pct"]
+                total_trades = t["total_trades"]
+                avg_win = summary["avg_win"]
+                avg_loss = summary["avg_loss"]
+                gross_win = summary["gross_win"]
+                gross_loss = summary["gross_loss"]
+                total_fees_paid = t["total_fees_paid"]
+
+            body = (
+                _scope_selector(
+                    f"/dashboard/stats/{symbol}", env=env, period=period, show_symbol=False
+                )
+                + f'<p class="meta">Symbol <code>{_esc(symbol)}</code> · scope '
+                f"<b>{_esc(env)}</b></p>"
+                + _kpi_row(_T())
+                + _interactive_charts(summary["trade_series"], _PAPER_BASE_EQUITY, cid="ps")
+                + _kv_card(
+                    "Costs",
+                    [
+                        ("total fees", f'{t["total_fees_paid"]:.4f}'),
+                        ("total slippage", f'{t["total_slippage"]:.4f}'),
+                        ("funding paid", f'{t["total_funding_paid"]:.4f}'),
+                        ("max drawdown", f'{t["max_drawdown_pct"]:.2%}'),
+                    ],
+                )
+                + f'<div class="card"><h2>Other symbols</h2><p>{jump}</p></div>'
+            )
+        except Exception as exc:  # noqa: BLE001
+            body = f'<div class="card"><p class="meta">Error: {_esc(exc)}</p></div>'
         return _page(f"Per-Symbol Statistics: {symbol}", body)
 
     # ----- jobs ------------------------------------------------------------ #

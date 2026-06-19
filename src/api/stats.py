@@ -43,6 +43,24 @@ def _session_bucket(hour: int) -> str:
     return "us"
 
 
+# Trading environments, separated by the ``env:`` prefix on a session_id (see
+# src.live.loop.LiveLoop.env_label). "paper" = everything that is NOT a real-venue run.
+ENVIRONMENTS = ("paper", "demo", "testnet", "live")
+_REAL_ENV_PREFIXES = ("demo:", "testnet:", "live:")
+
+
+def _apply_env(query, env: str | None):
+    """Scope a paper_trades query to one trading environment by session_id prefix."""
+    if not env or env == "all":
+        return query
+    if env == "paper":
+        # Paper = NOT a demo/testnet/live session.
+        for pfx in _REAL_ENV_PREFIXES:
+            query = query.where(~PaperTradeRecord.session_id.like(f"{pfx}%"))
+        return query
+    return query.where(PaperTradeRecord.session_id.like(f"{env}:%"))
+
+
 class TimePeriod(str, enum.Enum):
     TODAY = "today"
     YESTERDAY = "yesterday"
@@ -159,6 +177,9 @@ class TradingStats:
     largest_win: float = 0.0
     largest_loss: float = 0.0
     equity_curve: list[float] = field(default_factory=list)
+    # Per-trade series for interactive charts: (epoch_ms, pnl). The client computes the running
+    # equity + day/week/month/year buckets from this, so the same data powers every grouping.
+    trade_series: list[tuple[int, float]] = field(default_factory=list)
     by_strategy: list[dict[str, Any]] = field(default_factory=list)
     by_regime: list[dict[str, Any]] = field(default_factory=list)
     by_session: list[dict[str, Any]] = field(default_factory=list)
@@ -174,6 +195,7 @@ class TradingStats:
             "largest_win": self.largest_win,
             "largest_loss": self.largest_loss,
             "equity_curve": self.equity_curve,
+            "trade_series": self.trade_series,
             "by_strategy": self.by_strategy,
             "by_regime": self.by_regime,
             "by_session": self.by_session,
@@ -207,15 +229,16 @@ def _breakdown(rows: list[Any], key) -> list[dict[str, Any]]:
 def compute_trading_stats(
     window: TimeWindow,
     *,
+    env: str | None = None,
     symbol: str | None = None,
     strategy: str | None = None,
     session_id: str | None = None,
 ) -> TradingStats:
     """Realized performance from ``paper_trades`` in ``window`` (optionally entity-scoped).
 
-    Scopes (Section 25 entity filters): ``symbol``, ``strategy``, and ``session_id`` (which
-    also covers "by paper session" and "by live session" — live/testnet sessions carry the
-    ``live:``/``testnet:`` id prefix)."""
+    Scopes (Section 25 entity filters): ``env`` (paper / demo / testnet / live — by session_id
+    prefix, so each environment's statistics stay SEPARATED), ``symbol``, ``strategy``, and
+    ``session_id`` (one specific run — covers "by paper/live session")."""
     st = TradingStats()
     with session_scope() as session:
         q = select(PaperTradeRecord)
@@ -223,6 +246,7 @@ def compute_trading_stats(
             q = q.where(PaperTradeRecord.created_at >= window.start)
         if window.end:
             q = q.where(PaperTradeRecord.created_at <= window.end)
+        q = _apply_env(q, env)
         if symbol:
             q = q.where(PaperTradeRecord.symbol == symbol)
         if strategy:
@@ -266,6 +290,9 @@ def compute_trading_stats(
     st.current_equity = round(equity, 2)
     st.max_drawdown_pct = round(max_dd, 4)
     st.equity_curve = curve
+    st.trade_series = [
+        (int(t.created_at.timestamp() * 1000), round(t.pnl, 4)) for t in rows
+    ]
 
     st.by_strategy = _breakdown(rows, lambda r: r.strategy)
     st.by_regime = _breakdown(rows, lambda r: r.regime)
@@ -452,6 +479,8 @@ def get_aggregate_stats(
     from_ts: str | None = None,
     to_ts: str | None = None,
     *,
+    env: str | None = None,
+    symbol: str | None = None,
     strategy: str | None = None,
     session_id: str | None = None,
 ) -> AggregateStats:
@@ -463,9 +492,33 @@ def get_aggregate_stats(
         gates=compute_gate_stats(window),
         jobs=compute_job_stats(window),
         universe=compute_universe_stats(),
-        trading=compute_trading_stats(window, strategy=strategy, session_id=session_id),
+        trading=compute_trading_stats(
+            window, env=env, symbol=symbol, strategy=strategy, session_id=session_id
+        ),
         open_remediation_items=compute_open_remediation_count(),
     )
+
+
+def get_environment_summary() -> list[dict[str, Any]]:
+    """Per-environment trade counts + net P&L, so the dashboard shows the SEPARATION at a glance
+    (paper / demo / testnet / live never mixed unless 'All' is chosen)."""
+    out: list[dict[str, Any]] = []
+    full = TimeWindow(None, None)
+    for env in ENVIRONMENTS:
+        t = compute_trading_stats(full, env=env)
+        out.append(
+            {"env": env, "trades": t.total_trades, "net_pnl": t.realized_pnl,
+             "win_rate": t.win_rate}
+        )
+    return out
+
+
+def get_traded_symbols(env: str | None = None) -> list[str]:
+    """Symbols that actually have trades (env-scoped) — the real per-symbol drill-down list,
+    independent of whether a universe version has been built yet."""
+    with session_scope() as session:
+        q = _apply_env(select(PaperTradeRecord.symbol).distinct(), env)
+        return sorted({s for (s,) in session.execute(q) if s})
 
 
 def get_trade_scopes() -> dict[str, list[str]]:
@@ -493,10 +546,12 @@ def get_per_symbol_stats(
     period: str = "all",
     from_ts: str | None = None,
     to_ts: str | None = None,
+    *,
+    env: str | None = None,
 ) -> dict[str, Any]:
-    """Per-symbol realized trading stats from ``paper_trades``."""
+    """Per-symbol realized trading stats from ``paper_trades`` (optionally env-scoped)."""
     window = resolve_window(period, from_ts, to_ts)
-    t = compute_trading_stats(window, symbol=symbol)
+    t = compute_trading_stats(window, env=env, symbol=symbol)
     return {
         "symbol": symbol,
         "period": period,

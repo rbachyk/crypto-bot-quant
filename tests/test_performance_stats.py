@@ -79,3 +79,52 @@ def test_trading_stats_empty_window_is_zero_safe(seeded_trades) -> None:
     assert t.total_trades == 0
     assert t.win_rate == 0.0 and t.profit_factor == 0.0
     assert t.equity_curve == []
+
+
+def test_trade_series_pairs_each_trade(seeded_trades) -> None:
+    t = compute_trading_stats(resolve_window("all", None, None), strategy=_STRAT)
+    assert len(t.trade_series) == 4
+    assert all(len(p) == 2 for p in t.trade_series)  # (epoch_ms, pnl)
+    assert [round(p[1], 2) for p in t.trade_series] == [100.0, 50.0, -30.0, -20.0]
+
+
+@pytest.fixture
+def seeded_envs():
+    """One paper-tagged and one demo-tagged session, to prove environment separation."""
+    rows = [("paper_env_sess", "PX"), ("demo:env_sess", "DM")]
+    with session_scope() as s:
+        for sid, _ in rows:
+            s.query(PaperTradeRecord).filter_by(session_id=sid).delete()
+        for sid, strat in rows:
+            for i in range(3):
+                s.add(
+                    PaperTradeRecord(
+                        session_id=sid, trade_id=f"{sid}_{i}", symbol="BTC/USDT:USDT",
+                        strategy=strat, side=1, pnl=10.0, pnl_r=0.1, fee=0.0, slippage_cost=0.0,
+                        regime="range",
+                    )
+                )
+    yield
+    with session_scope() as s:
+        for sid, _ in rows:
+            s.query(PaperTradeRecord).filter_by(session_id=sid).delete()
+
+
+def test_env_scoping_separates_demo_from_paper(seeded_envs) -> None:
+    win = resolve_window("all", None, None)
+    demo = compute_trading_stats(win, env="demo", strategy="DM")
+    paper = compute_trading_stats(win, env="paper", strategy="DM")
+    assert demo.total_trades == 3  # demo: session counted under demo
+    assert paper.total_trades == 0  # ...and NOT under paper
+    # paper env excludes demo-tagged sessions
+    assert compute_trading_stats(win, env="paper", strategy="PX").total_trades == 3
+    assert compute_trading_stats(win, env="demo", strategy="PX").total_trades == 0
+
+
+def test_get_environment_summary_and_traded_symbols(seeded_envs) -> None:
+    from src.api.stats import get_environment_summary, get_traded_symbols
+
+    summary = {e["env"]: e for e in get_environment_summary()}
+    assert set(summary) == {"paper", "demo", "testnet", "live"}
+    assert summary["demo"]["trades"] >= 3
+    assert "BTC/USDT:USDT" in get_traded_symbols("demo")
