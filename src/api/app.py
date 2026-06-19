@@ -1578,10 +1578,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         subject_id: str,
         user: str = Depends(require_dashboard_auth),
     ) -> dict:
-        """Raise a PENDING approval request (e.g. live activation) for an operator to decide."""
+        """Raise a PENDING approval request (e.g. live activation) for an operator to decide.
+
+        For ``live_activation`` the request carries a typed LiveActivationRequest (gate
+        results + every version) as evidence, and is REFUSED unless the gates are green."""
         from src.approvals import request_approval
 
-        approval_id = request_approval(subject_type, subject_id, requested_by=user)
+        evidence: dict[str, Any] = {}
+        if subject_type == "live_activation":
+            from src.live.activation import LiveActivationError, build_live_activation_request
+
+            try:
+                evidence = build_live_activation_request(
+                    requested_by=user, settings=settings
+                ).to_dict()
+            except LiveActivationError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        approval_id = request_approval(
+            subject_type, subject_id, requested_by=user, evidence=evidence
+        )
         _audit(
             "approval_requested",
             target=f"{subject_type}:{subject_id}",

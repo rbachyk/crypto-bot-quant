@@ -422,10 +422,25 @@ def write_report(settings: Settings, payload: dict, *, kind: str = "backtest") -
     reports_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
     path = reports_dir / f"{kind}_{stamp}.json"
-    path.write_text(
-        json.dumps({"versions": settings.versions(), **payload}, indent=2, default=str),
-        encoding="utf-8",
+    from src.reporting import wrap_report
+
+    enveloped = wrap_report(
+        payload,
+        report_type=kind,
+        methodology=(
+            "Event-based backtest over the series through the single causal feature pipeline "
+            "(Parity Rule, Section 10); costs from verified metadata; walk-forward + locked "
+            "hold-out and fee/slippage stress where applicable (Section 16/19)."
+        ),
+        limitations=(
+            "Modelled fills/costs on historical or synthetic data; past performance does not "
+            "guarantee live results; spread is estimated where L1 history is unavailable."
+        ),
+        recommendations=payload.get("recommendations", ""),
+        period=payload.get("period") or {"scope": payload.get("label", "full")},
+        versions=settings.versions(),
     )
+    path.write_text(json.dumps(enveloped, indent=2, default=str), encoding="utf-8")
     return str(path)
 
 
