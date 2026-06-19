@@ -261,17 +261,72 @@ def _validate_data_quality(ctx: JobContext, params: dict) -> dict:
 
 @job_handler("build_dataset_version")
 def _build_dataset_version(ctx: JobContext, params: dict) -> dict:
-    """Ensure coverage, validate, and produce an immutable dataset snapshot."""
+    """Download required series, validate, and produce an immutable dataset snapshot.
+
+    Diagnoses the common silent failure: if the exchange is unreachable from the container (or
+    the configured symbols don't exist there), the source treats every symbol as "no history",
+    nothing downloads, and the snapshot is instantly INVALID. We now preflight reachability and
+    fail with a clear, actionable message instead, stream per-series download progress, and log
+    the concrete coverage/validation reasons when a snapshot is invalid."""
     from src.data import DataPlatform, load_data_config
 
     cfg_path = str(params.get("config_path")) if params.get("config_path") else None
+    cfg = load_data_config(cfg_path)
     platform = DataPlatform(cfg=load_data_config(cfg_path))
-    ctx.log(f"ensuring coverage + building dataset snapshot ({cfg_path or 'default config'})")
+    syms = cfg.active_symbols()
+
+    # --- preflight: is the exchange reachable and do the symbols exist? --------------------- #
+    ctx.log(
+        f"checking {cfg.exchange_id} reachability for {len(syms)} symbols "
+        f"({cfg_path or 'default'})"
+    )
+    available = [s for s in syms if platform.source.has_symbol(s)]
+    if not available:
+        raise RuntimeError(
+            f"could not reach {cfg.exchange_id} (or none of {syms} exist there) — nothing was "
+            "downloaded. Public market data needs no API keys, so this is almost always the "
+            "container's outbound network: ensure it can reach the exchange API "
+            "(e.g. api.bybit.com), or that the symbols in the config are valid. Fix that and "
+            "re-run; no snapshot was created."
+        )
+    if len(available) < len(syms):
+        ctx.log(
+            f"only {len(available)}/{len(syms)} symbols available: {available} "
+            f"(missing: {sorted(set(syms) - set(available))})",
+            level="WARNING",
+        )
+
+    # --- download every required series with progress --------------------------------------- #
+    keys = [k for k in cfg.all_required_keys() if k.symbol in available]
+    written = 0
+    for i, key in enumerate(keys):
+        ctx.check_cancelled()
+        written += platform.download(key)
+        ctx.progress(i + 1, len(keys), f"downloaded {key.label()} ({written} rows)")
+    ctx.log(f"downloaded {written} rows across {len(keys)} series")
+
+    # --- validate + snapshot, with concrete diagnostics on failure -------------------------- #
     run = platform.run_full(repair=True, source_jobs=["job:build_dataset_version"])
-    ctx.progress(1, 1, f"snapshot {run.snapshot.snapshot_id}")
+    if not run.coverage.covered:
+        gaps = [g.key.label() for g in run.coverage.uncovered][:8]
+        ctx.log(
+            f"coverage INCOMPLETE — {len(run.coverage.uncovered)} series with gaps in the window "
+            f"({cfg.active_symbols()} over {run.coverage.window}); e.g. {gaps}. Open-interest at "
+            "5m has only ~16h retention on Bybit — keep the window recent / use a coarser OI grid.",
+            level="WARNING",
+        )
+    if not run.validation.passed:
+        crit = [f"{v.check}:{v.series}:{v.detail}" for v in run.validation.critical][:5]
+        ctx.log(f"validation FAILED — {len(run.validation.critical)} critical issue(s): {crit}",
+                level="WARNING")
+    status = "VALID" if (run.coverage.covered and run.validation.passed) else "INVALID"
+    ctx.progress(len(keys), len(keys), f"snapshot {run.snapshot.snapshot_id}: {status}")
     return {
-        "message": f"dataset {run.snapshot.snapshot_id} (covered={run.coverage.covered})",
+        "message": f"dataset {run.snapshot.snapshot_id}: {status} "
+        f"(rows={written}, covered={run.coverage.covered}, validated={run.validation.passed})",
         "dataset_version": run.snapshot.snapshot_id,
+        "rows_downloaded": written,
+        "symbols_available": available,
         "covered": run.coverage.covered,
         "validation_passed": run.validation.passed,
         "artifact_uri": run.report_path,

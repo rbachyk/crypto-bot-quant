@@ -1011,7 +1011,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ----- Data Coverage (#2) --------------------------------------------- #
     @app.get("/dashboard/data-coverage", response_class=HTMLResponse)
     def dashboard_data_coverage(user: str = Depends(require_dashboard_auth)) -> str:
-        from src.db.models import DatasetVersion
+        from src.db.models import DatasetVersion, JobStatus
 
         with session_scope() as s:
             rows = list(
@@ -1022,28 +1022,64 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             data = [
                 [
                     f"<code>{_esc(r.version)}</code>",
-                    _esc(r.data_version),
                     _esc(r.exchange_id),
                     _status_badge("passed" if r.validation_status == "valid" else "failed"),
                     _esc(", ".join(r.symbols or [])),
                     sum((r.row_counts or {}).values()),
+                    (
+                        f"{len(r.missing_ranges)} gap series"
+                        if r.validation_status != "valid" and r.missing_ranges
+                        else ("—" if r.validation_status == "valid" else "see job log")
+                    ),
                 ]
                 for r in rows
             ]
+            last_job = (
+                s.execute(
+                    select(Job)
+                    .where(Job.job_type == "build_dataset_version")
+                    .order_by(desc(Job.created_at))
+                    .limit(1)
+                )
+                .scalars()
+                .first()
+            )
+            job_line = '<p class="meta">No download run yet.</p>'
+            if last_job is not None:
+                failed = last_job.status in (JobStatus.FAILED, JobStatus.BLOCKED)
+                prog = (
+                    f"{last_job.progress_current}/{last_job.progress_total}"
+                    if last_job.progress_total
+                    else "-"
+                )
+                job_line = (
+                    f"<p>Last download: {_status_badge(last_job.status.value)} · progress {prog} · "
+                    f"<a href='/dashboard/jobs/{last_job.job_id}'>view log →</a><br>"
+                    f"<span class='meta'>{_esc(last_job.progress_message or '')}"
+                    + (
+                        f" — {_esc((last_job.failure_reason or '')[:300])}" if failed else ""
+                    )
+                    + "</span></p>"
+                )
         body = (
             '<div class="card"><h2>Download real market data</h2>'
             '<form method="post" action="/api/data/download" style="margin-bottom:8px">'
             '<button class="btn" type="submit">&#11015; Download real history + build dataset'
             "</button></form>"
-            '<p class="meta">Fetches REAL Bybit history (the ccxt source) for the symbols/window '
-            "in <code>configs/data.bybit.yaml</code>, validates it, and builds a versioned "
-            "snapshot — all in the background on the <code>data</code> worker. This is the data "
-            "the real-data backtests and the <b>Validate on REAL data</b> step (Strategies page) "
-            "run on. Edit symbols/window in that config; keep the window recent (OI retention).</p>"
+            + job_line
+            + '<p class="meta">Fetches REAL Bybit history (ccxt) for the symbols/window in '
+            "<code>configs/data.bybit.yaml</code>, validates it, and builds a versioned snapshot "
+            "in the background (the <code>backtest</code> worker) — the data the real-data "
+            "backtests and <b>Validate on REAL data</b> run on.</p>"
+            '<p class="meta" style="color:#f5c451">If it finishes instantly with a FAILED snapshot, '
+            "the container almost certainly can't reach the exchange API (public data needs no "
+            "keys — it's outbound network), or the window is stale. Open the job log above for the "
+            "exact reason; fix and re-run. Keep the window recent (open-interest has short "
+            "retention on Bybit).</p>"
             "</div>"
             f'<div class="card"><h2>DATA_VERSION snapshots ({len(data)})</h2>'
             + _rows_table(
-                ["Snapshot", "Data Version", "Exchange", "Valid", "Symbols", "Rows"],
+                ["Snapshot", "Exchange", "Valid", "Symbols", "Rows", "Issue"],
                 data,
                 "No snapshots yet — click Download real history above.",
             )

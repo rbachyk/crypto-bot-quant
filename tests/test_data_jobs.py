@@ -35,6 +35,23 @@ def test_build_dataset_version_job_produces_snapshot() -> None:
         assert any(r.validation_status == "valid" for r in rows)
 
 
+def test_unreachable_exchange_yields_no_available_symbols() -> None:
+    """Root cause of the 'instant FAILED snapshot' symptom: when the exchange is unreachable,
+    the source reports every symbol as having no history, so the build's preflight finds NOTHING
+    to download and raises a clear error instead of silently producing an invalid snapshot."""
+    from src.data.config import load_data_config
+    from src.data.source import DeterministicSource
+
+    cfg = load_data_config()
+    syms = cfg.active_symbols()
+    unreachable = DeterministicSource(cfg.exchange_id, missing_symbols=set(syms))
+    available = [s for s in syms if unreachable.has_symbol(s)]
+    assert available == []  # the build_dataset_version preflight raises on exactly this
+    # ...and a reachable source has the symbols, so the download proceeds normally.
+    reachable = DeterministicSource(cfg.exchange_id)
+    assert all(reachable.has_symbol(s) for s in syms)
+
+
 @requires_redis
 def test_validate_data_quality_job_passes() -> None:
     queue, worker = JobQueue(), Worker()
