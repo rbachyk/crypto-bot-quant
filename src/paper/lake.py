@@ -190,8 +190,10 @@ def resolve_active_strategies(settings: Settings | None = None) -> tuple[list[tu
     """Resolve the ACTIVE promoted strategy set the live/demo engine runs (Section 13).
 
     Returns ``([(strategy, strat_id, strat_ver), ...], skipped_ids)`` — the top-N promoted
-    candidates by validated expectancy_r, skipping cross-asset (portfolio) strategies the
-    per-row live path cannot run yet (they need the multi-symbol portfolio engine)."""
+    candidates by validated expectancy_r. Both per-row (family B / reference) AND cross-asset
+    (families A/G, portfolio) strategies are included; the REAL-TIME live feed runs both, while
+    the offline replay builder filters portfolio ones out. ``skipped_ids`` are only ids no longer
+    present in configs/strategies.yaml (stale promotions)."""
     from src.strategies.promotion import active_strategy_ids
 
     settings = settings or get_settings()
@@ -204,9 +206,6 @@ def resolve_active_strategies(settings: Settings | None = None) -> tuple[list[tu
             # A promoted id no longer in configs/strategies.yaml (config changed under it) must
             # not crash the live engine — skip it. It re-appears once re-validated.
             skipped.append(cid)
-            continue
-        if hasattr(strategy, "evaluate_portfolio"):
-            skipped.append(cid)  # cross-asset family — not supported by the per-row live path
             continue
         out.append((strategy, sid, ver))
     return out, skipped
@@ -230,6 +229,9 @@ def build_active_lake_inputs(
     ``(inputs, active_strategy_ids)``; an empty list means nothing is promoted yet."""
     settings = settings or get_settings()
     active, _skipped = resolve_active_strategies(settings)
+    # The offline replay path is per-row only; cross-asset (portfolio) strategies run on the
+    # real-time live feed, not here.
+    active = [(s, sid, ver) for (s, sid, ver) in active if not hasattr(s, "evaluate_portfolio")]
     if not active:
         return [], []
     series_store = store if store is not None else SeriesStore(settings.data_lake_path)

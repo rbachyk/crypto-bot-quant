@@ -91,9 +91,10 @@ def test_unknown_and_shelved_strategies_never_active() -> None:
 
 
 @requires_db
-def test_resolve_active_skips_cross_asset_strategies() -> None:
-    """Promoted family-A/G (portfolio) strategies are skipped by the per-row live path."""
-    from src.paper.lake import resolve_active_strategies
+def test_resolve_active_includes_cross_asset_strategies() -> None:
+    """Both per-row AND cross-asset (portfolio) promoted strategies are returned — the realtime
+    live feed runs both; only ids no longer in config are skipped."""
+    from src.paper.lake import build_active_lake_inputs, resolve_active_strategies
 
     ver = get_settings().strategy_version
     # Dominant expectancy so these three are guaranteed in the top-N regardless of any other
@@ -102,8 +103,24 @@ def test_resolve_active_skips_cross_asset_strategies() -> None:
         _promote(cid, expectancy_r=99.0, version=ver)
     active, skipped = resolve_active_strategies()
     active_ids = {sid for _s, sid, _v in active}
-    assert "basis_reversion" in active_ids  # single-symbol family B runs
-    assert "lead_lag_xasset" in skipped and "xsection_rs" in skipped  # cross-asset skipped
+    assert {"basis_reversion", "lead_lag_xasset", "xsection_rs"} <= active_ids  # all run live
+    assert "lead_lag_xasset" not in skipped  # cross-asset is no longer skipped
+
+    # The OFFLINE replay builder, by contrast, still includes only per-row strategies (it cannot
+    # run cross-asset per-row); with no real lake data it returns empty cleanly.
+    portfolio_strats = {
+        sid for s, sid, _v in active if hasattr(s, "evaluate_portfolio")
+    }
+    assert {"lead_lag_xasset", "xsection_rs"} <= portfolio_strats
+    inputs, ids = build_active_lake_inputs(
+        DataConfig(
+            exchange_id=EX, data_version="t", symbols=[SYM], timeframes=[TF], base_timeframe=TF,
+            funding_interval_hours=8, required_series=[OHLCV], window_start_ms=0,
+            window_end_ms=SEED_END, thresholds=ValidationThresholds(), oi_timeframe="1h",
+        ),
+        timeframe=TF, symbols=[SYM],
+    )
+    assert "lead_lag_xasset" not in ids and "xsection_rs" not in ids  # replay skips portfolio
 
 
 # --------------------------------------------------------------------------- #
@@ -174,3 +191,56 @@ def test_realtime_feed_runs_every_active_strategy_per_bar() -> None:
         assert {g.candidate.strategy for g in grp} == {"alpha", "beta"}
         assert all(g.candidate.symbol == SYM for g in grp)
         assert all(g.candidate.config_live_approved for g in grp)  # active = promoted
+
+
+class _PortfolioStrat:
+    """A cross-asset strategy: signals only when it can see peer symbols (evaluate_portfolio)."""
+
+    def evaluate_portfolio(self, symbol, row, peers):  # noqa: ANN001
+        return _Sig(1) if peers else None  # no cross-asset signal without peers
+
+
+def test_realtime_feed_runs_cross_asset_portfolio_strategy() -> None:
+    src = DeterministicSource(EX)
+    syms = ["BTC/USDT:USDT", "ETH/USDT:USDT"]
+    by_sym = {s: src.fetch(SeriesKey(EX, OHLCV, s, TF), SEED_END, SEED_END + 8 * IV) for s in syms}
+
+    class _MultiScripted:
+        def __init__(self, seqs):
+            self._seq = {s: [(int(b["ts"]), b) for b in bars] for s, bars in seqs.items()}
+            self._i = dict.fromkeys(seqs, 0)
+
+        def connected(self):
+            return True
+
+        def latest_bar(self, symbol):
+            seq, i = self._seq[symbol], self._i[symbol]
+            if i >= len(seq):
+                return seq[-1] if seq else None
+            self._i[symbol] += 1
+            return seq[i]
+
+        def backfill(self, *a, **k):
+            return []
+
+    cfg = DataConfig(
+        exchange_id=EX, data_version="t", symbols=syms, timeframes=[TF], base_timeframe=TF,
+        funding_interval_hours=8, required_series=[OHLCV], window_start_ms=0,
+        window_end_ms=SEED_END, thresholds=ValidationThresholds(), oi_timeframe="1h",
+    )
+    feed = LiveCandidateFeed(
+        cfg,
+        feed_source=_MultiScripted(by_sym),
+        rest_source=src,
+        timeframe=TF,
+        symbols=syms,
+        strategies=[(_PortfolioStrat(), "lead_lag", "v1")],  # cross-asset strategy runs live
+        settings=Settings(_env_file=None),
+        seed_end_ms=SEED_END,
+        max_groups=6,
+    )
+    groups = list(feed.groups())
+    assert groups, "the cross-asset strategy should fire once peer symbols are visible"
+    cands = [g.candidate for _ts, grp in groups for g in grp]
+    assert cands and all(c.strategy == "lead_lag" for c in cands)
+    assert all(c.symbol in syms for c in cands)

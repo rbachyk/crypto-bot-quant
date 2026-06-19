@@ -112,28 +112,31 @@ class LiveCandidateFeed:
         )
         from src.strategies.promotion import is_strategy_promoted
 
-        # The active strategy ensemble: (strategy, strat_id, strat_ver, promoted). Either an
-        # explicit promoted set (live/demo runs the top-N promoted strategies concurrently) or a
-        # single strategy from candidate_id / the reference self-test (back-compat / one-off).
-        self._strategies: list[tuple] = []
+        # The active strategy ensemble. Per-row strategies (reference / family B) implement
+        # ``evaluate(row)``; cross-asset strategies (families A/G) implement
+        # ``evaluate_portfolio(symbol, row, peers)`` — they need every symbol's row at the same
+        # decision time. Both run live: each is split into the right bucket here and the feed
+        # assembles a cross-symbol peer view per bar. Tuples are (strategy, id, ver, promoted).
+        self._row_strategies: list[tuple] = []
+        self._portfolio_strategies: list[tuple] = []
+        self._latest_rows: dict[str, dict] = {}  # most-recent feature row per symbol (peers)
+
+        def _add(strat, sid, ver, promoted: bool) -> None:
+            if hasattr(strat, "evaluate_portfolio"):
+                self._portfolio_strategies.append((strat, sid, ver, promoted))
+            else:
+                self._row_strategies.append((strat, sid, ver, promoted))
+
         if strategies:
             for strat, sid, ver in strategies:
-                if hasattr(strat, "evaluate_portfolio"):
-                    continue  # cross-asset family needs the portfolio path, not this one
-                self._strategies.append((strat, sid, ver, True))
+                _add(strat, sid, ver, True)
+        elif candidate_id:
+            strat, sid, ver = lake_candidate_strategy(candidate_id)
+            _add(strat, sid, ver, is_strategy_promoted(sid, ver))
         else:
-            if candidate_id:
-                strat, sid, ver = lake_candidate_strategy(candidate_id)
-            else:
-                bt = load_backtest_config()
-                strat = make_strategy(bt)
-                sid = bt.reference_strategy.name
-                ver = bt.reference_strategy.strategy_version
-            if hasattr(strat, "evaluate_portfolio"):
-                raise ValueError(
-                    "live real-time mode supports per-row strategies (reference or family B)"
-                )
-            self._strategies.append((strat, sid, ver, is_strategy_promoted(sid, ver)))
+            bt = load_backtest_config()
+            strat = make_strategy(bt)
+            _add(strat, bt.reference_strategy.name, bt.reference_strategy.strategy_version, False)
         self.feat_cfg = _lake_feature_config(self.timeframe)
         self._toxic_spread = load_regime_config().toxic_spread_bps  # default estimate floor
 
@@ -172,6 +175,31 @@ class LiveCandidateFeed:
         self.rest_source = get_data_source(self.data_cfg.exchange_id)
         return self.rest_source
 
+    def _candidates_for(self, sym: str, bar: dict, row: dict) -> list[PaperCandidateInput]:
+        """Build candidate inputs for one symbol from every active strategy — per-row strategies
+        on ``row`` and cross-asset strategies on ``(sym, row, peers)`` where peers are the other
+        symbols' most-recent feature rows."""
+        out: list[PaperCandidateInput] = []
+
+        def _emit(sig, sid: str, ver: str, promoted: bool) -> None:
+            if sig is None:
+                return
+            cand = build_candidate(
+                sym, row, sig, strat_id=sid, strat_ver=ver,
+                entry_price=float(bar["close"]), spread_bps=self._toxic_spread / 5.0,
+                promoted=promoted, data_ok=True,
+            )
+            # Real exits are exchange-side (bracket SL/TP) → no forward move in live mode.
+            out.append(PaperCandidateInput(candidate=cand, equity=self.equity, exit_move_frac=0.0))
+
+        for strat, sid, ver, promoted in self._row_strategies:
+            _emit(strat.evaluate(row), sid, ver, promoted)
+        if self._portfolio_strategies:
+            peers = {k: v for k, v in self._latest_rows.items() if k != sym}
+            for strat, sid, ver, promoted in self._portfolio_strategies:
+                _emit(strat.evaluate_portfolio(sym, row, peers), sid, ver, promoted)
+        return out
+
     def groups(self) -> Iterator[tuple[int, list[PaperCandidateInput]]]:
         if not self._reader.ohlcv(self.symbols[0]):
             self.seed()
@@ -183,7 +211,10 @@ class LiveCandidateFeed:
             now = int(time.time() * 1000)
             if self.data_manager is not None and self.data_manager.poll(now).exchange_halt:
                 return
-            progressed = False
+            # Pass 1 — collect every symbol that has a NEW closed bar this cycle and refresh its
+            # feature row, so the cross-asset peer view (self._latest_rows) is complete before
+            # any portfolio strategy is evaluated.
+            advanced: list[tuple[str, dict, dict]] = []  # (sym, bar, row)
             for sym in self.symbols:
                 if self.data_manager is not None and not self.data_manager.is_fresh(sym):
                     continue
@@ -199,29 +230,15 @@ class LiveCandidateFeed:
                 if not frame.rows:
                     continue
                 row = frame.rows[-1]
-                # Evaluate EVERY active strategy on this bar; their signals on the same symbol
-                # compete in one group so the engine's ranking + one-position-per-symbol cap
-                # arbitrates (only one trade per symbol across all strategies).
-                cands: list[PaperCandidateInput] = []
-                for strat, sid, ver, promoted in self._strategies:
-                    sig = strat.evaluate(row)
-                    if sig is None:
-                        continue
-                    cand = build_candidate(
-                        sym,
-                        row,
-                        sig,
-                        strat_id=sid,
-                        strat_ver=ver,
-                        entry_price=float(bar["close"]),
-                        spread_bps=self._toxic_spread / 5.0,
-                        promoted=promoted,
-                        data_ok=True,
-                    )
-                    # Real exits are exchange-side (bracket SL/TP) → no forward move in live mode.
-                    cands.append(
-                        PaperCandidateInput(candidate=cand, equity=self.equity, exit_move_frac=0.0)
-                    )
+                self._latest_rows[sym] = row
+                advanced.append((sym, bar, row))
+
+            # Pass 2 — for each advanced symbol, evaluate per-row AND cross-asset strategies; all
+            # signals on that symbol compete in one group so ranking + the one-position-per-symbol
+            # cap arbitrate (only one trade per symbol across all strategies).
+            progressed = False
+            for sym, bar, row in advanced:
+                cands = self._candidates_for(sym, bar, row)
                 if not cands:
                     continue
                 emitted += 1

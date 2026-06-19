@@ -706,7 +706,7 @@ def _run_live_session(ctx: JobContext, params: dict) -> dict:
         active, skipped = resolve_active_strategies(settings)
         ctx.log(
             f"active promoted strategies: {[sid for _s, sid, _v in active] or 'NONE'}"
-            + (f" (skipped cross-asset: {skipped})" if skipped else "")
+            + (f" (skipped stale/unknown ids: {skipped})" if skipped else "")
         )
         if not active:
             ctx.log(
