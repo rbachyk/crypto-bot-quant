@@ -13,7 +13,7 @@ always yield the same verdict, which is what the RISK gate asserts.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from src.killswitch import KillSwitch
 from src.risk.config import RiskConfig
@@ -29,6 +29,9 @@ class BreakerInputs:
     consecutive_losses: int = 0
     abnormal_slippage_active: bool = False
     reconciled: bool = True  # exchange state reconciles with the bot's view
+    weekly_pnl: float = 0.0  # realized PnL so far this week (currency; negative = loss)
+    cumulative_funding_paid: float = 0.0  # funding paid this period (currency, positive = paid)
+    per_symbol_pnl: dict[str, float] = field(default_factory=dict)  # realized PnL per symbol
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,8 +91,54 @@ class CircuitBreakers:
                 f"{self.cfg.breakers.consecutive_loss_limit})",
             )
 
-        # 6) Abnormal-slippage cooldown.
+        # 6) Weekly-loss limit (portfolio) → halt for the week (manual reset).
+        wl = (-inp.weekly_pnl / inp.equity) if (inp.equity > 0 and inp.weekly_pnl < 0) else 0.0
+        if wl >= self.cfg.breakers.weekly_loss_limit:
+            return BreakerVerdict(
+                True, f"weekly_loss_limit({wl:.4f}>={self.cfg.breakers.weekly_loss_limit})"
+            )
+
+        # 7) Funding circuit-breaker → halt when funding bleed exceeds the cap.
+        fb = (inp.cumulative_funding_paid / inp.equity) if inp.equity > 0 else 0.0
+        if fb >= self.cfg.breakers.funding_breaker_limit:
+            return BreakerVerdict(
+                True, f"funding_breaker({fb:.4f}>={self.cfg.breakers.funding_breaker_limit})"
+            )
+
+        # 8) Per-symbol loss breaker → halt only the offending symbol.
+        if inp.equity > 0:
+            for sym, pnl in inp.per_symbol_pnl.items():
+                loss = (-pnl / inp.equity) if pnl < 0 else 0.0
+                if loss >= self.cfg.breakers.per_symbol_loss_limit:
+                    return BreakerVerdict(
+                        True,
+                        f"per_symbol_loss[{sym}]({loss:.4f}>="
+                        f"{self.cfg.breakers.per_symbol_loss_limit})",
+                    )
+
+        # 9) Abnormal-slippage cooldown.
         if self.cfg.breakers.abnormal_slippage_cooldown and inp.abnormal_slippage_active:
             return BreakerVerdict(True, "abnormal_slippage_cooldown")
 
         return BreakerVerdict(False)
+
+    # -- pre-trade hard blockers (Section 17 required checks) ------------- #
+    def liquidation_distance_ok(
+        self, entry_price: float, liquidation_price: float, side: int
+    ) -> bool:
+        """True iff the liquidation price is at least ``min_liquidation_distance`` away.
+
+        A new entry is refused when its liquidation price sits closer than the configured
+        fraction — the trade has too little room before forced liquidation (Section 17)."""
+        if entry_price <= 0 or liquidation_price <= 0:
+            return False
+        # For a long, liquidation is below entry; for a short, above. Either way use the gap.
+        dist = abs(entry_price - liquidation_price) / entry_price
+        return dist >= self.cfg.breakers.min_liquidation_distance
+
+    def margin_available(self, required_margin: float, free_margin: float, equity: float) -> bool:
+        """True iff posting ``required_margin`` leaves at least ``min_free_margin_frac`` free."""
+        if equity <= 0 or required_margin < 0:
+            return False
+        remaining = free_margin - required_margin
+        return remaining >= self.cfg.breakers.min_free_margin_frac * equity

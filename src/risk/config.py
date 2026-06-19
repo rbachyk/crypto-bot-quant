@@ -26,6 +26,12 @@ class BreakerConfig:
     consecutive_loss_limit: int = 4
     abnormal_slippage_cooldown: bool = True
     require_reconciled: bool = True
+    # Section 17 additional breakers (capital-agnostic fractions).
+    weekly_loss_limit: float = 0.08  # halt for the week at this fraction of weekly-peak equity
+    per_symbol_loss_limit: float = 0.04  # per-symbol realized-loss halt (fraction of equity)
+    funding_breaker_limit: float = 0.02  # cumulative funding paid halt (fraction of equity)
+    min_liquidation_distance: float = 0.10  # entry refused if liq price is closer than this
+    min_free_margin_frac: float = 0.20  # entry refused if free margin below this fraction
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +67,11 @@ def load_risk_config(path: str | None = None) -> RiskConfig:
         consecutive_loss_limit=int(br.get("consecutive_loss_limit", 4)),
         abnormal_slippage_cooldown=bool(br.get("abnormal_slippage_cooldown", True)),
         require_reconciled=bool(br.get("require_reconciled", True)),
+        weekly_loss_limit=float(br.get("weekly_loss_limit", 0.08)),
+        per_symbol_loss_limit=float(br.get("per_symbol_loss_limit", 0.04)),
+        funding_breaker_limit=float(br.get("funding_breaker_limit", 0.02)),
+        min_liquidation_distance=float(br.get("min_liquidation_distance", 0.10)),
+        min_free_margin_frac=float(br.get("min_free_margin_frac", 0.20)),
     )
 
     return RiskConfig(

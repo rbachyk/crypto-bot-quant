@@ -44,12 +44,22 @@ class WalkForwardResult:
     passed: bool = False
     reasons: list[str] = field(default_factory=list)
 
+    def overfitting(self) -> dict:
+        """Section-16 anti-overfitting controls over the folds (multiple-testing aware)."""
+        from src.backtest.overfitting import overfitting_summary
+
+        # Each fold is a trial; its out-of-sample expectancy is a per-trial 'Sharpe' proxy.
+        trial_sharpes = [f.report.expectancy_r for f in self.folds] or [0.0]
+        n_trades = sum(f.report.trade_count for f in self.folds)
+        return overfitting_summary(trial_sharpes, trial_sharpes, n_trades).to_dict()
+
     def to_dict(self) -> dict:
         return {
             "passed": self.passed,
             "folds_passed": self.folds_passed,
             "n_folds": len(self.folds),
             "reasons": self.reasons,
+            "overfitting": self.overfitting(),
             "folds": [
                 {
                     "index": f.index,
