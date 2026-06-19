@@ -205,9 +205,17 @@ def _breakdown(rows: list[Any], key) -> list[dict[str, Any]]:
 
 
 def compute_trading_stats(
-    window: TimeWindow, *, symbol: str | None = None, strategy: str | None = None
+    window: TimeWindow,
+    *,
+    symbol: str | None = None,
+    strategy: str | None = None,
+    session_id: str | None = None,
 ) -> TradingStats:
-    """Realized performance from ``paper_trades`` in ``window`` (optionally scoped)."""
+    """Realized performance from ``paper_trades`` in ``window`` (optionally entity-scoped).
+
+    Scopes (Section 25 entity filters): ``symbol``, ``strategy``, and ``session_id`` (which
+    also covers "by paper session" and "by live session" — live/testnet sessions carry the
+    ``live:``/``testnet:`` id prefix)."""
     st = TradingStats()
     with session_scope() as session:
         q = select(PaperTradeRecord)
@@ -219,6 +227,8 @@ def compute_trading_stats(
             q = q.where(PaperTradeRecord.symbol == symbol)
         if strategy:
             q = q.where(PaperTradeRecord.strategy == strategy)
+        if session_id:
+            q = q.where(PaperTradeRecord.session_id == session_id)
         rows = list(session.execute(q.order_by(PaperTradeRecord.created_at)).scalars().all())
 
     st.total_trades = len(rows)
@@ -441,6 +451,9 @@ def get_aggregate_stats(
     period: str = "all",
     from_ts: str | None = None,
     to_ts: str | None = None,
+    *,
+    strategy: str | None = None,
+    session_id: str | None = None,
 ) -> AggregateStats:
     window = resolve_window(period, from_ts, to_ts)
     return AggregateStats(
@@ -450,9 +463,29 @@ def get_aggregate_stats(
         gates=compute_gate_stats(window),
         jobs=compute_job_stats(window),
         universe=compute_universe_stats(),
-        trading=compute_trading_stats(window),
+        trading=compute_trading_stats(window, strategy=strategy, session_id=session_id),
         open_remediation_items=compute_open_remediation_count(),
     )
+
+
+def get_trade_scopes() -> dict[str, list[str]]:
+    """Distinct entity scopes for the dashboard selectors: strategies + sessions (Section 25)."""
+    from src.db.models import PaperTradeRecord
+
+    with session_scope() as session:
+        strategies = sorted(
+            {s for (s,) in session.execute(select(PaperTradeRecord.strategy).distinct()) if s}
+        )
+        sessions = [
+            sid
+            for (sid,) in session.execute(
+                select(PaperTradeRecord.session_id)
+                .distinct()
+                .order_by(PaperTradeRecord.session_id.desc())
+            )
+            if sid
+        ][:50]
+    return {"strategies": strategies, "sessions": sessions}
 
 
 def get_per_symbol_stats(

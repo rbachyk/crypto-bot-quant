@@ -217,6 +217,36 @@ def _period_selector(action: str, period: str) -> str:
     )
 
 
+def _scope_selector(action: str, period: str, strategy: str, session: str) -> str:
+    """Period + entity-scope (strategy / paper-or-live session) selector (Section 25)."""
+    from src.api.stats import get_trade_scopes
+
+    try:
+        scopes = get_trade_scopes()
+    except Exception:  # noqa: BLE001 - selector must render even if the DB is unavailable
+        scopes = {"strategies": [], "sessions": []}
+
+    def _opts(values: list[str], selected: str, all_label: str) -> str:
+        out = f'<option value=""{" selected" if not selected else ""}>{all_label}</option>'
+        for v in values:
+            out += f'<option value="{_esc(v)}"{" selected" if v == selected else ""}>{_esc(v)}</option>'
+        return out
+
+    pers = "".join(
+        f'<option value="{value}"{" selected" if value == period else ""}>{label}</option>'
+        for value, label in _PERIODS
+    )
+    return (
+        f'<form method="get" action="{action}" class="form-row">'
+        f'<label class="meta">Period</label><select name="period" onchange="this.form.submit()">{pers}</select>'
+        f'<label class="meta">Strategy</label><select name="strategy" onchange="this.form.submit()">'
+        f"{_opts(scopes['strategies'], strategy, 'All strategies')}</select>"
+        f'<label class="meta">Session</label><select name="session" onchange="this.form.submit()">'
+        f"{_opts(scopes['sessions'], session, 'All sessions')}</select>"
+        '<noscript><button class="btn" type="submit">Apply</button></noscript></form>'
+    )
+
+
 def _money(value: float) -> str:
     cls = "pos" if value > 0 else ("neg" if value < 0 else "")
     return f'<span class="{cls}">{value:+,.2f}</span>'
@@ -332,8 +362,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ----- dashboard overview (authenticated) ------------------------------ #
     @app.get("/", response_class=HTMLResponse)
-    def dashboard(period: str = "all", user: str = Depends(require_dashboard_auth)) -> str:
-        """Performance overview (TradeZella-style) over the chosen period.
+    def dashboard(
+        period: str = "all",
+        strategy: str = "",
+        session: str = "",
+        user: str = Depends(require_dashboard_auth),
+    ) -> str:
+        """Performance overview (TradeZella-style) over the chosen period + entity scope.
 
         Sourced from real ``paper_trades`` (shadow-only). The operational control
         center (gates, jobs, universe, kill switch) lives under System → Control Center.
@@ -345,12 +380,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             f"mode={settings.trading_mode.value} · live_allowed={settings.live_trading_allowed}"
         )
         try:
-            agg = get_aggregate_stats(period)
+            agg = get_aggregate_stats(period, strategy=strategy or None, session_id=session or None)
             t = agg.trading
             body = (
                 f"<p class='meta'>{env_info}</p>"
                 + _gate_status_line(agg.gates)
-                + _period_selector("/", period)
+                + _scope_selector("/", period, strategy, session)
                 + _kpi_row(t)
                 + f'<div class="card"><h2>Equity Curve</h2>{_equity_svg(t.equity_curve)}</div>'
                 + _breakdown_table("By Strategy", t.by_strategy, "Strategy")
@@ -366,15 +401,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/dashboard/analytics", response_class=HTMLResponse)
     def dashboard_analytics(
-        period: str = "all", user: str = Depends(require_dashboard_auth)
+        period: str = "all",
+        strategy: str = "",
+        session: str = "",
+        user: str = Depends(require_dashboard_auth),
     ) -> str:
         """Performance broken down by strategy / regime / session / symbol (Section 25)."""
         from src.api.stats import get_aggregate_stats
 
-        agg = get_aggregate_stats(period)
+        agg = get_aggregate_stats(period, strategy=strategy or None, session_id=session or None)
         t = agg.trading
         body = (
-            _period_selector("/dashboard/analytics", period)
+            _scope_selector("/dashboard/analytics", period, strategy, session)
             + _kpi_row(t)
             + _breakdown_table("By Strategy", t.by_strategy, "Strategy")
             + _breakdown_table("By Regime", t.by_regime, "Regime")
@@ -739,11 +777,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         period: str = "all",
         from_ts: str | None = None,
         to_ts: str | None = None,
+        strategy: str | None = None,
+        session: str | None = None,
         user: str = Depends(require_dashboard_auth),
     ) -> dict[str, Any]:
         from src.api.stats import get_aggregate_stats
 
-        return get_aggregate_stats(period, from_ts, to_ts).to_dict()
+        return get_aggregate_stats(
+            period, from_ts, to_ts, strategy=strategy, session_id=session
+        ).to_dict()
+
+    @app.get("/api/stats/scopes")
+    def stats_scopes(user: str = Depends(require_dashboard_auth)) -> dict[str, list[str]]:
+        from src.api.stats import get_trade_scopes
+
+        return get_trade_scopes()
 
     @app.get("/api/stats/symbols")
     def stats_symbols(user: str = Depends(require_dashboard_auth)) -> list[str]:
