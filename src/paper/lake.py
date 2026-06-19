@@ -265,23 +265,33 @@ def run_lake_paper_session(
     timeframe: str | None = None,
     symbols: list[str] | None = None,
     candidate_id: str | None = None,
+    multi_strategy: bool = False,
     dataset_version: str | None = None,
     session_name: str | None = None,
 ) -> tuple[PaperSession, PaperReport, str]:
-    """Run + persist a real-data paper session over a snapshot. Returns (session, report, id).
+    """Run + persist a real-data backtest/replay over a snapshot. Returns (session, report, id).
 
-    Requires the snapshot to be downloaded first (``qbot download --config ...``). The
-    session id encodes the snapshot + timeframe so real-data runs are identifiable on the
-    Paper dashboard; trades persist to ``paper_trades`` (shadow-only)."""
+    ``multi_strategy=True`` runs the ACTIVE PROMOTED ENSEMBLE (all top-N per-row strategies) in
+    ONE run — the offline real-data twin of the live engine, with ranking + one-position-per-
+    symbol arbitration — and tags the session ``lakebt:…:ensemble`` so its combined statistics
+    are viewable on their own (Statistics → Session filter). Otherwise a single ``candidate_id``
+    (or the reference) is replayed. Requires the snapshot to be downloaded first."""
     settings = settings or get_settings()
     data_cfg = data_cfg or load_data_config()
     tf = timeframe or data_cfg.base_timeframe
     syms = symbols or data_cfg.active_symbols()
     dsv = dataset_version or data_cfg.data_version
-    inputs, strat_id, _ = build_lake_paper_inputs(
-        data_cfg, timeframe=tf, symbols=syms, candidate_id=candidate_id, settings=settings
-    )
-    name = session_name or f"lake:{data_cfg.exchange_id}:{dsv}:{tf}:{strat_id}"
+    if multi_strategy:
+        inputs, ids = build_active_lake_inputs(
+            data_cfg, timeframe=tf, symbols=syms, settings=settings
+        )
+        strat_id = "ensemble"
+        name = session_name or f"lakebt:{data_cfg.exchange_id}:{dsv}:{tf}:ensemble"
+    else:
+        inputs, strat_id, _ = build_lake_paper_inputs(
+            data_cfg, timeframe=tf, symbols=syms, candidate_id=candidate_id, settings=settings
+        )
+        name = session_name or f"lake:{data_cfg.exchange_id}:{dsv}:{tf}:{strat_id}"
     engine = PaperTradingEngine(
         config_version=settings.config_version,
         universe_version=settings.universe_version,

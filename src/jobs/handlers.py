@@ -884,14 +884,23 @@ def _run_lake_paper_session(ctx: JobContext, params: dict) -> dict:
     timeframe = params.get("timeframe") or None
     symbols = params.get("symbols") or None
     candidate_id = params.get("candidate_id") or params.get("strategy") or None
+    # Ensemble = run ALL active promoted strategies in one run (the offline twin of the live
+    # engine), tagged lakebt:…:ensemble so its combined stats are viewable on their own.
+    multi_strategy = bool(params.get("multi_strategy")) or (
+        candidate_id is None and bool(params.get("ensemble"))
+    )
     dataset_version = params.get("dataset_version") or None
-    ctx.log(f"real-data paper session over {data_cfg.exchange_id}/{data_cfg.data_version}")
+    ctx.log(
+        f"real-data {'ensemble ' if multi_strategy else ''}session over "
+        f"{data_cfg.exchange_id}/{data_cfg.data_version}"
+    )
     ctx.progress(0, 1, "running lake paper session")
     session, _report, sid = run_lake_paper_session(
         data_cfg,
         timeframe=timeframe,
         symbols=symbols,
         candidate_id=candidate_id,
+        multi_strategy=multi_strategy,
         dataset_version=dataset_version,
     )
     net = sum(t.pnl for t in session.trades)

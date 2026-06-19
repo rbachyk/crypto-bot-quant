@@ -521,21 +521,41 @@ def get_traded_symbols(env: str | None = None) -> list[str]:
         return sorted({s for (s,) in session.execute(q) if s})
 
 
-def get_trade_scopes() -> dict[str, list[str]]:
-    """Distinct entity scopes for the dashboard selectors: strategies + sessions (Section 25)."""
-    from src.db.models import PaperTradeRecord
+def _known_strategy_names() -> set[str]:
+    """Real strategy ids: the config candidates + the reference strategy. Used to keep the
+    dashboard selectors free of stale/test strategy names that may linger in paper_trades."""
+    names: set[str] = set()
+    try:
+        from src.strategies.config import load_strategies_config
 
+        names |= {c.id for c in load_strategies_config().candidates}
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from src.backtest.config import load_backtest_config
+
+        names.add(load_backtest_config().reference_strategy.name)
+    except Exception:  # noqa: BLE001
+        pass
+    return names
+
+
+def get_trade_scopes(env: str | None = None) -> dict[str, list[str]]:
+    """Distinct entity scopes for the dashboard selectors (Section 25), scoped to ``env`` and
+    filtered to REAL strategies (config candidates + reference) so stale/test rows don't clutter
+    the dropdowns. Sessions are limited to those containing a real strategy."""
+    known = _known_strategy_names()
     with session_scope() as session:
+        sq = _apply_env(select(PaperTradeRecord.strategy).distinct(), env)
         strategies = sorted(
-            {s for (s,) in session.execute(select(PaperTradeRecord.strategy).distinct()) if s}
+            {s for (s,) in session.execute(sq) if s and (not known or s in known)}
         )
+        ssq = _apply_env(select(PaperTradeRecord.session_id).distinct(), env)
+        if known:
+            ssq = ssq.where(PaperTradeRecord.strategy.in_(known))
         sessions = [
             sid
-            for (sid,) in session.execute(
-                select(PaperTradeRecord.session_id)
-                .distinct()
-                .order_by(PaperTradeRecord.session_id.desc())
-            )
+            for (sid,) in session.execute(ssq.order_by(PaperTradeRecord.session_id.desc()))
             if sid
         ][:50]
     return {"strategies": strategies, "sessions": sessions}

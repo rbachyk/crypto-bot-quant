@@ -595,9 +595,10 @@ def _scope_selector(
     scope while preserving the others. ``env`` keeps paper/demo/testnet/live SEPARATED."""
     from src.api.stats import get_trade_scopes, get_traded_symbols
 
+    env_scope = env if env != "all" else None
     try:
-        scopes = get_trade_scopes()
-        symbols = get_traded_symbols(env if env != "all" else None) if show_symbol else []
+        scopes = get_trade_scopes(env_scope)
+        symbols = get_traded_symbols(env_scope) if show_symbol else []
     except Exception:  # noqa: BLE001 - toolbar must render even if the DB is unavailable
         scopes, symbols = {"strategies": [], "sessions": []}, []
 
@@ -2578,6 +2579,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _audit("run_lake_backtest", target="data.bybit", actor=user, detail={})
         return RedirectResponse(url="/dashboard/backtests", status_code=303)
 
+    @app.post("/api/backtests/run-ensemble")
+    def run_ensemble_backtest_ep(user: str = Depends(require_dashboard_auth)) -> RedirectResponse:
+        """Real-data backtest of the ACTIVE PROMOTED ENSEMBLE (all strategies, one run, one
+        position per symbol) over the downloaded snapshot — the offline twin of the live engine.
+        Persists ONE session (lakebt:…:ensemble) viewable on Statistics → Session filter."""
+        from src.jobs import JobQueue
+
+        JobQueue(settings).enqueue(
+            "run_lake_paper_session",
+            {"config_path": "configs/data.bybit.yaml", "multi_strategy": True},
+            requested_by=user,
+        )
+        _audit("run_lake_ensemble", target="data.bybit", actor=user, detail={})
+        return RedirectResponse(url="/dashboard/backtests", status_code=303)
+
     @app.get("/api/backtests")
     def list_backtests(limit: int = 50, user: str = Depends(require_dashboard_auth)) -> list[dict]:
         from src.db.models import BacktestRun
@@ -2683,15 +2699,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             </td><td>{_esc(lake_syms)}</td></tr>
   </table>
   <form method="post" action="/api/backtests/run" style="display:inline;margin-right:8px">
-    <input type="text" name="label" placeholder="label (optional)" style="width:180px">
-    <button class="btn btn-neutral" type="submit">&#9654; Run reference backtest</button>
+    <input type="text" name="label" placeholder="label (optional)" style="width:170px">
+    <button class="btn btn-neutral" type="submit">&#9654; Reference backtest</button>
   </form>
-  <form method="post" action="/api/backtests/run-lake" style="display:inline">
-    <button class="btn" type="submit">&#9654; Run real-data backtest</button>
+  <form method="post" action="/api/backtests/run-lake" style="display:inline;margin-right:8px">
+    <button class="btn btn-neutral" type="submit">&#9654; Real-data backtest (per&#8209;strategy)</button>
   </form>
-  <p class="meta" style="margin-top:8px">Download real history first (Data page) for the
-     real-data run. Both start from the same fixed initial equity ({init_eq:,.0f}); profitability
-     is judged authoritatively by the BT / WF / FEE / SLIP gates.</p>
+  <form method="post" action="/api/backtests/run-ensemble" style="display:inline">
+    <button class="btn" type="submit">&#9654; Real-data backtest — ALL strategies (ensemble)</button>
+  </form>
+  <p class="meta" style="margin-top:8px"><b>Backtests ignore the Environment selector</b> — they
+     are historical replays, not paper/demo/live. Download real history first (Data page).
+     <b>Per-strategy</b> runs each candidate separately (ranked on the
+     <a href="/dashboard/leaderboard">Leaderboard</a>). <b>Ensemble</b> runs all active promoted
+     strategies together in ONE run (one position per symbol — exactly how live behaves) and saves
+     it as a single session <code>lakebt:…:ensemble</code>; view its isolated stats on
+     <a href="/dashboard/stats">Statistics</a> → set <b>Env = Paper</b> and pick that
+     <b>Session</b>. Both start from the same fixed initial equity ({init_eq:,.0f}); profitability
+     is judged by the BT / WF / FEE / SLIP gates.</p>
 </div>"""
         body = equity_card + what_card + f"""
 <div class="card">

@@ -128,3 +128,32 @@ def test_get_environment_summary_and_traded_symbols(seeded_envs) -> None:
     assert set(summary) == {"paper", "demo", "testnet", "live"}
     assert summary["demo"]["trades"] >= 3
     assert "BTC/USDT:USDT" in get_traded_symbols("demo")
+
+
+@pytest.fixture
+def seeded_junk():
+    """A real-strategy trade and a stale/test-strategy trade, to prove the selector filters."""
+    rows = [("scopes_real", "basis_reversion"), ("scopes_junk", "paper_strat_zzz999")]
+    with session_scope() as s:
+        for sid, _ in rows:
+            s.query(PaperTradeRecord).filter_by(session_id=sid).delete()
+        for sid, strat in rows:
+            s.add(
+                PaperTradeRecord(
+                    session_id=sid, trade_id=f"{sid}_0", symbol="BTC/USDT:USDT", strategy=strat,
+                    side=1, pnl=1.0, pnl_r=0.1, fee=0.0, slippage_cost=0.0, regime="range",
+                )
+            )
+    yield
+    with session_scope() as s:
+        for sid, _ in rows:
+            s.query(PaperTradeRecord).filter_by(session_id=sid).delete()
+
+
+def test_get_trade_scopes_excludes_stale_strategies(seeded_junk) -> None:
+    from src.api.stats import get_trade_scopes
+
+    scopes = get_trade_scopes()
+    assert "basis_reversion" in scopes["strategies"]  # real config candidate shown
+    assert "paper_strat_zzz999" not in scopes["strategies"]  # stale/test name filtered out
+    assert "scopes_junk" not in scopes["sessions"]  # session of only-junk strategies filtered

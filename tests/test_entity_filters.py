@@ -39,7 +39,7 @@ def _seed():
                     session_id=_A,
                     trade_id=f"a{i}",
                     symbol="BTC/USDT:USDT",
-                    strategy="ef_strat",
+                    strategy="basis_reversion",
                     side=1,
                     pnl=10.0,
                     pnl_r=1.0,
@@ -50,7 +50,7 @@ def _seed():
                 session_id=_B,
                 trade_id="b0",
                 symbol="ETH/USDT:USDT",
-                strategy="ef_strat",
+                strategy="basis_reversion",
                 side=1,
                 pnl=-5.0,
                 pnl_r=-0.5,
@@ -72,7 +72,7 @@ def test_session_scope_filters_trades() -> None:
 
 def test_trade_scopes_lists_strategies_and_sessions() -> None:
     scopes = get_trade_scopes()
-    assert "ef_strat" in scopes["strategies"]
+    assert "basis_reversion" in scopes["strategies"]
     assert _A in scopes["sessions"] and _B in scopes["sessions"]
 
 
@@ -81,7 +81,7 @@ def test_stats_api_accepts_entity_filters(client: TestClient) -> None:
     assert resp.status_code == 200
     assert resp.json()["trading"]["total_trades"] == 3
     scopes = client.get("/api/stats/scopes", auth=_AUTH)
-    assert scopes.status_code == 200 and "ef_strat" in scopes.json()["strategies"]
+    assert scopes.status_code == 200 and "basis_reversion" in scopes.json()["strategies"]
 
 
 def test_overview_renders_scope_selector(client: TestClient) -> None:
