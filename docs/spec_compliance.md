@@ -49,8 +49,9 @@ not mistaken for full spec compliance or true live-readiness. Audited 2026-06-18
    halts; the live loop halts on exchange-wide integrity failure. A real-time **websocket** feed
    (`src/live/websocket_feed.py`, ccxt.pro on a daemon asyncio thread) now feeds it —
    `qbot live --transport ws|rest` attaches a `LiveDataManager` so a live data-integrity failure
-   halts the loop. (Remaining: driving *candidate generation* from the live stream rather than
-   snapshot replay — the live-loop real-time mode.)
+   halts the loop. **Real-time mode** (`src/live/realtime.py`) now drives candidate generation
+   from the live stream too (rolling window → feature pipeline → strategy on each new bar) via
+   `qbot live --realtime --transport ws`.
 4. **Explainability (Section 24) — RESOLVED.** `decision_logs` + `trade_explainability` are real
    DB tables (migration 0009); `TradeExplainability.ensure_complete()` blocks any trade it can't
    explain; the paper engine builds one per executed trade. (`src/explainability.py`)
@@ -71,14 +72,13 @@ not mistaken for full spec compliance or true live-readiness. Audited 2026-06-18
    backtest report writer. (Residual: not yet applied to every report writer, and a few named
    reports — live, RL, online-learning, live-readiness, daily-review — still lack dedicated generators.)
 
-### Residual gaps (after items 1–7 + websocket feed)
+### Residual gaps (after items 1–7 + websocket feed + real-time mode)
 
-- **Live-loop real-time mode** (Section 8/35) — the websocket feed + data manager are wired for
-  the integrity/halt path; generating the candidate stream from the live feed (rather than
-  snapshot replay) is the remaining step toward continuous live operation.
 - **Entity-scoped time filters** (Section 25) — by run/session/config/universe/strategy/model version.
 - **Report envelope coverage** (Section 34) — apply to all writers; add the missing report generators.
 - The learner remains **shadow-only / not wired to the live trading path** (by design until promoted).
+- The real-time feed streams **OHLCV** + REST-seeded point-in-time series; per-tick streaming of
+  mark/index/funding/OI is a refinement, not a correctness gap.
 
 ## Doc inconsistencies (fixed / noted)
 

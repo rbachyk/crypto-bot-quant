@@ -31,6 +31,53 @@ from src.strategies.promotion import is_strategy_promoted
 _DEFAULT_HOLD_BARS = 12  # forward horizon for the realized move when a signal omits one
 
 
+def build_candidate(
+    symbol: str,
+    row: dict,
+    sig,
+    *,
+    strat_id: str,
+    strat_ver: str,
+    entry_price: float,
+    spread_bps: float,
+    promoted: bool,
+    data_ok: bool = True,
+) -> Candidate:
+    """Build a ranking Candidate from a decision-time feature row + a strategy signal.
+
+    Shared by the snapshot paper builder and the real-time live feed so both go through the
+    identical Candidate construction + Section-11 regime labelling (the Parity Rule)."""
+    return Candidate(
+        symbol=symbol,
+        strategy=strat_id,
+        strategy_version=strat_ver,
+        side=sig.side,
+        entry_price=entry_price,
+        stop_frac=sig.stop_frac,
+        tp_frac=sig.tp_frac,
+        regime=detect_regime(row, spread_bps=spread_bps, data_ok=data_ok),
+        session=int(row.get("session_code", 0)),
+        features={
+            "atr_pct": float(row.get("atr_pct", 0.0)),
+            "premium": float(row.get("premium", 0.0)),
+            "funding_z": float(row.get("funding_z", 0.0)),
+        },
+        signal_strength=min(1.0, abs(float(row.get("ret_short", 0.0))) / 0.02),
+        confirmation=0.6,
+        expected_edge_frac=sig.tp_frac,
+        spread_bps=spread_bps,
+        slippage_est=0.0005,
+        latency_ms=5.0,
+        # Research/shadow context flags; live eligibility is judged by the gates, not a run.
+        data_fresh=data_ok,
+        metadata_verified=True,
+        symbol_tradable=True,
+        strategy_enabled=True,
+        config_live_approved=promoted,
+        decision_ts=int(row["decision_ts"]),
+    )
+
+
 def build_lake_paper_inputs(
     data_cfg: DataConfig,
     *,
@@ -96,37 +143,15 @@ def build_lake_paper_inputs(
             exit_price = float(si.bars[exit_bar]["close"])
             exit_move_frac = exit_price / entry_price - 1.0 if entry_price > 0 else 0.0
             spread_bps = si.spread_bps_at(int(row["decision_ts"]))
-            cand = Candidate(
-                symbol=si.symbol,
-                strategy=strat_id,
-                strategy_version=strat_ver,
-                side=sig.side,
+            cand = build_candidate(
+                si.symbol,
+                row,
+                sig,
+                strat_id=strat_id,
+                strat_ver=strat_ver,
                 entry_price=entry_price,
-                stop_frac=sig.stop_frac,
-                tp_frac=sig.tp_frac,
-                # Deterministic Section-11 regime (emits R-codes so the no-trade protection
-                # in the setup-quality gate can actually fire).
-                regime=detect_regime(row, spread_bps=spread_bps, data_ok=True),
-                session=int(row.get("session_code", 0)),
-                features={
-                    "atr_pct": float(row.get("atr_pct", 0.0)),
-                    "premium": float(row.get("premium", 0.0)),
-                    "funding_z": float(row.get("funding_z", 0.0)),
-                },
-                signal_strength=min(1.0, abs(float(row.get("ret_short", 0.0))) / 0.02),
-                confirmation=0.6,
-                expected_edge_frac=sig.tp_frac,
                 spread_bps=spread_bps,
-                slippage_est=0.0005,
-                latency_ms=5.0,
-                # Research/shadow context flags (mirrors the synthetic paper session); live
-                # eligibility is judged by the gates, not by a paper run.
-                data_fresh=True,
-                metadata_verified=True,
-                symbol_tradable=True,
-                strategy_enabled=True,
-                config_live_approved=promoted,
-                decision_ts=int(row["decision_ts"]),
+                promoted=promoted,
             )
             out.append(
                 PaperCandidateInput(

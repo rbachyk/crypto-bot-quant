@@ -116,7 +116,9 @@ uv run python -m src.cli.main live --mode testnet  --transport ws --timeframe 1h
 
 `--transport ws|rest` attaches a live data feed (websocket via ccxt.pro, or REST polling) to a
 `LiveDataManager` (Section 8): stale-stream / disconnect / ws-vs-REST integrity failures halt the
-loop like the kill switch.
+loop like the kill switch. Add **`--realtime`** to drive the candidate stream from the live feed
+itself (rolling window → the one feature pipeline → the strategy on each newly-closed bar) instead
+of snapshot replay — continuous live operation (Section 35), still venue-gated.
 
 - `paper` uses the offline `SimulatedVenue`; `testnet` uses the real ccxt venue in sandbox
   mode (`CcxtLiveVenue`, default `EXCHANGE_ENV=testnet`) — orders are placed for real but

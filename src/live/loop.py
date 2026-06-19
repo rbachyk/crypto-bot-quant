@@ -191,34 +191,58 @@ def run_replay_session(
     settings: Settings | None = None,
     guard: LiveOrderGuard | None = None,
     transport: str | None = None,
+    realtime: bool = False,
 ) -> LiveRunResult:
-    """Convenience: replay a downloaded snapshot through the live loop in ``mode``.
+    """Run the live loop over a snapshot **replay** or the **real-time** live feed in ``mode``.
 
-    ``transport`` ('ws' | 'rest') attaches a real-time :class:`LiveDataManager` over the live
-    market feed so an exchange-wide data-integrity failure halts the loop (Section 8); ``None``
-    (default) runs without a live data feed (pure replay)."""
+    ``transport`` ('ws' | 'rest') attaches a live :class:`LiveDataManager` so an exchange-wide
+    data-integrity failure halts the loop (Section 8). ``realtime=True`` (requires a transport)
+    drives the candidate stream from the live feed — a rolling window → the one feature pipeline
+    → the strategy on each newly-closed bar — instead of replaying the snapshot."""
     settings = settings or get_settings()
     data_cfg = data_cfg or load_data_config()
     tf = timeframe or data_cfg.base_timeframe
     syms = symbols or data_cfg.active_symbols()
-    feed = replay_feed_from_lake(
-        data_cfg, timeframe=tf, symbols=syms, candidate_id=candidate_id, settings=settings
-    )
     # Real-money mode is bounded by the activation guard (gates + sign-off + caps).
     if guard is None and mode == "live":
         from src.live.guard import LiveActivationGuard
 
         guard = LiveActivationGuard(settings)
+
+    source = None
     data_manager = None
-    if transport:
+    if transport or realtime:
         from src.data.schema import timeframe_ms
         from src.live.data_manager import LiveDataManager
         from src.live.websocket_feed import live_feed_source
 
         source = live_feed_source(
-            syms, transport=transport, exchange_id=data_cfg.exchange_id, timeframe=tf,
+            syms,
+            transport=transport or "rest",
+            exchange_id=data_cfg.exchange_id,
+            timeframe=tf,
             exchange_env=settings.exchange_env,
         )
         data_manager = LiveDataManager(source, syms, interval_ms=timeframe_ms(tf))
-    loop = LiveLoop(mode=mode, settings=settings, guard=guard, data_manager=data_manager)
+
+    if realtime:
+        from src.live.realtime import LiveCandidateFeed
+
+        feed: MarketFeed = LiveCandidateFeed(
+            data_cfg,
+            feed_source=source,
+            data_manager=data_manager,
+            timeframe=tf,
+            symbols=syms,
+            candidate_id=candidate_id,
+            settings=settings,
+            max_groups=max_ticks,
+        )
+        # The real-time feed owns the data-manager halt; don't double-poll at the loop level.
+        loop = LiveLoop(mode=mode, settings=settings, guard=guard)
+    else:
+        feed = replay_feed_from_lake(
+            data_cfg, timeframe=tf, symbols=syms, candidate_id=candidate_id, settings=settings
+        )
+        loop = LiveLoop(mode=mode, settings=settings, guard=guard, data_manager=data_manager)
     return loop.run(feed, session_name=data_cfg.data_version, max_ticks=max_ticks)

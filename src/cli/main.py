@@ -332,6 +332,9 @@ def live(
     transport: str = typer.Option(
         "", "--transport", help="live data feed: ws | rest ('' = none/pure replay)"
     ),
+    realtime: bool = typer.Option(
+        False, "--realtime", help="drive candidates from the live feed (needs --transport)"
+    ),
     max_ticks: int = typer.Option(0, "--max-ticks", help="0 = process the whole snapshot"),
 ) -> None:
     """Run the live trading loop over a snapshot (replay), shadow/paper by default.
@@ -353,6 +356,7 @@ def live(
         symbols=syms,
         candidate_id=strategy or None,
         transport=transport or None,
+        realtime=realtime,
         max_ticks=max_ticks or None,
     )
     typer.echo(
