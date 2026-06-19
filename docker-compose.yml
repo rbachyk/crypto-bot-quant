@@ -43,6 +43,13 @@ x-app-build: &app-build
   env_file:
     - path: .env
       required: false
+  # SHARED, PERSISTENT data lake + reports across EVERY app container. Without this the parquet
+  # lake lives in each container's ephemeral filesystem, so a snapshot downloaded by one worker is
+  # invisible to the others (and wiped on rebuild) — real-data backtests/validation then find no
+  # data and finish instantly. One named volume = one lake all services read/write.
+  volumes:
+    - lakedata:/app/var
+    - reportsdata:/app/reports
   # Auto-restart on crash/OOM (DEPLOY gate). Merged into every app service via <<: *app-build.
   restart: unless-stopped
 
@@ -246,3 +253,5 @@ networks:
 volumes:
   pgdata:
   caddydata:
+  lakedata:      # shared parquet data lake (var/datalake, artifacts, backups) — all app services
+  reportsdata:   # shared report artifacts (reports/) — all app services

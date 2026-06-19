@@ -39,13 +39,14 @@ data:
 
   funding_interval_hours: 8
 
-  required_series: ["ohlcv", "mark", "index", "funding", "open_interest", "spread"]
+  required_series:
+    ["ohlcv", "mark", "index", "funding", "open_interest", "spread"]
 
   # Default example window. Keep ``as_of`` recent (within OI retention) or pass
   # --as-of/--days on the CLI; an older window legitimately has missing OI.
   window:
-    as_of: "2026-06-15T00:00:00Z"
-    duration_hours: 120   # 5 days (within Bybit's ~8-day 1h-OI retention)
+    as_of: "2026-06-19T18:00:00Z"
+    duration_hours: 120 # 5 days (within Bybit's ~8-day 1h-OI retention)
 
   validation:
     max_unfilled_gap_bars: 0

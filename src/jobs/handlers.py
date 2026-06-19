@@ -959,6 +959,13 @@ def _run_lake_paper_session(ctx: JobContext, params: dict) -> dict:
         dataset_version=dataset_version,
     )
     net = sum(t.pnl for t in session.trades)
+    if session.executed_count + session.rejected_count == 0:
+        ctx.log(
+            "0 candidates derived from the lake — either no snapshot data exists for this "
+            "window (download it on the Data page; check the window in configs/data.bybit.yaml) "
+            "or the strategy produced no signals on real data.",
+            level="WARNING",
+        )
     ctx.progress(1, 1, f"{session.executed_count} trades, net_pnl={net:.2f}")
     return {
         "message": f"lake paper {sid}: {session.executed_count} executed / "
@@ -999,6 +1006,12 @@ def _run_lake_backtest(ctx: JobContext, params: dict) -> dict:
         label=label,
     )
     r = out.report
+    if r.trade_count == 0:
+        ctx.log(
+            "0 trades — no snapshot data for this window (download it on the Data page) or the "
+            "strategy produced no signals on real data.",
+            level="WARNING",
+        )
     ctx.progress(1, 1, f"{rid}: expectancy_r={r.expectancy_r:.4f}")
     return {
         "message": f"lake backtest {rid}: expectancy_r={r.expectancy_r:.4f}, "
