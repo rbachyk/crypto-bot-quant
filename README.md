@@ -110,8 +110,13 @@ chosen venue:
 ```bash
 uv run python -m src.cli.main live --mode paper    --config configs/data.bybit.yaml --timeframe 1h
 uv run python -m src.cli.main live --mode testnet  --config configs/data.bybit.yaml --timeframe 1h  # real sandbox orders, no funds
+uv run python -m src.cli.main live --mode testnet  --transport ws --timeframe 1h   # + real-time websocket data-integrity halt
 # --mode live is real money and is REFUSED unless every safety condition holds (below)
 ```
+
+`--transport ws|rest` attaches a live data feed (websocket via ccxt.pro, or REST polling) to a
+`LiveDataManager` (Section 8): stale-stream / disconnect / ws-vs-REST integrity failures halt the
+loop like the kill switch.
 
 - `paper` uses the offline `SimulatedVenue`; `testnet` uses the real ccxt venue in sandbox
   mode (`CcxtLiveVenue`, default `EXCHANGE_ENV=testnet`) — orders are placed for real but

@@ -329,6 +329,9 @@ def live(
     symbols: str = typer.Option("", "--symbols"),
     timeframe: str = typer.Option("", "--timeframe"),
     strategy: str = typer.Option("", "--strategy", help="research candidate id ('' = reference)"),
+    transport: str = typer.Option(
+        "", "--transport", help="live data feed: ws | rest ('' = none/pure replay)"
+    ),
     max_ticks: int = typer.Option(0, "--max-ticks", help="0 = process the whole snapshot"),
 ) -> None:
     """Run the live trading loop over a snapshot (replay), shadow/paper by default.
@@ -349,6 +352,7 @@ def live(
         timeframe=timeframe or None,
         symbols=syms,
         candidate_id=strategy or None,
+        transport=transport or None,
         max_ticks=max_ticks or None,
     )
     typer.echo(
