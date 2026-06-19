@@ -144,22 +144,32 @@ uv run uvicorn src.api.app:app --reload     # dashboard + API on :8000
 make run-worker-data                        # a job worker (dedicated process)
 ```
 
-The dashboard (one FastAPI app, served via Caddy at `https://localhost` under docker) is split
-into two nav groups (Section 25):
+The dashboard (one FastAPI app, served via Caddy at `https://localhost` under docker) has a
+**fixed left sidebar** with a sticky topbar (page title + an environment chip that turns red only
+when real-money live is armed). All **23 pages required by Section 25 / Appendix B.8** are present,
+grouped logically into four sections (`tests/test_dashboard_pages.py` asserts every one is
+reachable and linked):
 
-- **Trading** — the performance side. The **Overview** is a TradeZella-style performance dashboard:
-  KPI cards (net P&L, win rate, expectancy R, profit factor, max drawdown, trades, avg win/loss,
-  fees), an equity curve, and per-strategy/per-symbol breakdowns, all over a selectable time
-  period — computed from the real `paper_trades`. **Analytics** breaks performance down by
-  strategy / regime / session / symbol; **Statistics** + per-symbol views; **Backtests**,
-  **Leaderboard** (real-data iterations ranked by the profitability bar, grouped by `DATA_VERSION`),
-  **Paper** (trades in `paper_trades`), **Reports**. A compact gate-status (live-readiness) widget
-  persists on the performance pages.
-- **System** — the operational control center. **Control Center** (gate status, jobs, universe,
-  **Kill Switch**), **Gates**, **Road to Live** (live-readiness score over the `blocks_live` gates
-  with a *Request live-activation approval* button at 100%), **Jobs** (Cancel/Retry), **ML Shadow**
-  (`shadow_logs`, applied-count = 0 enforcement), **Remediation**, **Approvals**, **Audit Logs**,
-  **Health**.
+- **Performance** — **Overview** (a TradeZella-style board: KPI cards for net P&L, win rate,
+  expectancy R, profit factor, max drawdown, trades, avg win/loss, fees; an equity curve; and
+  per-strategy/per-symbol breakdowns over a selectable period — computed from the real
+  `paper_trades`), **Statistics** + per-symbol views, **Strategy / Regime / Session** analytics,
+  **Execution Quality**, **Risk**, **Analytics**. A compact live-readiness widget persists here.
+- **Research & Testing** — **Backtests** (every run starts from the same fixed initial equity —
+  shown on the page — so runs are directly comparable), **Leaderboard** (real-data iterations
+  ranked by the profitability bar, grouped by `DATA_VERSION`), **Paper Trading**, **Reports**.
+- **Live & Learning** — **Live Trading** (dashboard Start/Stop/Reset controls, described above),
+  **ML Shadow**
+  (`shadow_logs`, applied-count = 0 enforcement), **Online Learning**, **RL**.
+- **Operations** — **Control Center** (gate status, jobs, universe, **Kill Switch**), **Data
+  Coverage**, **Universe**, **Jobs** (Cancel/Retry), **Gates**, **Road to Live** (live-readiness
+  score over the `blocks_live` gates with a *Request live-activation approval* button at 100%),
+  **Remediation**, **Approvals**, **Audit Logs**, **System Health** (per-component probes),
+  **Settings**.
+
+The UI is server-rendered (no SPA) with a custom dark design system — styled cards/KPIs, pill
+status badges, a segmented period selector, and custom-styled form controls (no default browser
+chrome). Every statistics page carries a time-period selector (Section 25).
 
 Background work is routed to dedicated per-class workers
 (`data`/`backtest`/`ml`/`rl`/`live`/`gates`/`default`), and the `scheduler` service enqueues

@@ -80,97 +80,290 @@ TIME_PERIODS = [
 
 _CSS = """
 <style>
-body{font-family:monospace;margin:0;background:#0d1117;color:#e6edf3}
-nav{background:#161b22;padding:12px 20px;border-bottom:1px solid #30363d;display:flex;gap:16px;flex-wrap:wrap}
-nav a{color:#58a6ff;text-decoration:none;font-size:13px}
-nav a:hover{text-decoration:underline}
-.container{padding:20px;max-width:1200px}
-h1{color:#f0f6fc;font-size:20px;margin-top:0}
-h2{color:#c9d1d9;font-size:16px;border-bottom:1px solid #30363d;padding-bottom:6px}
-.card{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin-bottom:16px}
-.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:bold}
-.pass{background:#1a4731;color:#3fb950}
-.fail{background:#4a1421;color:#f85149}
-.blocked{background:#3d2b00;color:#e3b341}
-.not_run{background:#21262d;color:#8b949e}
-.running{background:#0d2137;color:#58a6ff}
+:root{
+  --bg:#0a0d14;--surface:#121724;--surface-2:#171d2c;--elev:#1b2233;
+  --border:#222b3d;--border-soft:#1a2233;--text:#e8ecf5;--text-dim:#aab3c5;
+  --muted:#79849a;--accent:#6c8cff;--accent-2:#8a6cff;--accent-soft:rgba(108,140,255,.14);
+  --green:#3ddc97;--green-bg:rgba(61,220,151,.13);--red:#ff6b6b;--red-bg:rgba(255,107,107,.13);
+  --amber:#f5c451;--amber-bg:rgba(245,196,81,.13);--blue:#5cc3ff;--blue-bg:rgba(92,195,255,.13);
+  --sbw:248px;--radius:13px;
+  --ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  --mono:"SF Mono",SFMono-Regular,ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html{scrollbar-color:#2a3447 transparent}
+body{font-family:var(--ui);margin:0;background:var(--bg);color:var(--text);
+  font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
+a{color:var(--accent);text-decoration:none}
+a:hover{color:#a6bbff}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:#2a3447;border-radius:8px;border:2px solid var(--bg)}
+::-webkit-scrollbar-thumb:hover{background:#36425c}
+
+/* ---- layout: fixed left sidebar + scrolling main ---- */
+.app{display:flex;min-height:100vh}
+.sidebar{position:fixed;top:0;left:0;width:var(--sbw);height:100vh;overflow-y:auto;
+  background:linear-gradient(180deg,#10141f 0%,#0d111a 100%);border-right:1px solid var(--border);
+  padding:0 12px 28px;z-index:20}
+.brand{display:flex;align-items:center;gap:11px;padding:18px 10px 16px;margin-bottom:6px;
+  position:sticky;top:0;background:linear-gradient(180deg,#10141f 80%,rgba(16,20,31,0));z-index:2}
+.brand .mark{width:34px;height:34px;border-radius:9px;flex:0 0 auto;
+  background:linear-gradient(135deg,var(--accent),var(--accent-2));
+  display:flex;align-items:center;justify-content:center;box-shadow:0 4px 14px rgba(108,140,255,.4)}
+.brand .mark svg{width:19px;height:19px;color:#fff}
+.brand .name{font-weight:700;font-size:15px;letter-spacing:.2px;color:#fff;line-height:1.1}
+.brand .sub{font-size:10.5px;color:var(--muted);letter-spacing:.4px;text-transform:uppercase}
+.navgroup{font-size:10.5px;font-weight:600;letter-spacing:.9px;text-transform:uppercase;
+  color:var(--muted);padding:16px 11px 7px}
+.navlink{display:flex;align-items:center;gap:10px;padding:8px 11px;border-radius:9px;
+  color:var(--text-dim);font-size:13.5px;font-weight:500;margin:1px 0;position:relative;transition:.12s}
+.navlink svg{width:17px;height:17px;flex:0 0 auto;opacity:.78}
+.navlink:hover{background:var(--surface-2);color:var(--text)}
+.navlink.active{background:var(--accent-soft);color:#fff}
+.navlink.active svg{opacity:1;color:var(--accent)}
+.navlink.active::before{content:"";position:absolute;left:-12px;top:7px;bottom:7px;width:3px;
+  border-radius:0 3px 3px 0;background:linear-gradient(180deg,var(--accent),var(--accent-2))}
+
+.main{flex:1;margin-left:var(--sbw);min-width:0;display:flex;flex-direction:column}
+.topbar{position:sticky;top:0;z-index:10;display:flex;align-items:center;justify-content:space-between;
+  gap:16px;padding:0 26px;height:62px;background:rgba(10,13,20,.82);backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--border)}
+.topbar h1{font-size:18px;font-weight:650;margin:0;color:#fff;letter-spacing:-.2px}
+.topbar .crumb{font-size:12px;color:var(--muted);margin-bottom:1px}
+.envchip{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--text-dim);
+  background:var(--surface);border:1px solid var(--border);padding:6px 12px;border-radius:999px}
+.envchip .dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green)}
+.container{padding:24px 26px 56px;max-width:1320px;width:100%}
+
+h2{color:#fff;font-size:15px;font-weight:620;margin:0 0 14px;letter-spacing:-.1px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:18px 20px;margin-bottom:18px;box-shadow:0 1px 2px rgba(0,0,0,.25)}
+.card h2{border-bottom:1px solid var(--border-soft);padding-bottom:11px}
+
+/* ---- badges / status ---- */
+.badge{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:999px;
+  font-size:11.5px;font-weight:600;letter-spacing:.2px;line-height:1.4}
+.badge::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.pass{background:var(--green-bg);color:var(--green)}
+.fail{background:var(--red-bg);color:var(--red)}
+.blocked{background:var(--amber-bg);color:var(--amber)}
+.not_run{background:rgba(121,132,154,.14);color:var(--muted)}
+.running{background:var(--blue-bg);color:var(--blue)}
+
+/* ---- tables ---- */
 table{width:100%;border-collapse:collapse;font-size:13px}
-th{background:#21262d;color:#8b949e;text-align:left;padding:8px 10px;border:1px solid #30363d}
-td{padding:8px 10px;border:1px solid #30363d;vertical-align:top}
-tr:hover td{background:#1c2129}
-.meta{color:#8b949e;font-size:12px}
-.score{font-size:24px;font-weight:bold;color:#3fb950}
-.score-low{color:#f85149}
-.score-mid{color:#e3b341}
-select,input{background:#21262d;color:#e6edf3;border:1px solid #30363d;padding:6px;border-radius:4px;font-family:monospace}
-button,.btn{background:#238636;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-family:monospace;text-decoration:none;display:inline-block;font-size:13px}
-button:hover,.btn:hover{background:#2ea043}
-.btn-danger{background:#b62324}
-.btn-danger:hover{background:#da3633}
-.btn-neutral{background:#30363d}
-.btn-neutral:hover{background:#3c444d}
-pre{background:#0d1117;padding:10px;border-radius:4px;overflow-x:auto;font-size:12px;border:1px solid #30363d}
-.remediation-step{padding:8px;margin:4px 0;border-left:3px solid #58a6ff;background:#0d1117;font-size:13px}
-.form-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
-nav .navgroup{color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.5px;align-self:center}
-nav .navsep{color:#30363d;align-self:center}
-.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
-.kpi{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:14px}
-.kpi .v{font-size:22px;font-weight:bold;color:#f0f6fc}
-.kpi .l{color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
-.pos{color:#3fb950}
-.neg{color:#f85149}
-.chart{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px}
+th{color:var(--muted);text-align:left;padding:9px 12px;font-weight:600;font-size:11px;
+  text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border)}
+td{padding:10px 12px;border-bottom:1px solid var(--border-soft);vertical-align:top}
+tbody tr:last-child td,table tr:last-child td{border-bottom:none}
+tr:hover td{background:var(--surface-2)}
+code{font-family:var(--mono);font-size:12px;background:var(--surface-2);padding:1px 6px;border-radius:5px;color:#cdd6e6}
+
+.meta{color:var(--muted);font-size:12.5px}
+.score{font-size:30px;font-weight:750;color:var(--green);letter-spacing:-1px}
+.score-low{color:var(--red)}
+.score-mid{color:var(--amber)}
+
+/* ---- custom controls (no native look) ---- */
+select,input,textarea{appearance:none;-webkit-appearance:none;background:var(--surface-2);
+  color:var(--text);border:1px solid var(--border);padding:8px 12px;border-radius:9px;
+  font-family:var(--ui);font-size:13px;transition:.12s}
+select{padding-right:34px;cursor:pointer;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2379849a' stroke-width='2.4' stroke-linecap='round'><path d='M6 9l6 6 6-6'/></svg>");
+  background-repeat:no-repeat;background-position:right 12px center}
+select:hover,input:hover{border-color:#33405a}
+select:focus,input:focus,textarea:focus{outline:none;border-color:var(--accent);
+  box-shadow:0 0 0 3px var(--accent-soft)}
+label{font-size:12px;color:var(--muted);font-weight:500}
+
+button,.btn{background:linear-gradient(180deg,#7491ff,#6c8cff);color:#fff;border:none;
+  padding:8px 16px;border-radius:9px;cursor:pointer;font-family:var(--ui);font-weight:600;
+  font-size:13px;text-decoration:none;display:inline-flex;align-items:center;gap:7px;
+  box-shadow:0 1px 2px rgba(0,0,0,.3);transition:.13s}
+button:hover,.btn:hover{filter:brightness(1.08);transform:translateY(-1px);color:#fff}
+button:active,.btn:active{transform:translateY(0)}
+button:disabled,.btn:disabled{opacity:.45;cursor:not-allowed;transform:none;filter:none}
+.btn-danger{background:linear-gradient(180deg,#ff7a7a,#f4595a)}
+.btn-neutral{background:var(--surface-2);color:var(--text-dim);border:1px solid var(--border);box-shadow:none}
+.btn-neutral:hover{background:var(--elev);color:#fff;filter:none}
+
+pre{background:#0b0e16;padding:13px;border-radius:10px;overflow-x:auto;font-size:12px;
+  border:1px solid var(--border);font-family:var(--mono);color:#cdd6e6}
+.remediation-step{padding:10px 13px;margin:6px 0;border-left:3px solid var(--accent);
+  background:var(--surface-2);border-radius:0 8px 8px 0;font-size:13px}
+.form-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
+
+/* ---- segmented pill control (period selector) ---- */
+.segment{display:inline-flex;background:var(--surface-2);border:1px solid var(--border);
+  border-radius:10px;padding:3px;gap:2px}
+.segment a{padding:6px 13px;border-radius:7px;font-size:12.5px;font-weight:550;color:var(--text-dim);
+  white-space:nowrap;transition:.12s}
+.segment a:hover{color:#fff;background:var(--elev)}
+.segment a.on{background:linear-gradient(180deg,#7491ff,#6c8cff);color:#fff;
+  box-shadow:0 1px 4px rgba(108,140,255,.4)}
+
+/* ---- KPI cards ---- */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:14px;margin-bottom:18px}
+.kpi{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:16px 17px;position:relative;overflow:hidden}
+.kpi::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;
+  background:linear-gradient(180deg,var(--accent),var(--accent-2));opacity:.85}
+.kpi .v{font-size:23px;font-weight:700;color:#fff;letter-spacing:-.5px}
+.kpi .l{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.6px;
+  margin-top:5px;font-weight:600}
+.pos{color:var(--green)}
+.neg{color:var(--red)}
+.chart{background:#0b0e16;border:1px solid var(--border);border-radius:11px;padding:10px}
+
+@media(max-width:820px){
+  .sidebar{position:static;width:100%;height:auto;border-right:none;border-bottom:1px solid var(--border)}
+  .main{margin-left:0}
+  .brand{position:static}
+}
 </style>
 """
 
-_NAV = """
-<nav>
-<span class="navgroup">Trading</span>
-<a href="/">Overview</a>
-<a href="/dashboard/analytics">Analytics</a>
-<a href="/dashboard/strategy">Strategy</a>
-<a href="/dashboard/regime">Regime</a>
-<a href="/dashboard/session-analytics">Session</a>
-<a href="/dashboard/stats">Statistics</a>
-<a href="/dashboard/execution">Execution</a>
-<a href="/dashboard/risk">Risk</a>
-<a href="/dashboard/backtests">Backtests</a>
-<a href="/dashboard/leaderboard">Leaderboard</a>
-<a href="/dashboard/paper">Paper</a>
-<a href="/dashboard/live">Live</a>
-<a href="/dashboard/reports">Reports</a>
-<span class="navsep">|</span>
-<span class="navgroup">System</span>
-<a href="/dashboard/system">Control Center</a>
-<a href="/dashboard/data-coverage">Data</a>
-<a href="/dashboard/universe">Universe</a>
-<a href="/dashboard/gates">Gates</a>
-<a href="/dashboard/road-to-live">Road to Live</a>
-<a href="/dashboard/jobs">Jobs</a>
-<a href="/dashboard/shadow">ML Shadow</a>
-<a href="/dashboard/learning">Learning</a>
-<a href="/dashboard/rl">RL</a>
-<a href="/dashboard/remediation">Remediation</a>
-<a href="/dashboard/approvals">Approvals</a>
-<a href="/dashboard/audit-logs">Audit Logs</a>
-<a href="/dashboard/settings">Settings</a>
-<a href="/health">Health</a>
-</nav>
-"""
 
-
-def _page(title: str, body: str) -> str:
+def _icon(key: str) -> str:
+    """A small inline (Feather-style) SVG glyph; inherits color via ``currentColor``."""
+    p = {
+        "overview": "<rect x='3' y='3' width='7' height='9' rx='1'/><rect x='14' y='3' width='7' height='5' rx='1'/><rect x='14' y='12' width='7' height='9' rx='1'/><rect x='3' y='16' width='7' height='5' rx='1'/>",
+        "stats": "<path d='M3 3v18h18'/><rect x='7' y='11' width='3' height='6'/><rect x='12' y='7' width='3' height='10'/><rect x='17' y='13' width='3' height='4'/>",
+        "strategy": "<circle cx='12' cy='12' r='8'/><circle cx='12' cy='12' r='3.2'/>",
+        "regime": "<path d='M12 3l9 5-9 5-9-5 9-5z'/><path d='M3 13l9 5 9-5'/>",
+        "session": "<circle cx='12' cy='12' r='9'/><path d='M12 7v5l3 2'/>",
+        "execution": "<path d='M13 2L4 14h7l-1 8 9-12h-7l1-8z'/>",
+        "risk": "<path d='M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6l8-3z'/>",
+        "backtest": "<circle cx='12' cy='12' r='9'/><path d='M12 7v5l3 2'/><path d='M3 5l2.5 2.5'/>",
+        "leaderboard": "<path d='M8 21h8'/><path d='M12 17v4'/><path d='M7 4h10v4a5 5 0 01-10 0V4z'/><path d='M17 5h3v2a3 3 0 01-3 3'/><path d='M7 5H4v2a3 3 0 003 3'/>",
+        "paper": "<path d='M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9z'/><path d='M14 3v6h6'/><path d='M8 13h8M8 17h6'/>",
+        "reports": "<path d='M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9z'/><path d='M14 3v6h6'/>",
+        "live": "<path d='M3 12h4l2 7 4-14 2 7h6'/>",
+        "shadow": "<path d='M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z'/><circle cx='12' cy='12' r='3'/>",
+        "learning": "<rect x='5' y='8' width='14' height='11' rx='2'/><path d='M12 8V4'/><circle cx='12' cy='3' r='1.4'/><path d='M9 13h.01M15 13h.01'/>",
+        "rl": "<circle cx='6' cy='6' r='2.4'/><circle cx='6' cy='18' r='2.4'/><circle cx='18' cy='12' r='2.4'/><path d='M8.2 7.4L16 11M8 16.5L16 13'/>",
+        "control": "<path d='M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3'/><circle cx='4' cy='12' r='2'/><circle cx='12' cy='6' r='2'/><circle cx='20' cy='14' r='2'/>",
+        "data": "<ellipse cx='12' cy='5' rx='8' ry='3'/><path d='M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5'/><path d='M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6'/>",
+        "universe": "<circle cx='12' cy='12' r='9'/><path d='M3 12h18'/><path d='M12 3c2.5 2.5 2.5 15 0 18-2.5-3-2.5-15 0-18z'/>",
+        "jobs": "<path d='M8 6h13M8 12h13M8 18h13'/><path d='M3 6h.01M3 12h.01M3 18h.01'/>",
+        "gates": "<circle cx='12' cy='12' r='9'/><path d='M8.5 12.5l2.5 2.5 4.5-5'/>",
+        "road": "<path d='M5 21V4a2 2 0 012-2h11l-2.5 4L18 8H7'/>",
+        "remediation": "<path d='M14.7 6.3a4 4 0 00-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 005.4-5.4l-2.7 2.7-2.4-2.4 2.7-2.7z'/>",
+        "approvals": "<path d='M9 12l2 2 4-4'/><path d='M12 3l7 3v6c0 4-3 7-7 8-4-1-7-4-7-8V6l7-3z'/>",
+        "audit": "<path d='M4 4h11l5 5v11a1 1 0 01-1 1H5a1 1 0 01-1-1V4z'/><path d='M14 4v5h5M8 13h8M8 17h5'/>",
+        "health": "<path d='M3 12h4l2-5 3 10 2.5-7 1.5 2H21'/>",
+        "settings": "<circle cx='12' cy='12' r='3'/><path d='M19 12a7 7 0 00-.1-1.3l2-1.6-2-3.4-2.4 1a7 7 0 00-2.2-1.3L14 2h-4l-.3 2.1a7 7 0 00-2.2 1.3l-2.4-1-2 3.4 2 1.6A7 7 0 005 12c0 .4 0 .9.1 1.3l-2 1.6 2 3.4 2.4-1a7 7 0 002.2 1.3L10 22h4l.3-2.1a7 7 0 002.2-1.3l2.4 1 2-3.4-2-1.6c.1-.4.1-.9.1-1.3z'/>",
+    }.get(key, "<circle cx='12' cy='12' r='8'/>")
     return (
-        "<html><head>"
-        f"<title>{title} — Quant Bot</title>"
+        "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.7' "
+        f"stroke-linecap='round' stroke-linejoin='round'>{p}</svg>"
+    )
+
+
+# Sidebar information architecture: (group, [(label, href, icon, [title-prefixes that mark active])]).
+# Covers all 23 pages required by AGENTS.md §25 / Appendix B.8, logically grouped.
+_NAV_GROUPS: list[tuple[str, list[tuple[str, str, str, list[str]]]]] = [
+    (
+        "Performance",
+        [
+            ("Overview", "/", "overview", ["Performance Overview", "Overview"]),
+            ("Statistics", "/dashboard/stats", "stats", ["General Statistics", "Per-Symbol"]),
+            ("Strategy", "/dashboard/strategy", "strategy", ["Strategy Analytics"]),
+            ("Regime", "/dashboard/regime", "regime", ["Regime Analytics"]),
+            ("Session", "/dashboard/session-analytics", "session", ["Session Analytics"]),
+            ("Execution", "/dashboard/execution", "execution", ["Execution Quality"]),
+            ("Risk", "/dashboard/risk", "risk", ["Risk"]),
+            ("Analytics", "/dashboard/analytics", "stats", ["Analytics"]),
+        ],
+    ),
+    (
+        "Research & Testing",
+        [
+            ("Backtests", "/dashboard/backtests", "backtest", ["Backtests"]),
+            ("Leaderboard", "/dashboard/leaderboard", "leaderboard", ["Leaderboard"]),
+            ("Paper Trading", "/dashboard/paper", "paper", ["Paper Trading"]),
+            ("Reports", "/dashboard/reports", "reports", ["Reports"]),
+        ],
+    ),
+    (
+        "Live & Learning",
+        [
+            ("Live Trading", "/dashboard/live", "live", ["Live Trading"]),
+            ("ML Shadow", "/dashboard/shadow", "shadow", ["ML Shadow"]),
+            ("Online Learning", "/dashboard/learning", "learning", ["Online learning"]),
+            ("RL", "/dashboard/rl", "rl", ["RL"]),
+        ],
+    ),
+    (
+        "Operations",
+        [
+            ("Control Center", "/dashboard/system", "control", ["Control Center"]),
+            ("Data Coverage", "/dashboard/data-coverage", "data", ["Data Coverage"]),
+            ("Universe", "/dashboard/universe", "universe", ["Universe"]),
+            ("Jobs", "/dashboard/jobs", "jobs", ["Jobs", "Job"]),
+            ("Gates", "/dashboard/gates", "gates", ["Gates", "Gate:"]),
+            ("Road to Live", "/dashboard/road-to-live", "road", ["Road to Live"]),
+            ("Remediation", "/dashboard/remediation", "remediation", ["Remediation"]),
+            ("Approvals", "/dashboard/approvals", "approvals", ["Approvals"]),
+            ("Audit Logs", "/dashboard/audit-logs", "audit", ["Audit Log"]),
+            ("System Health", "/dashboard/health", "health", ["System Health"]),
+            ("Settings", "/dashboard/settings", "settings", ["Settings"]),
+        ],
+    ),
+]
+
+_BRAND_MARK = _icon("live")  # the equity-curve glyph as the product mark
+
+
+def _render_sidebar(title: str) -> str:
+    out = [
+        '<aside class="sidebar">',
+        '<div class="brand">'
+        f'<span class="mark">{_BRAND_MARK}</span>'
+        '<span><span class="name">Quant Bot</span><br>'
+        '<span class="sub">Control Center</span></span></div>',
+    ]
+    for group, items in _NAV_GROUPS:
+        out.append(f'<div class="navgroup">{group}</div>')
+        for label, href, icon, prefixes in items:
+            active = any(title == p or title.startswith(p) for p in prefixes)
+            cls = "navlink active" if active else "navlink"
+            out.append(f'<a class="{cls}" href="{href}">{_icon(icon)}<span>{label}</span></a>')
+    out.append("</aside>")
+    return "".join(out)
+
+
+def _env_chip() -> str:
+    """Topbar environment chip: trading mode · exchange env, coloured by live-risk."""
+    try:
+        s = get_settings()
+        live = s.live_trading_allowed
+        dot = "var(--red)" if live else "var(--green)"
+        return (
+            f'<span class="dot" style="background:{dot};box-shadow:0 0 8px {dot}"></span>'
+            f"{_esc(s.trading_mode.value)} · {_esc(s.exchange_id)}/{_esc(s.exchange_env)}"
+        )
+    except Exception:  # noqa: BLE001 - chrome must render even if settings are unavailable
+        return '<span class="dot"></span>dashboard'
+
+
+def _page(title: str, body: str, *, env_chip: str = "") -> str:
+    chip = env_chip or _env_chip()
+    return (
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>{_esc(title)} — Quant Bot</title>"
         f"{_CSS}"
         "</head><body>"
-        f"{_NAV}"
-        f'<div class="container">'
-        f"<h1>{title}</h1>"
-        f"{body}"
-        "</div></body></html>"
+        '<div class="app">'
+        f"{_render_sidebar(title)}"
+        '<div class="main">'
+        '<header class="topbar">'
+        f"<div><div class='crumb'>Quant Trading Bot</div><h1>{_esc(title)}</h1></div>"
+        f'<div class="envchip">{chip}</div>'
+        "</header>"
+        f'<div class="container">{body}</div>'
+        "</div></div></body></html>"
     )
 
 
@@ -204,17 +397,16 @@ _PERIODS = [
 
 
 def _period_selector(action: str, period: str) -> str:
-    """A GET form that re-renders the page for the chosen time period (Section 25)."""
-    opts = "".join(
-        f'<option value="{value}"{" selected" if value == period else ""}>{label}</option>'
+    """A custom segmented pill control that re-renders the page per time period (Section 25).
+
+    Rendered as styled links (a non-standard control, works without JS); the active period
+    is highlighted. Pages using this carry only the ``period`` query param, so a plain link
+    that sets ``?period=`` is sufficient."""
+    pills = "".join(
+        f'<a href="{action}?period={value}" class="{"on" if value == period else ""}">{label}</a>'
         for value, label in _PERIODS
     )
-    return (
-        f'<form method="get" action="{action}" class="form-row">'
-        f'<label class="meta">Period</label><select name="period" onchange="this.form.submit()">'
-        f"{opts}</select>"
-        '<noscript><button class="btn" type="submit">Apply</button></noscript></form>'
-    )
+    return f'<div class="form-row"><label>Period</label><div class="segment">{pills}</div></div>'
 
 
 def _scope_selector(action: str, period: str, strategy: str, session: str) -> str:
@@ -483,6 +675,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             + f'<p class="meta">config_version={settings.config_version} · '
             f"data_version={settings.data_version}</p>",
         )
+
+    # ----- System Health (#22) -------------------------------------------- #
+    @app.get("/dashboard/health", response_class=HTMLResponse)
+    def dashboard_health(user: str = Depends(require_dashboard_auth)) -> str:
+        """Per-service / per-component health (Section 25 page #22), rendered from the same
+        probes the JSON ``/health`` endpoint and the Monitoring gate use."""
+        report = check_health(settings=settings)
+        overall = _status_badge("passed" if report.healthy else "failed")
+        comp_rows = [
+            [
+                _esc(c.name),
+                _status_badge("passed" if c.healthy else "failed"),
+                _esc(c.detail or ""),
+            ]
+            for c in report.components
+        ]
+        body = (
+            '<div class="card"><h2>Overall status</h2>'
+            f"<p>Service <code>{_esc(report.service)}</code> &nbsp; {overall}</p>"
+            '<p class="meta">Each dependency is probed independently; a failed probe is reported '
+            "as an unhealthy component (it never crashes the dashboard). The JSON form is at "
+            "<code>/health</code> and per-service at <code>/health/{service}</code>.</p></div>"
+            '<div class="card"><h2>Components</h2>'
+            + _rows_table(["Component", "Status", "Detail"], comp_rows, "No components probed.")
+            + "</div>"
+        )
+        return _page("System Health", body)
 
     def _rows_table(headers: list[str], rows: list[list], empty: str = "No data.") -> str:
         head = "".join(f"<th>{_esc(h)}</th>" for h in headers)
@@ -2039,7 +2258,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/dashboard/backtests", response_class=HTMLResponse)
     def dashboard_backtests(user: str = Depends(require_dashboard_auth)) -> str:
+        from src.backtest.config import load_backtest_config
         from src.db.models import BacktestRun
+
+        try:
+            acct = load_backtest_config().account
+            init_eq, risk_pct = acct.initial_equity, acct.risk_pct
+        except Exception:  # noqa: BLE001
+            init_eq, risk_pct = 0.0, 0.0
 
         with session_scope() as session:
             rows = (
@@ -2069,7 +2295,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             f"<td>{ret:+.2%}</td><td>{dd:.2%}</td></tr>"
             for (rid, kind, created, passed, tc, er, pf, ret, dd) in runs
         )
-        body = f"""
+        equity_card = f"""
+<div class="card">
+  <h2>How runs are compared</h2>
+  <p>Every backtest starts from the <b>same fixed initial equity</b> of
+     <b>{init_eq:,.0f}</b> (config <code>configs/backtest.yaml → account.initial_equity</code>),
+     risking <b>{risk_pct * 100:.2f}%</b> per trade. Each run is <b>independent</b> — equity is
+     reset to this value at the start and compounds <i>only within</i> that run; it is
+     <b>never carried over</b> from a previous run. So all runs are directly comparable.</p>
+  <p class="meta">The ranking metrics (<b>Expectancy R</b>, <b>Return %</b>) are normalised and
+     equity-independent anyway, so the absolute equity is only a numeraire — change it in the
+     config and every run still moves together.</p>
+</div>"""
+        body = equity_card + f"""
 <div class="card">
   <h2>Backtests ({len(runs)})</h2>
   <form method="post" action="/api/backtests/run" style="margin-bottom:12px">
@@ -2077,7 +2315,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     <button class="btn" type="submit">&#9654; Run backtest</button>
   </form>
   <p class="meta">Runs execute in the background on the <code>backtest</code> worker; this
-     page reads the <code>backtest_runs</code> index. Profitability is judged authoritatively
+     page reads the <code>backtest_runs</code> index. Each run starts from the same fixed
+     initial equity ({init_eq:,.0f}). Profitability is judged authoritatively
      by the BT / WF / FEE / SLIP gates.</p>
   <table>
     <tr><th>Run</th><th>Kind</th><th>Created</th><th>Net&gt;0</th><th>Trades</th>
