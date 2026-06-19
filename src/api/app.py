@@ -18,7 +18,7 @@ import html
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Cookie, Depends, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import desc, select
 
@@ -456,6 +456,39 @@ def _env_chip() -> str:
         return '<span class="dot"></span>dashboard'
 
 
+_ENV_SELECT = (
+    '<div class="grp" style="flex-direction:row;align-items:center;gap:8px">'
+    '<span>Env</span>'
+    '<select id="envsel" title="Trading environment — applies to all statistics and is '
+    'remembered across pages">'
+    '<option value="all">All environments</option>'
+    '<option value="paper">Paper</option>'
+    '<option value="demo">Demo</option>'
+    '<option value="testnet">Testnet</option>'
+    '<option value="live">Live</option>'
+    "</select></div>"
+)
+
+_ENV_JS = """
+<script>
+(function(){
+ function gc(n){var m=document.cookie.match(new RegExp('(^| )'+n+'=([^;]+)'));return m?decodeURIComponent(m[2]):null;}
+ var sel=document.getElementById('envsel');if(!sel)return;
+ var u=new URL(window.location);
+ var env=u.searchParams.get('env')||gc('qbot_env')||'all';
+ sel.value=env;
+ document.cookie='qbot_env='+encodeURIComponent(env)+';path=/;max-age=31536000;samesite=lax';
+ sel.addEventListener('change',function(){
+  document.cookie='qbot_env='+encodeURIComponent(sel.value)+';path=/;max-age=31536000;samesite=lax';
+  var u2=new URL(window.location);
+  if(sel.value==='all')u2.searchParams.delete('env');else u2.searchParams.set('env',sel.value);
+  window.location=u2.toString();
+ });
+})();
+</script>
+"""
+
+
 def _page(title: str, body: str, *, env_chip: str = "") -> str:
     chip = env_chip or _env_chip()
     return (
@@ -470,10 +503,14 @@ def _page(title: str, body: str, *, env_chip: str = "") -> str:
         '<div class="main">'
         '<header class="topbar">'
         f"<div><div class='crumb'>Quant Trading Bot</div><h1>{_esc(title)}</h1></div>"
+        '<div style="display:flex;align-items:center;gap:14px">'
+        f"{_ENV_SELECT}"
         f'<div class="envchip">{chip}</div>'
-        "</header>"
+        "</div></header>"
         f'<div class="container">{body}</div>'
-        "</div></div></body></html>"
+        "</div></div>"
+        f"{_ENV_JS}"
+        "</body></html>"
     )
 
 
@@ -573,8 +610,10 @@ def _scope_selector(
             f'<select name="{name}" onchange="this.form.submit()">{opts}</select>'
         )
 
+    # Environment is a GLOBAL control in the topbar (persisted via cookie); it arrives here as a
+    # hidden field so changing Period/Symbol/… preserves the chosen environment on submit.
     grps = [
-        f'<div class="grp"><span>Environment</span>{_pillset("env", _ENV_LABELS, env)}</div>',
+        f'<input type="hidden" name="env" value="{_esc(env)}">',
         f'<div class="grp"><span>Period</span>{_pillset("period", _PERIODS, period)}</div>',
     ]
     if show_symbol:
@@ -783,11 +822,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ----- dashboard overview (authenticated) ------------------------------ #
     @app.get("/", response_class=HTMLResponse)
     def dashboard(
-        env: str = "all",
         period: str = "all",
         symbol: str = "",
         strategy: str = "",
         session: str = "",
+        env: str | None = None,
+        qbot_env: str = Cookie("all"),
         user: str = Depends(require_dashboard_auth),
     ) -> str:
         """Performance overview (TradeZella-style) over the chosen environment + period + scope.
@@ -797,6 +837,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """
         from src.api.stats import _PAPER_BASE_EQUITY, get_aggregate_stats
 
+        env = env or qbot_env
         try:
             agg = get_aggregate_stats(
                 period,
@@ -824,16 +865,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/dashboard/analytics", response_class=HTMLResponse)
     def dashboard_analytics(
-        env: str = "all",
         period: str = "all",
         symbol: str = "",
         strategy: str = "",
         session: str = "",
+        env: str | None = None,
+        qbot_env: str = Cookie("all"),
         user: str = Depends(require_dashboard_auth),
     ) -> str:
-        """Performance broken down by strategy / regime / session / symbol (Section 25)."""
-        from src.api.stats import _PAPER_BASE_EQUITY, get_aggregate_stats
+        """Breakdowns & comparison: performance sliced by strategy / regime / session / symbol,
+        with the P&L-by-period chart. (The Overview/Statistics pages carry the headline KPIs +
+        equity curve; this page is the *comparison* view — Section 25.)"""
+        from src.api.stats import get_aggregate_stats
 
+        env = env or qbot_env
         agg = get_aggregate_stats(
             period,
             env=env if env != "all" else None,
@@ -847,8 +892,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "/dashboard/analytics",
                 env=env, period=period, symbol=symbol, strategy=strategy, session=session,
             )
-            + _kpi_row(t)
-            + _interactive_charts(t.trade_series, _PAPER_BASE_EQUITY, cid="an")
+            + '<p class="meta">Comparison view — how performance splits across dimensions. '
+            "Headline KPIs + the equity curve live on the <a href=\"/\">Overview</a>; "
+            "single-symbol detail on <a href=\"/dashboard/stats\">Statistics</a>.</p>"
             + _breakdown_table("By Strategy", t.by_strategy, "Strategy")
             + _breakdown_table("By Regime", t.by_regime, "Regime")
             + _breakdown_table("By Session", t.by_session, "Session (UTC)")
@@ -1233,14 +1279,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ----- Execution Quality (#15) ---------------------------------------- #
     @app.get("/dashboard/execution", response_class=HTMLResponse)
     def dashboard_execution(
-        period: str = "all", user: str = Depends(require_dashboard_auth)
+        period: str = "all",
+        env: str | None = None,
+        qbot_env: str = Cookie("all"),
+        user: str = Depends(require_dashboard_auth),
     ) -> str:
-        from src.api.stats import compute_trading_stats, resolve_window
+        from src.api.stats import _apply_env, compute_trading_stats, resolve_window
         from src.db.models import PaperTradeRecord
 
+        env = env or qbot_env
+        env_scope = env if env != "all" else None
         window = resolve_window(period, None, None)
         with session_scope() as s:
-            q = select(PaperTradeRecord)
+            q = _apply_env(select(PaperTradeRecord), env_scope)
             if window.start:
                 q = q.where(PaperTradeRecord.created_at >= window.start)
             if window.end:
@@ -1252,7 +1303,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         avg_slip = (sum(t.slippage_cost for t in trades) / n) if n else 0.0
         body = (
             _period_selector("/dashboard/execution", period)
-            + _kpi_row(compute_trading_stats(window))
+            + _kpi_row(compute_trading_stats(window, env=env_scope))
             + _kv_card(
                 "Execution quality",
                 [
@@ -1356,10 +1407,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _page("Settings", body)
 
     # ----- dedicated Strategy / Regime / Session analytics (#12–14) ------- #
-    def _one_breakdown(title: str, attr: str, group_header: str, period: str) -> str:
+    def _one_breakdown(title: str, attr: str, group_header: str, period: str, env: str) -> str:
         from src.api.stats import get_aggregate_stats
 
-        t = get_aggregate_stats(period).trading
+        t = get_aggregate_stats(period, env=env if env != "all" else None).trading
         return (
             _period_selector(f"/dashboard/{attr}", period)
             + _kpi_row(t)
@@ -1367,21 +1418,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     @app.get("/dashboard/strategy", response_class=HTMLResponse)
-    def dashboard_strategy(period: str = "all", user: str = Depends(require_dashboard_auth)) -> str:
+    def dashboard_strategy(
+        period: str = "all",
+        env: str | None = None,
+        qbot_env: str = Cookie("all"),
+        user: str = Depends(require_dashboard_auth),
+    ) -> str:
         return _page(
-            "Strategy Analytics", _one_breakdown("By Strategy", "strategy", "Strategy", period)
+            "Strategy Analytics",
+            _one_breakdown("By Strategy", "strategy", "Strategy", period, env or qbot_env),
         )
 
     @app.get("/dashboard/regime", response_class=HTMLResponse)
-    def dashboard_regime(period: str = "all", user: str = Depends(require_dashboard_auth)) -> str:
-        return _page("Regime Analytics", _one_breakdown("By Regime", "regime", "Regime", period))
+    def dashboard_regime(
+        period: str = "all",
+        env: str | None = None,
+        qbot_env: str = Cookie("all"),
+        user: str = Depends(require_dashboard_auth),
+    ) -> str:
+        return _page(
+            "Regime Analytics",
+            _one_breakdown("By Regime", "regime", "Regime", period, env or qbot_env),
+        )
 
     @app.get("/dashboard/session-analytics", response_class=HTMLResponse)
     def dashboard_session_analytics(
-        period: str = "all", user: str = Depends(require_dashboard_auth)
+        period: str = "all",
+        env: str | None = None,
+        qbot_env: str = Cookie("all"),
+        user: str = Depends(require_dashboard_auth),
     ) -> str:
         return _page(
-            "Session Analytics", _one_breakdown("By Session", "session", "Session", period)
+            "Session Analytics",
+            _one_breakdown("By Session", "session", "Session", period, env or qbot_env),
         )
 
     @app.get("/api/me")
@@ -1416,7 +1485,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         return get_symbols_list()
 
-    @app.get("/api/stats/{symbol}")
+    @app.get("/api/stats/{symbol:path}")
     def per_symbol_stats(
         symbol: str,
         period: str = "all",
@@ -1431,11 +1500,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ----- stats dashboard pages ------------------------------------------- #
     @app.get("/dashboard/stats", response_class=HTMLResponse)
     def dashboard_stats(
-        env: str = "all",
         period: str = "all",
         symbol: str = "",
         strategy: str = "",
         session: str = "",
+        env: str | None = None,
+        qbot_env: str = Cookie("all"),
         user: str = Depends(require_dashboard_auth),
     ) -> str:
         from src.api.stats import (
@@ -1444,6 +1514,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             get_traded_symbols,
         )
 
+        env = env or qbot_env
         try:
             agg = get_aggregate_stats(
                 period,
@@ -1477,15 +1548,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body = f'<div class="card"><p class="meta">Error: {_esc(exc)}</p></div>'
         return _page("General Statistics", body)
 
-    @app.get("/dashboard/stats/{symbol}", response_class=HTMLResponse)
+    @app.get("/dashboard/stats/{symbol:path}", response_class=HTMLResponse)
     def dashboard_per_symbol_stats(
         symbol: str,
-        env: str = "all",
         period: str = "all",
+        env: str | None = None,
+        qbot_env: str = Cookie("all"),
         user: str = Depends(require_dashboard_auth),
     ) -> str:
         from src.api.stats import _PAPER_BASE_EQUITY, get_per_symbol_stats, get_traded_symbols
 
+        env = env or qbot_env
         try:
             stats = get_per_symbol_stats(symbol, period, env=env if env != "all" else None)
             t = stats["trading"]
@@ -2491,6 +2564,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _audit("run_backtest", target=label or "dashboard_backtest", actor=user, detail={})
         return {"job_id": job_id}
 
+    @app.post("/api/backtests/run-lake")
+    def run_lake_backtest_ep(user: str = Depends(require_dashboard_auth)) -> RedirectResponse:
+        """Enqueue a REAL-DATA backtest over the downloaded Bybit snapshot (Parity-Rule twin of
+        the reference backtest). Requires data to be downloaded first (Data page)."""
+        from src.jobs import JobQueue
+
+        JobQueue(settings).enqueue(
+            "run_lake_backtest",
+            {"config_path": "configs/data.bybit.yaml", "label": "dashboard_lake"},
+            requested_by=user,
+        )
+        _audit("run_lake_backtest", target="data.bybit", actor=user, detail={})
+        return RedirectResponse(url="/dashboard/backtests", status_code=303)
+
     @app.get("/api/backtests")
     def list_backtests(limit: int = 50, user: str = Depends(require_dashboard_auth)) -> list[dict]:
         from src.db.models import BacktestRun
@@ -2569,17 +2656,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
      equity-independent anyway, so the absolute equity is only a numeraire — change it in the
      config and every run still moves together.</p>
 </div>"""
-        body = equity_card + f"""
+        ref_name = "reference_momentum"
+        lake_syms = "—"
+        try:
+            from src.backtest.config import load_backtest_config as _lbc
+            from src.data.config import load_data_config as _ldc
+
+            ref_name = _lbc().reference_strategy.name
+            _dc = _ldc("configs/data.bybit.yaml")
+            lake_syms = ", ".join(_dc.active_symbols())
+        except Exception:  # noqa: BLE001
+            pass
+
+        what_card = f"""
 <div class="card">
-  <h2>Backtests ({len(runs)})</h2>
-  <form method="post" action="/api/backtests/run" style="margin-bottom:12px">
-    <input type="text" name="label" placeholder="label (optional)" style="width:220px">
-    <button class="btn" type="submit">&#9654; Run backtest</button>
+  <h2>What you're testing</h2>
+  <p>A backtest is a <b>historical replay</b> — it is <b>environment-independent</b> (not paper /
+     demo / live; those only matter for forward/live runs). Two data sources:</p>
+  <table>
+    <tr><th>Button</th><th>Strategy</th><th>Data</th><th>Symbols</th></tr>
+    <tr><td><b>Reference backtest</b></td><td><code>{_esc(ref_name)}</code></td>
+        <td>synthetic deterministic reference (no download needed) — a <i>logic</i> check, not
+            evidence of a real edge</td><td>built-in</td></tr>
+    <tr><td><b>Real-data backtest</b></td><td>enabled candidates</td>
+        <td>your downloaded Bybit snapshot (<code>configs/data.bybit.yaml</code>) — real prices
+            </td><td>{_esc(lake_syms)}</td></tr>
+  </table>
+  <form method="post" action="/api/backtests/run" style="display:inline;margin-right:8px">
+    <input type="text" name="label" placeholder="label (optional)" style="width:180px">
+    <button class="btn btn-neutral" type="submit">&#9654; Run reference backtest</button>
   </form>
-  <p class="meta">Runs execute in the background on the <code>backtest</code> worker; this
-     page reads the <code>backtest_runs</code> index. Each run starts from the same fixed
-     initial equity ({init_eq:,.0f}). Profitability is judged authoritatively
-     by the BT / WF / FEE / SLIP gates.</p>
+  <form method="post" action="/api/backtests/run-lake" style="display:inline">
+    <button class="btn" type="submit">&#9654; Run real-data backtest</button>
+  </form>
+  <p class="meta" style="margin-top:8px">Download real history first (Data page) for the
+     real-data run. Both start from the same fixed initial equity ({init_eq:,.0f}); profitability
+     is judged authoritatively by the BT / WF / FEE / SLIP gates.</p>
+</div>"""
+        body = equity_card + what_card + f"""
+<div class="card">
+  <h2>Backtest runs ({len(runs)})</h2>
+  <p class="meta">Background runs on the <code>backtest</code> worker; this table reads the
+     <code>backtest_runs</code> index. <b>Kind</b> shows the data source (reference vs lake).</p>
   <table>
     <tr><th>Run</th><th>Kind</th><th>Created</th><th>Net&gt;0</th><th>Trades</th>
         <th>Expectancy R</th><th>Profit Factor</th><th>Return</th><th>Max DD</th></tr>

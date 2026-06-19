@@ -92,3 +92,28 @@ def test_live_loop_runs_the_realtime_feed() -> None:
     assert result.executed > 0
     assert result.executed + result.rejected == sum(t.candidates for t in result.ticks)
     assert result.session.session_id.startswith("paper:")
+
+
+def test_continuous_feed_stops_on_should_stop() -> None:
+    """A continuous (poll_sec>0) session must terminate promptly when Stop is requested —
+    otherwise it would wait for new bars forever and never honour the dashboard Stop button."""
+    calls = {"n": 0}
+
+    def _stop() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 5  # allow a few cycles, then stop
+
+    feed = LiveCandidateFeed(
+        _cfg(),
+        feed_source=ScriptedFeedSource(_new_bars(4)),
+        rest_source=DeterministicSource(EX),
+        timeframe=TF,
+        symbols=[SYM],
+        seed_end_ms=SEED_END,
+        poll_sec=2.0,  # continuous: would otherwise wait for new bars
+        should_stop=_stop,
+        max_groups=None,  # unbounded → only Stop ends it
+    )
+    groups = list(feed.groups())  # must return (not hang)
+    assert isinstance(groups, list)
+    assert calls["n"] > 5  # the stop predicate was polled and eventually halted the stream

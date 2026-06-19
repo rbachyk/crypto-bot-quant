@@ -85,6 +85,7 @@ class LiveCandidateFeed:
         poll_sec: float = 0.0,
         seed_end_ms: int | None = None,
         equity: float = 10_000.0,
+        should_stop=None,
     ) -> None:
         self.settings = settings or get_settings()
         self.data_cfg = data_cfg
@@ -95,9 +96,12 @@ class LiveCandidateFeed:
         self.symbols = symbols or data_cfg.active_symbols()
         self.window_bars = window_bars
         self.max_groups = max_groups
+        # poll_sec > 0 makes this a CONTINUOUS stream: when no symbol has a new closed bar it
+        # waits and re-polls (a real demo/live session), instead of returning after one pass.
         self.poll_sec = poll_sec
         self.seed_end_ms = seed_end_ms
         self.equity = equity
+        self._should_stop = should_stop  # polled during the wait so Stop is responsive
         self._reader = RollingReader(max_bars=window_bars * 2)
 
         from src.backtest.config import load_backtest_config
@@ -174,6 +178,8 @@ class LiveCandidateFeed:
         last_ts = dict.fromkeys(self.symbols, -1)
         emitted = 0
         while self.max_groups is None or emitted < self.max_groups:
+            if self._should_stop is not None and self._should_stop():
+                return  # operator pressed Stop (dashboard) → end the stream cleanly
             now = int(time.time() * 1000)
             if self.data_manager is not None and self.data_manager.poll(now).exchange_halt:
                 return
@@ -225,6 +231,12 @@ class LiveCandidateFeed:
                     return
             if not progressed:
                 if self.poll_sec > 0:
-                    time.sleep(self.poll_sec)
+                    # Wait for the next closed bar, but in 1s slices so a Stop is honoured fast.
+                    waited = 0.0
+                    while waited < self.poll_sec:
+                        if self._should_stop is not None and self._should_stop():
+                            return
+                        time.sleep(min(1.0, self.poll_sec - waited))
+                        waited += 1.0
                 else:
                     return  # nothing new and not polling → finite stream (tests / one-shot)

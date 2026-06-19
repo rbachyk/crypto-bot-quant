@@ -694,7 +694,11 @@ def _run_live_session(ctx: JobContext, params: dict) -> dict:
     # By default run the ACTIVE PROMOTED ENSEMBLE (top-N strategies) — demo behaves exactly like
     # live. An explicit candidate_id pins the run to one strategy instead.
     multi_strategy = candidate_id is None
-    max_ticks = int(params.get("max_ticks") or 200)
+    # Continuous by default: max_ticks unset → run until the operator presses Stop. A realtime
+    # run polls for new closed bars (poll_sec) instead of exiting when none are available.
+    max_ticks = int(params["max_ticks"]) if params.get("max_ticks") else None
+    poll_sec = float(params.get("poll_sec") or (10.0 if realtime else 0.0))
+    prog_total = max_ticks or 0  # 0 = unbounded (the dashboard shows the live tick count)
 
     if multi_strategy:
         from src.paper.lake import resolve_active_strategies
@@ -712,14 +716,15 @@ def _run_live_session(ctx: JobContext, params: dict) -> dict:
             )
     ctx.log(
         f"starting live session: env={settings.exchange_env} venue_mode={mode} "
-        f"realtime={realtime} transport={transport} max_ticks={max_ticks} "
+        f"realtime={realtime} transport={transport} "
+        f"max_ticks={'continuous' if max_ticks is None else max_ticks} poll_sec={poll_sec} "
         f"multi_strategy={multi_strategy}"
     )
-    ctx.progress(0, max_ticks, "starting live loop")
+    ctx.progress(0, prog_total, "starting live loop (press Stop to end)")
 
     def _on_tick(tick, i: int) -> None:
         ctx.progress(
-            i + 1, max_ticks, f"tick {i + 1}: {tick.executed} exec / {tick.rejected} rej"
+            i + 1, prog_total, f"tick {i + 1}: {tick.executed} exec / {tick.rejected} rej"
         )
 
     result = run_replay_session(
@@ -732,13 +737,14 @@ def _run_live_session(ctx: JobContext, params: dict) -> dict:
         transport=transport,
         realtime=realtime,
         max_ticks=max_ticks,
+        poll_sec=poll_sec,
         on_tick=_on_tick,
         should_stop=ctx.is_cancelled,  # dashboard Stop → cancel flag → clean halt
     )
     session_id = persist_live_run(result, settings)
     net = sum(t.pnl for t in result.session.trades)
     status = "halted/stopped" if result.halted else "completed"
-    ctx.progress(len(result.ticks), max_ticks, f"{status}: {result.executed} executed")
+    ctx.progress(len(result.ticks), prog_total, f"{status}: {result.executed} executed")
     return {
         "message": f"live session {session_id} {status}: {result.executed} executed / "
         f"{result.rejected} rejected, net_pnl={net:.2f}",

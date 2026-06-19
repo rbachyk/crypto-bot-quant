@@ -212,6 +212,7 @@ def run_replay_session(
     candidate_id: str | None = None,
     multi_strategy: bool = False,
     max_ticks: int | None = None,
+    poll_sec: float = 0.0,
     settings: Settings | None = None,
     guard: LiveOrderGuard | None = None,
     transport: str | None = None,
@@ -277,6 +278,8 @@ def run_replay_session(
             strategies=strategies,
             settings=settings,
             max_groups=max_ticks,
+            poll_sec=poll_sec,  # >0 → continuous session (waits for new bars)
+            should_stop=should_stop,  # responsive Stop during the wait
         )
         # The real-time feed owns the data-manager halt; don't double-poll at the loop level.
         loop = LiveLoop(mode=mode, settings=settings, guard=guard)
