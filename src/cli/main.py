@@ -375,6 +375,19 @@ def live(
 
 
 @app.command()
+def reports(
+    name: str = typer.Option("", "--name", help="one report name ('' = all standard reports)"),
+) -> None:
+    """Generate the Section-34 named reports (live / online_learning / rl / live_readiness / …)."""
+    from src.reports import generate_report, generate_standard_reports
+
+    if name:
+        typer.echo(generate_report(name))
+    else:
+        typer.echo(json.dumps(generate_standard_reports(), indent=2))
+
+
+@app.command()
 def config() -> None:
     """Print the active (non-secret) configuration and versions."""
     s = get_settings()

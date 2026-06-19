@@ -290,6 +290,16 @@ def build_paper_report(
 
 
 def write_report(report: PaperReport, path: Path) -> None:
-    """Write the paper report to a JSON file."""
+    """Write the paper report to a JSON file (Section-34 envelope)."""
+    from src.reporting import wrap_report
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
+    enveloped = wrap_report(
+        report.to_dict(),
+        report_type="paper",
+        methodology="Full paper pipeline (ranking → risk → execution → SimulatedVenue) over the "
+        "candidate stream; PAPER-A asserts pipeline correctness, PAPER-B trade volume vs backtest.",
+        limitations="Shadow-only; simulated fills; paper gates verify correctness, not profit.",
+        recommendations="Advance to live only after the full gate chain + sign-off.",
+    )
+    path.write_text(json.dumps(enveloped, indent=2, default=str), encoding="utf-8")

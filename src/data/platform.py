@@ -115,13 +115,24 @@ class DataPlatform:
         reports_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
         path = reports_dir / f"quality_{stamp}.json"
-        payload = {
-            "data_version": self.cfg.data_version,
-            "dataset_version": dataset_version,
-            "versions": self.settings.versions(),
-            **validation.to_dict(),
-        }
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        from src.reporting import wrap_report
+
+        payload = wrap_report(
+            {
+                "data_version": self.cfg.data_version,
+                "dataset_version": dataset_version,
+                **validation.to_dict(),
+            },
+            report_type="data_quality",
+            methodology="Per-series coverage + cross-series alignment + clock-drift checks over "
+            "the coverage window (Section 23); missing/duplicate/misaligned candles fail.",
+            limitations="Validates the stored snapshot; live-stream integrity is the data "
+            "manager's job.",
+            recommendations="Repair safe gaps; quarantine symbols with insufficient history.",
+            period={"window": validation.window},
+            versions=self.settings.versions(),
+        )
+        path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
 
         with session_scope() as session:
             session.add(
