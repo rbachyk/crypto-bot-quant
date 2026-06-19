@@ -8,7 +8,10 @@ protection (Section 2.2). Every order carries the bot's ownership prefix as
 ``clientOrderId`` (Section 7).
 
 Safety, by construction:
-* Defaults to the **testnet** sandbox (``settings.exchange_env``); no real funds.
+* ``settings.exchange_env`` selects the Bybit environment — ``testnet`` (separate test network),
+  ``demo`` (mainnet data + a virtual-funds demo account, ``api-demo.bybit.com``), or ``live``
+  (real money). testnet and demo are different endpoints with different keys; only ``live`` is
+  real money (``is_live``). Defaults to testnet; no real funds unless ``EXCHANGE_ENV=live``.
 * Refuses to construct without API credentials (no anonymous trading).
 * For a **live** (mainnet, real-money) environment it refuses to place any order unless
   an injected activation guard authorises it (wired by M8's LiveActivationGuard). Testnet
@@ -29,6 +32,30 @@ from src.execution.venue import BracketResult, Fill, Venue, VenuePosition
 
 # Order types that rest as maker (no taker slippage).
 _MAKER_TYPES = (OrderType.POST_ONLY, OrderType.LIMIT)
+
+VALID_EXCHANGE_ENVS = ("live", "testnet", "demo")
+
+
+def apply_exchange_env(ex: Any, exchange_env: str) -> None:
+    """Point a ccxt client at the right Bybit environment (Section 6).
+
+    Bybit has THREE distinct environments — they are not interchangeable (different
+    endpoints, different API keys):
+
+    * ``live``    — real-money mainnet (``api.bybit.com``); no change to the client.
+    * ``testnet`` — the separate **test network** (``testnet.bybit.com``); virtual funds,
+      its own keys. ``set_sandbox_mode(True)``.
+    * ``demo``    — Bybit **demo trading**: mainnet market data + a virtual-funds demo
+      account (``api-demo.bybit.com``); demo keys from the main site. ``enable_demo_trading``.
+    """
+    if exchange_env == "demo":
+        if not hasattr(ex, "enable_demo_trading"):
+            raise ValueError(
+                "this ccxt build has no demo-trading support; upgrade ccxt or use testnet"
+            )
+        ex.enable_demo_trading(True)
+    elif exchange_env != "live" and hasattr(ex, "set_sandbox_mode"):
+        ex.set_sandbox_mode(True)  # testnet — no real funds
 
 
 class LiveOrderGuard(Protocol):
@@ -51,7 +78,7 @@ class CcxtLiveVenue:
         self.meta = meta
         self.settings = settings or get_settings()
         self.exchange_id = self.settings.exchange_id
-        self.exchange_env = self.settings.exchange_env  # "testnet" | "live"
+        self.exchange_env = self.settings.exchange_env  # "live" | "testnet" | "demo"
         self._guard = guard
         self.open_orders: dict[str, Order] = {}
         self.positions: dict[str, VenuePosition] = {}
@@ -76,12 +103,11 @@ class CcxtLiveVenue:
                     "options": {"defaultType": "swap"},
                 }
             )
-            if self.exchange_env != "live" and hasattr(self._ex, "set_sandbox_mode"):
-                self._ex.set_sandbox_mode(True)  # TESTNET — no real funds
+            apply_exchange_env(self._ex, self.exchange_env)
 
     @property
     def is_live(self) -> bool:
-        """Real-money mainnet (not testnet)."""
+        """Real-money mainnet — NOT testnet and NOT demo (both use virtual funds)."""
         return self.exchange_env == "live"
 
     # -- placement ------------------------------------------------------- #

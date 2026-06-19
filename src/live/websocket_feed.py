@@ -89,10 +89,11 @@ class WebsocketFeedSource:
         if self._watcher is None:
             import ccxt.pro as ccxtpro  # noqa: PLC0415 - optional ws dependency, loaded lazily
 
+            from src.execution.live_venue import apply_exchange_env
+
             klass = getattr(ccxtpro, self.exchange_id)
             self._ex = klass({"enableRateLimit": True, "options": {"defaultType": "swap"}})
-            if self.exchange_env != "live" and hasattr(self._ex, "set_sandbox_mode"):
-                self._ex.set_sandbox_mode(True)
+            apply_exchange_env(self._ex, self.exchange_env)  # live | testnet | demo
             self._watcher = lambda sym: self._ex.watch_ohlcv(sym, self.timeframe)
         try:
             await asyncio.gather(*(self._watch(s) for s in self.symbols), return_exceptions=True)

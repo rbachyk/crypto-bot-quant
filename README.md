@@ -120,10 +120,15 @@ loop like the kill switch. Add **`--realtime`** to drive the candidate stream fr
 itself (rolling window → the one feature pipeline → the strategy on each newly-closed bar) instead
 of snapshot replay — continuous live operation (Section 35), still venue-gated.
 
-- `paper` uses the offline `SimulatedVenue`; `testnet` uses the real ccxt venue in sandbox
-  mode (`CcxtLiveVenue`, default `EXCHANGE_ENV=testnet`) — orders are placed for real but
-  with no real funds; the entry carries its exchange-resident stop-loss/take-profit
-  **atomically** (Section 2.2) and the bot's ownership prefix as `clientOrderId` (Section 7).
+- `--mode` selects the **venue**: `paper` = offline `SimulatedVenue`; `testnet`/`live` = the real
+  ccxt venue (`CcxtLiveVenue`). The **endpoint** is set separately by **`EXCHANGE_ENV`** — three
+  *different* Bybit environments with different keys: **`testnet`** (`testnet.bybit.com`),
+  **`demo`** (`api-demo.bybit.com` — mainnet market data + a virtual-funds demo account; use this
+  if your keys came from Bybit *demo trading*), or **`live`** (real money). So to trade on your
+  demo account: set `EXCHANGE_ENV=demo` + `EXCHANGE_API_KEY/SECRET`, then `--mode testnet`.
+  Either way the entry carries its exchange-resident stop-loss/take-profit **atomically**
+  (Section 2.2) and the ownership prefix as `clientOrderId` (Section 7); only `EXCHANGE_ENV=live`
+  is real money (and is additionally gated).
 - `live` (real-money mainnet) order placement passes through the **`LiveActivationGuard`**,
   which refuses unless ALL hold: `TRADING_MODE=LIVE` + `APP_ENV=production` +
   `ENABLE_LIVE_TRADING=true`; **every `blocks_live` gate PASSes** (Road to Live = 100%); an

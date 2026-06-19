@@ -199,3 +199,45 @@ def test_emergency_close_requires_confirmation() -> None:
     venue = _venue(FakeCcxt())
     with pytest.raises(PermissionError, match="confirmation"):
         venue.emergency_close_all(confirm=False)
+
+
+class _EnvClient:
+    """Records which Bybit-environment switch a ccxt client received."""
+
+    def __init__(self) -> None:
+        self.sandbox = None
+        self.demo = None
+
+    def set_sandbox_mode(self, on):
+        self.sandbox = on
+
+    def enable_demo_trading(self, on):
+        self.demo = on
+
+
+def test_apply_exchange_env_routes_to_the_right_environment() -> None:
+    from src.execution.live_venue import apply_exchange_env
+
+    testnet = _EnvClient()
+    apply_exchange_env(testnet, "testnet")
+    assert testnet.sandbox is True and testnet.demo is None  # testnet.bybit.com
+
+    demo = _EnvClient()
+    apply_exchange_env(demo, "demo")
+    assert demo.demo is True and demo.sandbox is None  # api-demo.bybit.com (NOT testnet)
+
+    live = _EnvClient()
+    apply_exchange_env(live, "live")
+    assert live.sandbox is None and live.demo is None  # mainnet, no switch
+
+
+def test_demo_env_is_not_treated_as_live() -> None:
+    venue = CcxtLiveVenue(
+        load_metadata_config(), _testnet_settings(exchange_env="demo"), client=FakeCcxt()
+    )
+    assert venue.is_live is False  # demo uses virtual funds → no activation guard required
+
+
+def test_invalid_exchange_env_is_rejected() -> None:
+    with pytest.raises(ValueError, match="EXCHANGE_ENV"):
+        Settings(_env_file=None, exchange_env="sandbox")

@@ -174,6 +174,13 @@ class Settings(BaseSettings):
                 f"(got APP_ENV={self.app_env.value})."
             )
 
+        # Exchange environment must be one of the three distinct Bybit envs (Section 6).
+        if self.exchange_env not in ("live", "testnet", "demo"):
+            errors.append(
+                f"EXCHANGE_ENV={self.exchange_env!r} is invalid; must be 'live', 'testnet', or "
+                "'demo' (testnet and demo are different environments with different endpoints)."
+            )
+
         # Research environment must not carry live trading keys (Appendix B.1).
         if self.app_env is AppEnv.RESEARCH and (self.exchange_api_key or self.exchange_api_secret):
             errors.append(
