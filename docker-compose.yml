@@ -19,6 +19,10 @@
 #
 # Services build from a single image and differ only by `command`.
 
+# Container env. The whole `.env` is loaded via `env_file` below (so EXCHANGE_ENV,
+# EXCHANGE_API_KEY/SECRET, ALERT_*, ENABLE_* … all reach the app). The keys here only PIN the
+# infra URLs to the compose service names and re-assert safe defaults; `environment` overrides
+# `env_file`, so a stray DATABASE_URL=localhost in `.env` can never point a container at itself.
 x-app-env: &app-env
   APP_ENV: ${APP_ENV:-local}
   TRADING_MODE: ${TRADING_MODE:-PAPER}
@@ -34,6 +38,11 @@ x-app-build: &app-build
   build:
     context: .
     dockerfile: Dockerfile
+  # Load the operator's `.env` into every app container (required:false so a fresh checkout
+  # without a `.env` still builds — values then come from `environment` defaults above).
+  env_file:
+    - path: .env
+      required: false
   # Auto-restart on crash/OOM (DEPLOY gate). Merged into every app service via <<: *app-build.
   restart: unless-stopped
 
