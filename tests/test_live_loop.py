@@ -35,6 +35,17 @@ OI_TF = "1h"
 FUND = "8h"
 
 
+@pytest.fixture(autouse=True)
+def _clear_kill_switch():
+    """The kill switch is global file/redis state; ensure it is clear so these loop tests
+    are not affected by a lingering engagement from another test file (full-suite ordering)."""
+    from src.killswitch import KillSwitch
+
+    KillSwitch().disengage()
+    yield
+    KillSwitch().disengage()
+
+
 def _seed(store: SeriesStore, start: int, end: int) -> None:
     src = DeterministicSource(EX)
     for dt, tf in (
