@@ -469,6 +469,26 @@ _ENV_SELECT = (
     "</select></div>"
 )
 
+_AUTOREFRESH_JS = """
+<script>
+(function(){
+ // Auto-refresh while any job chip shows QUEUED/RUNNING, so statuses update without a manual
+ // reload. Pauses when the user is typing/selecting, and stops once nothing is active.
+ var active=false;
+ document.querySelectorAll('.badge').forEach(function(b){
+  var t=b.textContent.trim().toUpperCase();
+  if(t.indexOf('RUNNING')>=0||t.indexOf('QUEUED')>=0)active=true;
+ });
+ if(!active)return;
+ setInterval(function(){
+  var a=document.activeElement;
+  if(a&&(a.tagName==='INPUT'||a.tagName==='SELECT'||a.tagName==='TEXTAREA'))return;
+  location.reload();
+ },6000);
+})();
+</script>
+"""
+
 _ENV_JS = """
 <script>
 (function(){
@@ -510,6 +530,7 @@ def _page(title: str, body: str, *, env_chip: str = "") -> str:
         f'<div class="container">{body}</div>'
         "</div></div>"
         f"{_ENV_JS}"
+        f"{_AUTOREFRESH_JS}"
         "</body></html>"
     )
 
@@ -842,21 +863,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         rows = []
         for e in get_environment_summary():
-            here = e["env"] == current
+            env_name = str(e["env"])
+            here = env_name == current
+            reset_btn = (
+                f'<form method="post" action="/api/live/reset?env={env_name}&confirm=true" '
+                'style="display:inline" onsubmit="return confirm(\'Zero all '
+                f"{env_name} statistics? This cannot be undone.');\">"
+                '<button class="btn btn-danger" type="submit" '
+                'style="padding:2px 10px;font-size:11px">Reset</button></form>'
+                if e["trades"]
+                else "—"
+            )
             rows.append(
                 [
-                    (f'<b>{_esc(e["env"])}</b>' if here else _esc(e["env"])),
+                    (f"<b>{_esc(env_name)}</b>" if here else _esc(env_name)),
                     e["trades"],
                     _money(e["net_pnl"]),
                     f'{e["win_rate"] * 100:.1f}%',
+                    reset_btn,
                 ]
             )
         return (
             '<div class="card"><h2>Environments (separated)</h2>'
-            + _rows_table(["Environment", "Trades", "Net P&L", "Win rate"], rows, "No trades yet.")
+            + _rows_table(
+                ["Environment", "Trades", "Net P&L", "Win rate", ""], rows, "No trades yet."
+            )
             + '<p class="meta">Each environment\'s statistics are kept separate by session tag — '
-            "pick one in the Environment selector above. Demo can be zeroed on the "
-            "<a href=\"/dashboard/live\">Live Trading</a> page.</p></div>"
+            "pick one in the Environment selector above. <b>Reset</b> zeroes that environment only "
+            "(paper = everything that is not demo/testnet/live).</p></div>"
         )
 
     # ----- dashboard overview (authenticated) ------------------------------ #
@@ -1351,17 +1385,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/live/reset")
     def live_reset(
-        confirm: bool = False, user: str = Depends(require_dashboard_auth)
+        env: str = "demo",
+        confirm: bool = False,
+        user: str = Depends(require_dashboard_auth),
     ) -> RedirectResponse:
-        """Zero the demo environment's statistics (runs/trades/logs/explainability)."""
-        if not confirm:
-            raise HTTPException(status_code=400, detail="reset requires confirm=true")
+        """Zero ONE environment's statistics (runs/trades/logs/explainability). ``env`` is one of
+        paper/demo/testnet/live; ``paper`` clears every non-(demo/testnet/live) session."""
+        from src.api.stats import ENVIRONMENTS
         from src.live.admin import reset_env_stats
 
-        removed = reset_env_stats("demo")
-        _audit(
-            "reset_env_stats", target="demo", actor=user, detail={"removed": removed.to_dict()}
-        )
+        if not confirm:
+            raise HTTPException(status_code=400, detail="reset requires confirm=true")
+        if env not in ENVIRONMENTS:
+            raise HTTPException(status_code=400, detail=f"unknown environment {env!r}")
+        removed = reset_env_stats(env)
+        _audit("reset_env_stats", target=env, actor=user, detail={"removed": removed.to_dict()})
         return RedirectResponse(url="/dashboard/live", status_code=303)
 
     # ----- Execution Quality (#15) ---------------------------------------- #

@@ -672,6 +672,22 @@ def _run_lake_strategy_validation(ctx: JobContext, params: dict) -> dict:
     validations = validate_all_on_lake(data_cfg, timeframe=timeframe)
     written = persist_validations(validations, data_source="lake")
     promoted = [v.candidate_id for v in validations if v.promoted]
+    # Surface every verdict in the log — a shelve is a normal result, not a failure, and the
+    # operator needs to SEE why nothing got promoted (e.g. "insufficient trades on real data").
+    for v in validations:
+        if v.promoted:
+            ctx.log(f"PROMOTED {v.candidate_id} on real data")
+        else:
+            why = "; ".join(v.shelved_reasons) or "did not clear gates"
+            ctx.log(f"SHELVED {v.candidate_id}: {why}", level="WARNING")
+    if not promoted:
+        ctx.log(
+            f"0/{written} promoted on real data — the candidates did not clear the gates on this "
+            "snapshot/timeframe (often too few trades or no real edge). Try more history (the "
+            "window is now ~5.5y once re-downloaded) or a different timeframe; tune candidates in "
+            "configs/strategies.yaml.",
+            level="WARNING",
+        )
     ctx.progress(1, 1, f"{len(promoted)}/{written} promoted on real data")
     return {
         "message": f"real-data validation: {len(promoted)}/{written} promoted",

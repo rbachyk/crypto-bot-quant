@@ -39,14 +39,19 @@ data:
 
   funding_interval_hours: 8
 
-  required_series:
-    ["ohlcv", "mark", "index", "funding", "open_interest", "spread"]
+  # Multi-year history: open_interest and spread are EXCLUDED — Bybit only serves recent OI
+  # (~days) and spread is a live snapshot, so requiring them caps the window to a few days and
+  # fails validation. The feature pipeline defaults oi_change/spread to neutral when absent, so
+  # price/basis/funding strategies validate over years. OHLCV/mark/index/funding are continuous
+  # back to listing. (For a recent OI/spread study, narrow the window + re-add those series.)
+  required_series: ["ohlcv", "mark", "index", "funding"]
 
-  # Default example window. Keep ``as_of`` recent (within OI retention) or pass
-  # --as-of/--days on the CLI; an older window legitimately has missing OI.
+  # ~5.5 years of history so validation has a real sample (not a 5-day window). The download is
+  # large and runs in the background; symbols listed later than the start simply have a shorter
+  # series (the backtest uses whatever each symbol has).
   window:
-    as_of: "2026-06-19T18:00:00Z"
-    duration_hours: 120 # 5 days (within Bybit's ~8-day 1h-OI retention)
+    as_of: "2026-06-19T00:00:00Z"
+    duration_hours: 48000 # ~5.5 years → back to ~Jan 2021
 
   validation:
     max_unfilled_gap_bars: 0

@@ -27,10 +27,20 @@ from src.db.models import (
 # The four tables a session writes; all keyed by the env-prefixed session_id.
 _SESSION_TABLES = (PaperRun, PaperTradeRecord, DecisionLog, TradeExplainabilityRow)
 
+# Real-venue env prefixes; everything else is the "paper" environment (matches src.api.stats).
+_REAL_ENV_PREFIXES = ("demo:", "testnet:", "live:")
 
-def _prefix(env: str) -> str:
-    """SQL LIKE pattern matching every session_id for one environment (``demo:%``)."""
-    return f"{env}:%"
+
+def _scope_env(query, model, env: str):
+    """Scope a query on ``model`` to one environment by session_id — the SAME definition the
+    dashboard stats use: ``paper`` = NOT a demo/testnet/live session; else ``{env}:`` prefix."""
+    if not env or env == "all":
+        return query
+    if env == "paper":
+        for pfx in _REAL_ENV_PREFIXES:
+            query = query.where(~model.session_id.like(f"{pfx}%"))
+        return query
+    return query.where(model.session_id.like(f"{env}:%"))
 
 
 @dataclass(slots=True)
@@ -60,11 +70,10 @@ class EnvStatsSummary:
 
 def summarize_env_stats(env: str = "demo") -> EnvStatsSummary:
     """Count the persisted rows for one environment (``demo`` by default)."""
-    like = _prefix(env)
     with session_scope() as db:
         counts = [
             db.execute(
-                select(func.count()).select_from(model).where(model.session_id.like(like))
+                _scope_env(select(func.count()).select_from(model), model, env)
             ).scalar_one()
             for model in _SESSION_TABLES
         ]
@@ -74,11 +83,11 @@ def summarize_env_stats(env: str = "demo") -> EnvStatsSummary:
 def reset_env_stats(env: str = "demo") -> EnvStatsSummary:
     """Delete every persisted row for one environment and return what was removed.
 
-    Only rows whose ``session_id`` starts with ``"{env}:"`` are touched — paper/testnet/live
-    history is left untouched. Safe to call when there is nothing to delete (returns zeros)."""
+    Scoped exactly like the dashboard stats view: resetting ``demo`` touches only ``demo:``
+    sessions; resetting ``paper`` clears every non-(demo/testnet/live) session. Other environments
+    are left untouched. Safe to call when there is nothing to delete (returns zeros)."""
     removed = summarize_env_stats(env)
-    like = _prefix(env)
     with session_scope() as db:
         for model in _SESSION_TABLES:
-            db.execute(delete(model).where(model.session_id.like(like)))
+            db.execute(_scope_env(delete(model), model, env))
     return removed
