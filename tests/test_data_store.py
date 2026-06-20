@@ -28,6 +28,16 @@ def test_write_read_roundtrip(tmp_path) -> None:
     assert back[0]["close"] == 100.0
 
 
+def test_latest_ts(tmp_path) -> None:
+    store = SeriesStore(tmp_path)
+    assert store.latest_ts(KEY) is None  # empty
+    # Span two months so the newest-partition shortcut is exercised.
+    jan = 1_700_000_000_000 - (1_700_000_000_000 % 60_000)
+    feb = jan + 40 * 86_400_000
+    store.write(KEY, [_row(jan), _row(jan + 60_000), _row(feb), _row(feb + 60_000)])
+    assert store.latest_ts(KEY) == feb + 60_000  # the most recent stored timestamp
+
+
 def test_write_is_append_only_and_dedups(tmp_path) -> None:
     store = SeriesStore(tmp_path)
     store.write(KEY, [_row(0, close=100.0)])

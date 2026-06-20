@@ -54,6 +54,13 @@ class DataPlatform:
     def download(self, key: SeriesKey) -> int:
         return self.ingestor.download(key, self.cfg.window_start_ms, self.cfg.window_end_ms)
 
+    def update_incremental(self, key: SeriesKey) -> int:
+        """Download only the candles that appeared since the last download (the tail up to the
+        window end) — the efficient refresh that avoids re-fetching years of existing data."""
+        return self.ingestor.update_incremental(
+            key, self.cfg.window_start_ms, self.cfg.window_end_ms
+        )
+
     def download_all(self) -> int:
         """Idempotent full download of every required series over the window."""
         written = 0

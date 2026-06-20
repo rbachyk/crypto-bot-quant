@@ -1167,8 +1167,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
         body = (
             '<div class="card"><h2>Download real market data</h2>'
-            '<form method="post" action="/api/data/download" style="margin-bottom:8px">'
-            '<button class="btn" type="submit">&#11015; Download real history + build dataset'
+            '<form method="post" action="/api/data/download" style="display:inline;'
+            'margin-right:8px"><button class="btn" type="submit">&#11015; Update data (incremental)'
+            "</button></form>"
+            '<form method="post" action="/api/data/download?full=true" style="display:inline" '
+            "onsubmit=\"return confirm('Force a FULL re-download of the whole window? Slow — only "
+            "needed to repair corrupt data.');\">"
+            '<button class="btn btn-neutral" type="submit">&#11119; Force full re-download'
             "</button></form>"
             + job_line
             + '<p class="meta">Fetches REAL Bybit history (ccxt) for the symbols/window in '
@@ -1192,16 +1197,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _page("Data Coverage", body)
 
     @app.post("/api/data/download")
-    def download_data(user: str = Depends(require_dashboard_auth)) -> RedirectResponse:
-        """Enqueue a real-data download + dataset build (Bybit ccxt source, bybit config)."""
+    def download_data(
+        full: bool = False, user: str = Depends(require_dashboard_auth)
+    ) -> RedirectResponse:
+        """Enqueue a real-data download + dataset build (Bybit ccxt source, bybit config).
+        Incremental by default (only candles since the last download); ``full=true`` re-fetches."""
         from src.jobs import JobQueue
 
         JobQueue(settings).enqueue(
             "build_dataset_version",
-            {"config_path": "configs/data.bybit.yaml"},
+            {"config_path": "configs/data.bybit.yaml", "full": full},
             requested_by=user,
         )
-        _audit("build_dataset_version", target="data.bybit", actor=user, detail={})
+        _audit("build_dataset_version", target="data.bybit", actor=user, detail={"full": full})
         return RedirectResponse(url="/dashboard/data-coverage", status_code=303)
 
     # ----- Universe (#3) -------------------------------------------------- #

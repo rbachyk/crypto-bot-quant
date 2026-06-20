@@ -87,6 +87,20 @@ class SeriesStore:
     def timestamps(self, key: SeriesKey, start_ms: int, end_ms: int) -> set[int]:
         return {r["ts"] for r in self.read(key, start_ms, end_ms)}
 
+    def latest_ts(self, key: SeriesKey) -> int | None:
+        """The most recent stored timestamp for ``key`` (``None`` if empty). Reads only the
+        newest partition file, so it stays cheap for multi-year series (used by incremental
+        download to resume from where the last download left off)."""
+        sdir = self._series_dir(key)
+        if not sdir.exists():
+            return None
+        for year_dir in sorted((d for d in sdir.iterdir() if d.is_dir()), reverse=True):
+            for mfile in sorted(year_dir.glob("*.parquet"), reverse=True):
+                rows = self._read_file(mfile)
+                if rows:
+                    return max(int(r["ts"]) for r in rows)
+        return None
+
     def count(self, key: SeriesKey, start_ms: int | None = None, end_ms: int | None = None) -> int:
         return len(self.read(key, start_ms, end_ms))
 

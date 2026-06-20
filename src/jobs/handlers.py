@@ -296,14 +296,18 @@ def _build_dataset_version(ctx: JobContext, params: dict) -> dict:
             level="WARNING",
         )
 
-    # --- download every required series with progress --------------------------------------- #
+    # --- download with progress (INCREMENTAL by default: only candles that appeared since the
+    # last download; an empty store fetches the full window. ``full=true`` forces a re-fetch). --- #
+    full = bool(params.get("full"))
     keys = [k for k in cfg.all_required_keys() if k.symbol in available]
     written = 0
+    mode = "full" if full else "incremental (new candles since last download)"
+    ctx.log(f"downloading {len(keys)} series — {mode}")
     for i, key in enumerate(keys):
         ctx.check_cancelled()
-        written += platform.download(key)
-        ctx.progress(i + 1, len(keys), f"downloaded {key.label()} ({written} rows)")
-    ctx.log(f"downloaded {written} rows across {len(keys)} series")
+        written += platform.download(key) if full else platform.update_incremental(key)
+        ctx.progress(i + 1, len(keys), f"{key.label()}: {written} new rows")
+    ctx.log(f"downloaded {written} NEW rows across {len(keys)} series ({mode})")
 
     # --- validate + snapshot, with concrete diagnostics on failure -------------------------- #
     run = platform.run_full(repair=True, source_jobs=["job:build_dataset_version"])

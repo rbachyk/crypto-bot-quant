@@ -39,9 +39,11 @@ class Ingestor:
         return self.store.write(key, rows)
 
     def update_incremental(self, key: SeriesKey, start_ms: int, end_ms: int) -> int:
-        """Fetch only the tail past the last stored timestamp (live/cron refresh)."""
-        existing = self.store.read(key, start_ms, end_ms)
-        resume = (existing[-1]["ts"] + key.interval_ms) if existing else start_ms
+        """Fetch only the data that appeared since the last download — the tail past the last
+        stored timestamp (an empty store fetches the whole window). Resumes from the newest
+        stored ts without reading the whole multi-year series."""
+        last = self.store.latest_ts(key)
+        resume = (last + key.interval_ms) if (last is not None and last >= start_ms) else start_ms
         if resume >= end_ms:
             return 0
         return self.download(key, resume, end_ms)
