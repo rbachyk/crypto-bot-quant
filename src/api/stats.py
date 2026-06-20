@@ -501,14 +501,41 @@ def get_aggregate_stats(
 
 def get_environment_summary() -> list[dict[str, Any]]:
     """Per-environment trade counts + net P&L, so the dashboard shows the SEPARATION at a glance
-    (paper / demo / testnet / live never mixed unless 'All' is chosen)."""
+    (paper / demo / testnet / live never mixed unless 'All' is chosen).
+
+    One grouped SQL aggregation (count / sum-pnl / win-count by env) instead of a full table
+    scan per environment — the Overview renders this on every load."""
+    from sqlalchemy import case
+
+    env_expr = case(
+        (PaperTradeRecord.session_id.like("demo:%"), "demo"),
+        (PaperTradeRecord.session_id.like("testnet:%"), "testnet"),
+        (PaperTradeRecord.session_id.like("live:%"), "live"),
+        else_="paper",
+    ).label("env")
+    with session_scope() as session:
+        rows = session.execute(
+            select(
+                env_expr,
+                func.count().label("trades"),
+                func.coalesce(func.sum(PaperTradeRecord.pnl), 0.0).label("net_pnl"),
+                func.coalesce(
+                    func.sum(case((PaperTradeRecord.pnl > 0, 1), else_=0)), 0
+                ).label("wins"),
+            ).group_by(env_expr)
+        ).all()
+    by_env = {r.env: r for r in rows}
     out: list[dict[str, Any]] = []
-    full = TimeWindow(None, None)
     for env in ENVIRONMENTS:
-        t = compute_trading_stats(full, env=env)
+        r = by_env.get(env)
+        trades = int(r.trades) if r else 0
         out.append(
-            {"env": env, "trades": t.total_trades, "net_pnl": t.realized_pnl,
-             "win_rate": t.win_rate}
+            {
+                "env": env,
+                "trades": trades,
+                "net_pnl": round(float(r.net_pnl), 2) if r else 0.0,
+                "win_rate": round(int(r.wins) / trades, 4) if r and trades else 0.0,
+            }
         )
     return out
 

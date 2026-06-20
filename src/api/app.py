@@ -472,19 +472,32 @@ _ENV_SELECT = (
 _AUTOREFRESH_JS = """
 <script>
 (function(){
- // Auto-refresh while any job chip shows QUEUED/RUNNING, so statuses update without a manual
- // reload. Pauses when the user is typing/selecting, and stops once nothing is active.
- var active=false;
- document.querySelectorAll('.badge').forEach(function(b){
-  var t=b.textContent.trim().toUpperCase();
-  if(t.indexOf('RUNNING')>=0||t.indexOf('QUEUED')>=0)active=true;
- });
- if(!active)return;
- setInterval(function(){
-  var a=document.activeElement;
-  if(a&&(a.tagName==='INPUT'||a.tagName==='SELECT'||a.tagName==='TEXTAREA'))return;
-  location.reload();
- },6000);
+ // Update job-status chips ASYNCHRONOUSLY (no full-page reload): poll a tiny JSON endpoint for
+ // the ids present on the page and rewrite each chip in place. Stops once every job is terminal.
+ var CLS={passed:'pass',succeeded:'pass',failed:'fail',cancelled:'fail',expired:'fail',
+          blocked:'blocked',not_run:'not_run',queued:'not_run',running:'running'};
+ var TERMINAL={succeeded:1,failed:1,cancelled:1,expired:1,blocked:1};
+ function chips(){return document.querySelectorAll('[data-job]');}
+ function ids(){return Array.prototype.map.call(chips(),function(e){return e.getAttribute('data-job');});}
+ function active(){return Array.prototype.some.call(chips(),function(e){return !TERMINAL[e.getAttribute('data-status')];});}
+ function poll(){
+  if(!active())return;
+  fetch('/api/jobs/status?ids='+encodeURIComponent(ids().join(',')),{credentials:'same-origin'})
+   .then(function(r){return r.ok?r.json():{};})
+   .then(function(m){
+    chips().forEach(function(e){
+     var s=m[e.getAttribute('data-job')];
+     if(s&&s!==e.getAttribute('data-status')){
+      e.setAttribute('data-status',s);
+      e.className='badge '+(CLS[s]||'not_run');
+      e.textContent=s.toUpperCase();
+     }
+    });
+    setTimeout(poll,active()?3000:0);
+   })
+   .catch(function(){setTimeout(poll,6000);});
+ }
+ if(active())setTimeout(poll,3000);
 })();
 </script>
 """
@@ -542,15 +555,32 @@ def _esc(value: object) -> str:
     return html.escape("" if value is None else str(value))
 
 
+_BADGE_CLASS = {
+    "passed": "pass",
+    "succeeded": "pass",
+    "failed": "fail",
+    "cancelled": "fail",
+    "expired": "fail",
+    "blocked": "blocked",
+    "not_run": "not_run",
+    "queued": "not_run",
+    "running": "running",
+}
+
+
 def _status_badge(status: str) -> str:
-    cls = {
-        "passed": "pass",
-        "failed": "fail",
-        "blocked": "blocked",
-        "not_run": "not_run",
-        "running": "running",
-    }.get(status.lower(), "not_run")
+    cls = _BADGE_CLASS.get(status.lower(), "not_run")
     return f'<span class="badge {cls}">{status.upper()}</span>'
+
+
+def _job_badge(status: str, job_id: str) -> str:
+    """A status badge tagged with its job id, so the async poller can update it in place
+    (no full-page reload) as the job transitions queued → running → succeeded/failed."""
+    cls = _BADGE_CLASS.get(status.lower(), "not_run")
+    return (
+        f'<span class="badge {cls}" data-job="{_esc(job_id)}" '
+        f'data-status="{_esc(status.lower())}">{status.upper()}</span>'
+    )
 
 
 _PERIODS = [
@@ -1126,7 +1156,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     else "-"
                 )
                 job_line = (
-                    f"<p>Last download: {_status_badge(last_job.status.value)} · progress {prog} · "
+                    f"<p>Last download: {_job_badge(last_job.status.value, last_job.job_id)} · "
+                    f"progress {prog} · "
                     f"<a href='/dashboard/jobs/{last_job.job_id}'>view log →</a><br>"
                     f"<span class='meta'>{_esc(last_job.progress_message or '')}"
                     + (
@@ -1266,7 +1297,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 job_rows.append(
                     [
                         f"<a href='/dashboard/jobs/{j.job_id}'>{j.job_id[:12]}…</a>",
-                        _status_badge(j.status.value),
+                        _job_badge(j.status.value, j.job_id),
                         prog,
                         _esc(j.progress_message or ""),
                         stop,
@@ -1735,6 +1766,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _page(f"Per-Symbol Statistics: {symbol}", body)
 
     # ----- jobs ------------------------------------------------------------ #
+    @app.get("/api/jobs/status")
+    def jobs_status(
+        ids: str = "", user: str = Depends(require_dashboard_auth)
+    ) -> dict[str, str]:
+        """Lightweight {job_id: status} for the given ids — polled by the dashboard to update
+        status chips in place (no full-page reload). Only the status column is read."""
+        wanted = [i for i in ids.split(",") if i][:200]
+        if not wanted:
+            return {}
+        with session_scope() as session:
+            rows = session.execute(
+                select(Job.job_id, Job.status).where(Job.job_id.in_(wanted))
+            ).all()
+            return {jid: status.value for jid, status in rows}
+
     @app.get("/api/jobs")
     def list_jobs(
         limit: int = 50,
@@ -1858,7 +1904,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 f"<tr>"
                 f"<td><a href='/dashboard/jobs/{j.job_id}'>{j.job_id[:12]}…</a></td>"
                 f"<td>{j.job_type}</td>"
-                f"<td>{_status_badge(j.status.value)}</td>"
+                f"<td>{_job_badge(j.status.value, j.job_id)}</td>"
                 f"<td>{j.created_at.strftime('%Y-%m-%d %H:%M')}</td>"
                 f"<td>{prog}</td>"
                 f"<td>{j.related_gate_id or '-'}</td>"
@@ -1920,7 +1966,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
   <table>
     <tr><th>Field</th><th>Value</th></tr>
     <tr><td>Type</td><td>{job.job_type}</td></tr>
-    <tr><td>Status</td><td>{_status_badge(job.status.value)}</td></tr>
+    <tr><td>Status</td><td>{_job_badge(job.status.value, job.job_id)}</td></tr>
     <tr><td>Created</td><td>{job.created_at.isoformat()}</td></tr>
     <tr><td>Progress</td><td>{job.progress_current}/{job.progress_total} — {_esc(job.progress_message)}</td></tr>
     <tr><td>Related Gate</td><td>{job.related_gate_id or "-"}</td></tr>
