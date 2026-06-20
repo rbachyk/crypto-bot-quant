@@ -53,9 +53,20 @@ class CcxtDataSource(DataSource):
         estimated_spread_bps: float = _DEFAULT_SPREAD_BPS,
         enable_rate_limit: bool = True,
         client: Any | None = None,
+        rate_limit_ms: int = 300,
+        max_retries: int = 8,
+        retry_base_sec: float = 1.0,
+        retry_max_sec: float = 60.0,
     ) -> None:
         self.exchange_id = exchange_id
         self._estimated_spread_bps = estimated_spread_bps
+        # Rate-limit resilience: ccxt's enableRateLimit spaces requests (rate_limit_ms apart), and
+        # on top of that every network call is retried with exponential backoff when Bybit returns
+        # "Too many visits" (retCode 10006) or a transient network error — so a long multi-year
+        # download throttles itself and resumes instead of failing.
+        self._max_retries = max_retries
+        self._retry_base_sec = retry_base_sec
+        self._retry_max_sec = retry_max_sec
         self._ex: Any
         if client is not None:
             self._ex = client  # injected (tests)
@@ -64,14 +75,47 @@ class CcxtDataSource(DataSource):
 
             klass = getattr(ccxt, exchange_id)
             self._ex = klass(
-                {"enableRateLimit": enable_rate_limit, "options": {"defaultType": "swap"}}
+                {
+                    "enableRateLimit": enable_rate_limit,
+                    "rateLimit": max(rate_limit_ms, 1),  # ms between requests (conservative)
+                    "options": {"defaultType": "swap"},
+                }
             )
         self._markets: dict | None = None
+
+    # -- rate-limit-resilient call wrapper ------------------------------- #
+    def _call(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        """Invoke a ccxt method, backing off + retrying on rate-limit / transient network errors.
+
+        Bybit replies retCode 10006 ("Too many visits") under burst load; ccxt raises
+        ``RateLimitExceeded``. We sleep ``retry_base_sec`` and double up to ``retry_max_sec`` per
+        retry, so the download self-throttles to the exchange's pace rather than crashing."""
+        import time
+
+        delay = self._retry_base_sec
+        for attempt in range(self._max_retries + 1):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - classify by type/message, re-raise if final
+                names = {c.__name__ for c in type(exc).__mro__}
+                msg = str(exc).lower()
+                retryable = bool(
+                    names
+                    & {
+                        "RateLimitExceeded", "DDoSProtection", "NetworkError",
+                        "ExchangeNotAvailable", "RequestTimeout",
+                    }
+                ) or ("10006" in msg or "too many visits" in msg or "rate limit" in msg)
+                if not retryable or attempt >= self._max_retries:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, self._retry_max_sec)
+        raise RuntimeError("unreachable")  # pragma: no cover
 
     # -- symbols --------------------------------------------------------- #
     def _markets_loaded(self) -> dict:
         if self._markets is None:
-            self._markets = self._ex.load_markets()
+            self._markets = self._call(self._ex.load_markets)
         return self._markets
 
     def has_symbol(self, symbol: str) -> bool:
@@ -124,7 +168,9 @@ class CcxtDataSource(DataSource):
         since = start_ms
         last_seen = -1
         while since < end_ms:
-            batch = self._ex.fetch_ohlcv(symbol, timeframe, since=since, limit=_PAGE, params=params)
+            batch = self._call(
+                self._ex.fetch_ohlcv, symbol, timeframe, since=since, limit=_PAGE, params=params
+            )
             if not batch:
                 break
             for candle in batch:
@@ -169,7 +215,9 @@ class CcxtDataSource(DataSource):
         since = max(0, start_ms - key.interval_ms)
         last_seen = -1
         while since < end_ms:
-            batch = self._ex.fetch_funding_rate_history(key.symbol, since=since, limit=200)
+            batch = self._call(
+                self._ex.fetch_funding_rate_history, key.symbol, since=since, limit=200
+            )
             if not batch:
                 break
             for f in batch:
@@ -200,7 +248,9 @@ class CcxtDataSource(DataSource):
         since = start_ms
         last_seen = -1
         while since < end_ms:
-            batch = self._ex.fetch_open_interest_history(symbol, timeframe, since=since, limit=200)
+            batch = self._call(
+                self._ex.fetch_open_interest_history, symbol, timeframe, since=since, limit=200
+            )
             if not batch:
                 break
             for oi in batch:

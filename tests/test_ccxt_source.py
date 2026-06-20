@@ -226,3 +226,68 @@ def test_fetch_metadata_unknown_symbol(adapter: CcxtExchangeAdapter) -> None:
 
 def test_adapter_ping(adapter: CcxtExchangeAdapter) -> None:
     assert adapter.ping() is True
+
+
+# --------------------------------------------------------------------------- #
+# Rate-limit resilience: Bybit returns retCode 10006 ("Too many visits") under  #
+# burst load; the source must back off + retry instead of failing the download. #
+# --------------------------------------------------------------------------- #
+class RateLimitExceeded(Exception):
+    """Stands in for ccxt.RateLimitExceeded (matched by class name AND message in _call)."""
+
+
+class _FlakyClient:
+    """Raises a rate-limit error the first ``fail_times`` ohlcv calls, then serves one bar."""
+
+    def __init__(self, fail_times: int) -> None:
+        self._left = fail_times
+        self.calls = 0
+
+    def load_markets(self) -> dict:
+        return {"BTC/USDT:USDT": {}}
+
+    def parse_timeframe(self, tf: str) -> int:
+        return TIMEFRAME_MS[tf] // 1000
+
+    def fetch_ohlcv(self, symbol, timeframe, since=0, limit=1000, params=None):  # noqa: A002
+        self.calls += 1
+        if self._left > 0:
+            self._left -= 1
+            raise RateLimitExceeded(
+                'bybit {"retCode":10006,"retMsg":"Too many visits. Exceeded the API Rate Limit."}'
+            )
+        return [[0, 1.0, 1.0, 1.0, 1.0, 1.0]] if since == 0 else []
+
+
+def test_call_backs_off_and_retries_then_succeeds() -> None:
+    client = _FlakyClient(fail_times=3)
+    src = CcxtDataSource(
+        "bybit", client=client, max_retries=5, retry_base_sec=0.0, retry_max_sec=0.0
+    )
+    rows = src.fetch(SeriesKey("bybit", OHLCV, "BTC/USDT:USDT", "5m"), 0, 5 * TIMEFRAME_MS["5m"])
+    assert client.calls >= 4  # 3 rate-limit failures retried, then a success
+    assert rows  # data came through after the backoff
+
+
+def test_call_exhausts_retries_then_raises() -> None:
+    client = _FlakyClient(fail_times=999)  # never recovers
+    src = CcxtDataSource("bybit", client=client, max_retries=2, retry_base_sec=0.0)
+    with pytest.raises(RateLimitExceeded):
+        src.fetch(SeriesKey("bybit", OHLCV, "BTC/USDT:USDT", "5m"), 0, TIMEFRAME_MS["5m"])
+    assert client.calls == 3  # initial attempt + 2 retries
+
+
+def test_call_reraises_non_retryable_immediately() -> None:
+    class _Boom(Exception):
+        pass
+
+    class _Client:
+        def parse_timeframe(self, tf: str) -> int:
+            return TIMEFRAME_MS[tf] // 1000
+
+        def fetch_ohlcv(self, *a, **k):
+            raise _Boom("a real bug, not a rate limit")
+
+    src = CcxtDataSource("bybit", client=_Client(), max_retries=5, retry_base_sec=0.0)
+    with pytest.raises(_Boom):
+        src.fetch(SeriesKey("bybit", OHLCV, "BTC/USDT:USDT", "5m"), 0, TIMEFRAME_MS["5m"])
