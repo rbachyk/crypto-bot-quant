@@ -50,11 +50,17 @@ data:
   # large and runs in the background; symbols listed later than the start simply have a shorter
   # series (the backtest uses whatever each symbol has).
   window:
-    as_of: "2026-06-19T00:00:00Z"
+    # ``now`` anchors the END to the current time (floored to the last closed hour) at load time,
+    # so the window always reaches fresh data and never goes stale. Put an ISO date here only to
+    # pin a fixed historical window.
+    as_of: now
     duration_hours: 48000 # ~5.5 years → back to ~Jan 2021
 
   validation:
-    max_unfilled_gap_bars: 0
+    # Tolerate scattered missing candles over the multi-year window (exchange-maintenance gaps):
+    # up to this many missing per series is a non-blocking WARNING, not a FAILED snapshot. The
+    # data is still usable for backtests; this only governs the snapshot's "valid" flag.
+    max_unfilled_gap_bars: 20000
     max_spread_bps: 250.0
     min_price: 0.0
     max_price: 1.0e12

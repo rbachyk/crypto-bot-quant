@@ -9,6 +9,7 @@ one object so they never drift (Section 4 config-driven behaviour).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 
@@ -24,6 +25,19 @@ from src.data.schema import (
 )
 
 DATA_YAML = REPO_ROOT / "configs" / "data.yaml"
+_HOUR_MS = 3_600_000
+
+
+def _resolve_window_end_ms(window: dict) -> int:
+    """Resolve the window end. ``as_of: now`` (or a missing/empty as_of) anchors the END to the
+    CURRENT time — floored to the hour and backed off one hour — so the window always reaches
+    fresh data and the still-forming / lagging recent candles are NOT required (which would make
+    validation spuriously fail as 'missing'). An explicit ISO ``as_of`` is used verbatim."""
+    as_of = window.get("as_of")
+    if as_of is None or str(as_of).strip().lower() in ("", "now"):
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
+        return (now_ms // _HOUR_MS) * _HOUR_MS - _HOUR_MS  # last fully-closed hour boundary
+    return parse_utc_ms(str(as_of))
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,12 +107,18 @@ class DataConfig:
 
 
 @lru_cache
-def load_data_config(path: str | None = None) -> DataConfig:
+def _read_data_yaml(path: str | None) -> dict:
+    """Parse the YAML once (cheap, cached). The window is resolved per-call in load_data_config so
+    a dynamic ``as_of: now`` advances over time (long-lived workers must not freeze it)."""
     yaml_path = Path(path) if path else DATA_YAML
-    raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    return yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+
+
+def load_data_config(path: str | None = None) -> DataConfig:
+    raw = _read_data_yaml(path)
     data = raw["data"]
     window = data["window"]
-    end_ms = parse_utc_ms(window["as_of"])
+    end_ms = _resolve_window_end_ms(window)  # dynamic when as_of is 'now'/absent
     start_ms = end_ms - int(window["duration_hours"]) * 3_600_000
     v = data.get("validation", {})
     thresholds = ValidationThresholds(

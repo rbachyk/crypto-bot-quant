@@ -41,6 +41,22 @@ def test_missing_candles_is_critical(tmp_path) -> None:
     assert "missing_candles" in _critical_checks(store, cfg)
 
 
+def test_missing_candles_within_tolerance_is_a_warning_not_critical(tmp_path) -> None:
+    """A few scattered missing candles within max_unfilled_gap_bars are a non-blocking WARNING —
+    the snapshot stays valid (the multi-year-history use case). ohlcv-only config so the gap does
+    not also trip the cross-series mark/index alignment check."""
+    base = _single_ohlcv_cfg()
+    cfg = replace(base, thresholds=replace(base.thresholds, max_unfilled_gap_bars=5))
+    store = fresh_store(tmp_path)
+    populate(store, cfg)
+    key = SeriesKey(cfg.exchange_id, OHLCV, cfg.symbols[0], "5m")
+    iv = key.interval_ms
+    store.delete_range(key, cfg.window_start_ms + iv, cfg.window_start_ms + 3 * iv)  # 2 missing
+    report = DataValidator(store, cfg).validate()
+    assert report.passed  # 2 missing <= tolerance 5 → not critical
+    assert any(v.check == "missing_candles" and v.severity == "warning" for v in report.violations)
+
+
 def test_impossible_prices_is_critical(tmp_path) -> None:
     cfg = small_cfg()
     store = fresh_store(tmp_path)

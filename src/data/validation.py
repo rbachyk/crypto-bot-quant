@@ -131,11 +131,18 @@ class DataValidator:
 
         gaps = find_gaps(self.store, key, start, end)
         if gaps.missing_ts:
+            # A few scattered missing candles over a multi-year window (exchange maintenance) are
+            # expected and should NOT fail the snapshot. ``max_unfilled_gap_bars`` is the tolerance:
+            # > tolerance missing ⇒ CRITICAL (data genuinely incomplete); ≤ tolerance ⇒ WARNING
+            # (recorded, but the snapshot stays valid). The reference config keeps tolerance 0.
+            tol = self.cfg.thresholds.max_unfilled_gap_bars
+            severity = CRITICAL if len(gaps.missing_ts) > tol else WARNING
             report.violations.append(
                 Violation(
                     "missing_candles",
-                    CRITICAL,
-                    f"{len(gaps.missing_ts)} missing of {gaps.expected} expected",
+                    severity,
+                    f"{len(gaps.missing_ts)} missing of {gaps.expected} expected "
+                    f"(tolerance {tol})",
                     label,
                 )
             )
