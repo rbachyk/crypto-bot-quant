@@ -42,3 +42,19 @@ def test_tick_enqueues_then_not_due_until_interval() -> None:
     assert sched.tick(now + 1) == []
     # Far in the future, the hourly paper job is due again.
     assert "run_paper_session" in set(sched.tick(now + 7200))
+
+
+@requires_redis
+def test_runtime_pause_stops_enqueuing() -> None:
+    """The dashboard pause toggle stops the scheduler from enqueuing without a restart."""
+    from src.scheduler import is_scheduler_paused, set_scheduler_paused
+
+    sched = Scheduler(settings=Settings(_env_file=None))
+    _clear(sched)
+    sched._redis.delete("qbot:sched:paused")
+    assert not is_scheduler_paused(sched._redis)
+    set_scheduler_paused(sched._redis, True)
+    assert is_scheduler_paused(sched._redis)
+    assert sched.tick(time.time()) == []  # paused → nothing enqueued (even though jobs are due)
+    set_scheduler_paused(sched._redis, False)
+    assert "run_paper_session" in set(sched.tick(time.time()))  # resumes

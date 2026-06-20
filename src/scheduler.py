@@ -22,9 +22,26 @@ _log = structlog.get_logger("scheduler")
 
 _LAST_KEY = "qbot:sched:last:{job}"
 _LOCK_KEY = "qbot:sched:lock"
+_PAUSE_KEY = "qbot:sched:paused"  # runtime kill-switch for the recurring jobs (dashboard toggle)
 
 # Cadences are deliberately conservative defaults (seconds). All jobs are shadow-only.
 _HOUR = 3600
+
+
+def is_scheduler_paused(redis_client: redis.Redis) -> bool:
+    """Whether the recurring background jobs are paused at runtime (dashboard toggle)."""
+    try:
+        return bool(redis_client.get(_PAUSE_KEY))
+    except Exception:  # noqa: BLE001 - a redis hiccup must not crash the dashboard
+        return False
+
+
+def set_scheduler_paused(redis_client: redis.Redis, paused: bool) -> None:
+    """Pause/resume the recurring background jobs without restarting the scheduler service."""
+    if paused:
+        redis_client.set(_PAUSE_KEY, "1")
+    else:
+        redis_client.delete(_PAUSE_KEY)
 
 
 @dataclass(frozen=True)
@@ -76,6 +93,9 @@ class Scheduler:
         """Enqueue every due job once (lock-guarded). Returns the enqueued job types."""
         from src.jobs import JobQueue
 
+        # Runtime pause (dashboard toggle) — enqueue nothing while paused.
+        if is_scheduler_paused(self._redis):
+            return []
         # Only one scheduler enqueues per tick window (others no-op).
         if not self._redis.set(
             _LOCK_KEY, "1", nx=True, ex=max(5, self.settings.scheduler_tick_sec)

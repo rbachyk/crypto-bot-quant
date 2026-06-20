@@ -18,9 +18,9 @@ import html
 from pathlib import Path
 from typing import Any
 
-from fastapi import Cookie, Depends, FastAPI, HTTPException
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 
 from src.api.auth import require_dashboard_auth
 from src.config import Settings, get_settings
@@ -486,14 +486,21 @@ _AUTOREFRESH_JS = """
    .then(function(r){return r.ok?r.json():{};})
    .then(function(m){
     chips().forEach(function(e){
-     var s=m[e.getAttribute('data-job')];
+     var d=m[e.getAttribute('data-job')];if(!d)return;var s=d.status;
      if(s&&s!==e.getAttribute('data-status')){
       e.setAttribute('data-status',s);
       e.className='badge '+(CLS[s]||'not_run');
       e.textContent=s.toUpperCase();
      }
     });
-    setTimeout(poll,active()?3000:0);
+    // progress + message update in place (live during a run)
+    document.querySelectorAll('[data-job-prog]').forEach(function(e){
+     var d=m[e.getAttribute('data-job-prog')];if(d&&d.progress!=null)e.textContent=d.progress;
+    });
+    document.querySelectorAll('[data-job-msg]').forEach(function(e){
+     var d=m[e.getAttribute('data-job-msg')];if(d&&d.message!=null)e.textContent=d.message;
+    });
+    setTimeout(poll,active()?2500:0);
    })
    .catch(function(){setTimeout(poll,6000);});
  }
@@ -1058,16 +1065,71 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             + f"</p>{ks_control}</div>"
         )
+
+        # Background scheduler (recurring research/paper/ML jobs) — runtime pause toggle.
+        from src.scheduler import is_scheduler_paused
+
+        try:
+            paused = is_scheduler_paused(_redis_client())
+        except Exception:  # noqa: BLE001
+            paused = False
+        sched_btn = (
+            '<form method="post" action="/api/scheduler/resume" style="display:inline">'
+            '<button class="btn" type="submit">▶ Resume scheduled jobs</button></form>'
+            if paused
+            else '<form method="post" action="/api/scheduler/pause" style="display:inline">'
+            '<button class="btn btn-danger" type="submit">⏸ Pause scheduled jobs</button></form>'
+        )
+        sched_widget = (
+            '<div class="card"><h2>Background scheduler</h2><p>Recurring research re-validation + '
+            "paper sessions + ML shadow passes: "
+            + (
+                '<span class="badge blocked">PAUSED</span>'
+                if paused
+                else '<span class="badge running">ACTIVE</span>'
+            )
+            + f"</p>{sched_btn}"
+            '<p class="meta">Pause stops the scheduler from enqueuing new recurring jobs at '
+            "runtime (no restart). Already-queued jobs keep running — use Jobs → Cancel all to "
+            "stop those. Paper sessions write to the <b>paper</b> environment.</p></div>"
+        )
         return _page(
             "Control Center",
             f"<p class='meta'>{env_info}</p>"
             + gate_widget
             + ks_widget
+            + sched_widget
             + jobs_widget
             + universe_widget
             + f'<p class="meta">config_version={settings.config_version} · '
             f"data_version={settings.data_version}</p>",
         )
+
+    # ----- scheduler pause/resume (runtime, dashboard-controlled) ---------- #
+    def _redis_client():  # type: ignore[no-untyped-def]
+        import redis
+
+        return redis.Redis.from_url(settings.redis_url, decode_responses=True)
+
+    @app.post("/api/scheduler/pause")
+    def scheduler_pause(
+        request: Request, user: str = Depends(require_dashboard_auth)
+    ) -> RedirectResponse:
+        from src.scheduler import set_scheduler_paused
+
+        set_scheduler_paused(_redis_client(), True)
+        _audit("scheduler_pause", target="scheduler", actor=user, detail={})
+        return _back(request, "/dashboard/system")
+
+    @app.post("/api/scheduler/resume")
+    def scheduler_resume(
+        request: Request, user: str = Depends(require_dashboard_auth)
+    ) -> RedirectResponse:
+        from src.scheduler import set_scheduler_paused
+
+        set_scheduler_paused(_redis_client(), False)
+        _audit("scheduler_resume", target="scheduler", actor=user, detail={})
+        return _back(request, "/dashboard/system")
 
     # ----- System Health (#22) -------------------------------------------- #
     @app.get("/dashboard/health", response_class=HTMLResponse)
@@ -1306,8 +1368,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     [
                         f"<a href='/dashboard/jobs/{j.job_id}'>{j.job_id[:12]}…</a>",
                         _job_badge(j.status.value, j.job_id),
-                        prog,
-                        _esc(j.progress_message or ""),
+                        f"<span data-job-prog='{j.job_id}'>{prog}</span>",
+                        f"<span data-job-msg='{j.job_id}'>{_esc(j.progress_message or '')}</span>",
                         stop,
                     ]
                 )
@@ -1777,17 +1839,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/jobs/status")
     def jobs_status(
         ids: str = "", user: str = Depends(require_dashboard_auth)
-    ) -> dict[str, str]:
-        """Lightweight {job_id: status} for the given ids — polled by the dashboard to update
-        status chips in place (no full-page reload). Only the status column is read."""
+    ) -> dict[str, dict[str, Any]]:
+        """Lightweight {job_id: {status, progress, message}} for the given ids — polled by the
+        dashboard to update status chips AND progress in place (no full-page reload)."""
         wanted = [i for i in ids.split(",") if i][:200]
         if not wanted:
             return {}
         with session_scope() as session:
             rows = session.execute(
-                select(Job.job_id, Job.status).where(Job.job_id.in_(wanted))
+                select(
+                    Job.job_id,
+                    Job.status,
+                    Job.progress_current,
+                    Job.progress_total,
+                    Job.progress_message,
+                ).where(Job.job_id.in_(wanted))
             ).all()
-            return {jid: status.value for jid, status in rows}
+            out: dict[str, dict[str, Any]] = {}
+            for jid, status, cur, total, msg in rows:
+                prog = f"{cur}/{total}" if total else (str(cur) if cur else "-")
+                out[jid] = {"status": status.value, "progress": prog, "message": msg or ""}
+            return out
 
     @app.get("/api/jobs")
     def list_jobs(
@@ -1878,19 +1950,52 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _audit("enqueue_job", target=job_type, actor=user, detail={"job_type": job_type})
         return {"job_id": job_id}
 
+    def _back(request: Request, default: str = "/dashboard/jobs") -> RedirectResponse:
+        """Redirect a dashboard form POST back to the page it came from (clean UX, no raw JSON)."""
+        ref = request.headers.get("referer") or default
+        return RedirectResponse(url=ref, status_code=303)
+
     @app.post("/api/jobs/{job_id}/cancel")
-    def cancel_job(job_id: str, user: str = Depends(require_dashboard_auth)) -> dict[str, bool]:
+    def cancel_job(
+        job_id: str, request: Request, user: str = Depends(require_dashboard_auth)
+    ) -> RedirectResponse:
         from src.jobs import JobQueue
 
+        JobQueue(settings).cancel(job_id)
         _audit("cancel_job", target=job_id, actor=user, detail={})
-        return {"cancelled": JobQueue(settings).cancel(job_id)}
+        return _back(request)
+
+    @app.post("/api/jobs-cancel-all")
+    def cancel_all_jobs(
+        request: Request, user: str = Depends(require_dashboard_auth)
+    ) -> RedirectResponse:
+        """Cancel every queued + running job at once (queued removed, running stopped at their
+        next checkpoint)."""
+        from src.db.models import JobStatus as _JS
+        from src.jobs import JobQueue
+
+        queue = JobQueue(settings)
+        with session_scope() as session:
+            ids = [
+                jid
+                for (jid,) in session.execute(
+                    select(Job.job_id).where(Job.status.in_((_JS.QUEUED, _JS.RUNNING)))
+                ).all()
+            ]
+        for jid in ids:
+            queue.cancel(jid)
+        _audit("cancel_all_jobs", target="jobs", actor=user, detail={"count": len(ids)})
+        return _back(request)
 
     @app.post("/api/jobs/{job_id}/retry")
-    def retry_job(job_id: str, user: str = Depends(require_dashboard_auth)) -> dict[str, bool]:
+    def retry_job(
+        job_id: str, request: Request, user: str = Depends(require_dashboard_auth)
+    ) -> RedirectResponse:
         from src.jobs import JobQueue
 
+        JobQueue(settings).retry(job_id)
         _audit("retry_job", target=job_id, actor=user, detail={})
-        return {"requeued": JobQueue(settings).retry(job_id)}
+        return _back(request)
 
     # ----- jobs dashboard page ---------------------------------------------- #
     @app.get("/dashboard/jobs", response_class=HTMLResponse)
@@ -1899,43 +2004,73 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         status: str | None = None,
         user: str = Depends(require_dashboard_auth),
     ) -> str:
+        from src.db.models import JobStatus as _JS
+
+        active_states = (_JS.QUEUED, _JS.RUNNING)
         with session_scope() as session:
             q = select(Job).order_by(desc(Job.created_at)).limit(limit)
             if status:
                 q = q.where(Job.status == status)
             jobs = session.execute(q).scalars().all()
+            active_count = session.execute(
+                select(func.count()).select_from(Job).where(Job.status.in_(active_states))
+            ).scalar_one()
 
         rows = ""
         for j in jobs:
             prog = f"{j.progress_current}/{j.progress_total}" if j.progress_total else "-"
+            is_active = j.status in active_states
+            action = (
+                f"<form method='post' action='/api/jobs/{j.job_id}/cancel' style='display:inline'>"
+                f"<button class='btn btn-danger' type='submit' "
+                f"style='padding:2px 9px;font-size:11px'>Cancel</button></form>"
+                if is_active
+                else (
+                    f"<form method='post' action='/api/jobs/{j.job_id}/retry' style='display:inline'>"
+                    f"<button class='btn btn-neutral' type='submit' "
+                    f"style='padding:2px 9px;font-size:11px'>Retry</button></form>"
+                    if j.status in (_JS.FAILED, _JS.CANCELLED, _JS.EXPIRED)
+                    else "—"
+                )
+            )
             rows += (
                 f"<tr>"
                 f"<td><a href='/dashboard/jobs/{j.job_id}'>{j.job_id[:12]}…</a></td>"
                 f"<td>{j.job_type}</td>"
                 f"<td>{_job_badge(j.status.value, j.job_id)}</td>"
-                f"<td>{j.created_at.strftime('%Y-%m-%d %H:%M')}</td>"
-                f"<td>{prog}</td>"
-                f"<td>{j.related_gate_id or '-'}</td>"
-                f"<td>{_esc((j.failure_reason or '')[:60])}</td>"
+                f"<td data-job-prog='{j.job_id}'>{prog}</td>"
+                f"<td class='meta' data-job-msg='{j.job_id}'>{_esc((j.progress_message or '')[:60])}</td>"
+                f"<td>{action}</td>"
                 f"</tr>"
             )
+        cancel_all = (
+            "<form method='post' action='/api/jobs-cancel-all' style='display:inline' "
+            "onsubmit=\"return confirm('Cancel ALL queued and running jobs?');\">"
+            f"<button class='btn btn-danger' type='submit'>&#9632; Cancel all active "
+            f"({active_count})</button></form>"
+            if active_count
+            else "<span class='meta'>No active jobs.</span>"
+        )
         filter_form = f"""
 <form method="get" class="form-row">
-  <label>Status:</label>
+  <label>Status</label>
   <select name="status" onchange="this.form.submit()">
     <option value="">all</option>
     {"".join(f'<option value="{s}"{" selected" if s == status else ""}>{s}</option>' for s in ["queued", "running", "succeeded", "failed", "cancelled"])}
   </select>
-  <button type="submit">Filter</button>
 </form>"""
         body = (
-            filter_form
+            f'<div class="card"><h2>Job controls</h2>{cancel_all}'
+            '<p class="meta">Cancel a queued job (removed before start) or a running job '
+            "(stopped cooperatively at its next checkpoint). Statuses + progress update live "
+            "below — no refresh needed.</p></div>"
+            + filter_form
             + f"""
 <div class="card">
   <h2>Background Jobs ({len(jobs)} shown)</h2>
   <table>
-    <tr><th>ID</th><th>Type</th><th>Status</th><th>Created</th><th>Progress</th><th>Gate</th><th>Failure</th></tr>
-    {rows or '<tr><td colspan="7" class="meta">No jobs found.</td></tr>'}
+    <tr><th>ID</th><th>Type</th><th>Status</th><th>Progress</th><th>Message</th><th></th></tr>
+    {rows or '<tr><td colspan="6" class="meta">No jobs found.</td></tr>'}
   </table>
 </div>"""
         )
@@ -1976,7 +2111,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     <tr><td>Type</td><td>{job.job_type}</td></tr>
     <tr><td>Status</td><td>{_job_badge(job.status.value, job.job_id)}</td></tr>
     <tr><td>Created</td><td>{job.created_at.isoformat()}</td></tr>
-    <tr><td>Progress</td><td>{job.progress_current}/{job.progress_total} — {_esc(job.progress_message)}</td></tr>
+    <tr><td>Progress</td><td><span data-job-prog="{job.job_id}">{job.progress_current}/{job.progress_total}</span> — <span data-job-msg="{job.job_id}">{_esc(job.progress_message)}</span></td></tr>
     <tr><td>Related Gate</td><td>{job.related_gate_id or "-"}</td></tr>
     <tr><td>Failure Reason</td><td>{_esc(job.failure_reason) or "-"}</td></tr>
     <tr><td>Next Action</td><td>{_esc(job.next_action_hint) or "-"}</td></tr>
