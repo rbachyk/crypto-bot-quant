@@ -49,6 +49,23 @@ ENVIRONMENTS = ("paper", "demo", "testnet", "live")
 _REAL_ENV_PREFIXES = ("demo:", "testnet:", "live:")
 
 
+_MAX_SERIES_POINTS = 600
+
+
+def _downsample(seq: list, max_points: int = _MAX_SERIES_POINTS) -> list:
+    """Evenly sample a series down to at most ``max_points`` (keeping the last point), so the
+    dashboard payload/SVG stays bounded as the trade count grows. Returns the input unchanged when
+    already small."""
+    n = len(seq)
+    if n <= max_points:
+        return seq
+    step = n / max_points
+    out = [seq[int(i * step)] for i in range(max_points)]
+    if out[-1] != seq[-1]:
+        out[-1] = seq[-1]  # always include the latest point
+    return out
+
+
 def _apply_env(query, env: str | None):
     """Scope a paper_trades query to one trading environment by session_id prefix."""
     if not env or env == "all":
@@ -294,11 +311,14 @@ def compute_trading_stats(
             max_dd = max(max_dd, (peak - equity) / peak)
         curve.append(round(equity, 2))
     st.current_equity = round(equity, 2)
-    st.max_drawdown_pct = round(max_dd, 4)
-    st.equity_curve = curve
-    st.trade_series = [
-        (int(t.created_at.timestamp() * 1000), round(t.pnl, 4)) for t in rows
-    ]
+    st.max_drawdown_pct = round(max_dd, 4)  # computed over the FULL curve, before downsampling
+    # Downsample the curve + per-trade series for the browser payload (the SVG only needs ~a few
+    # hundred points). KPIs/drawdown above use the full data, so accuracy is unaffected — this
+    # only bounds the response size as the trade count grows (soak/demo runs).
+    st.equity_curve = _downsample(curve)
+    st.trade_series = _downsample(
+        [(int(t.created_at.timestamp() * 1000), round(t.pnl, 4)) for t in rows]
+    )
 
     st.by_strategy = _breakdown(rows, lambda r: r.strategy)
     st.by_regime = _breakdown(rows, lambda r: r.regime)

@@ -589,6 +589,27 @@ def _status_badge(status: str) -> str:
     return f'<span class="badge {cls}">{status.upper()}</span>'
 
 
+def _pager(path: str, offset: int, limit: int, shown: int, status: str | None = None) -> str:
+    """Prev/Next links for an offset/limit list page. Next appears only when the page was full
+    (more rows likely); Prev when offset > 0 — so an append-only history is fully browsable."""
+    qs = f"&status={_esc(status)}" if status else ""
+    parts: list[str] = []
+    if offset > 0:
+        prev_off = max(0, offset - limit)
+        parts.append(
+            f'<a class="btn btn-neutral" href="{path}?offset={prev_off}&limit={limit}{qs}" '
+            'style="padding:4px 10px">← Prev</a>'
+        )
+    if shown >= limit:
+        parts.append(
+            f'<a class="btn btn-neutral" href="{path}?offset={offset + limit}&limit={limit}{qs}" '
+            'style="padding:4px 10px">Next →</a>'
+        )
+    if not parts:
+        return ""
+    return '<div style="margin-top:10px;display:flex;gap:8px">' + "".join(parts) + "</div>"
+
+
 def _job_badge(status: str, job_id: str) -> str:
     """A status badge tagged with its job id, so the async poller can update it in place
     (no full-page reload) as the job transitions queued → running → succeeded/failed."""
@@ -2034,19 +2055,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/jobs")
     def list_jobs(
         limit: int = 50,
+        offset: int = 0,
         gate_id: str | None = None,
         status: str | None = None,
         job_type: str | None = None,
         user: str = Depends(require_dashboard_auth),
     ) -> list[dict]:
         with session_scope() as session:
-            q = select(Job).order_by(desc(Job.created_at)).limit(limit)
+            q = select(Job).order_by(desc(Job.created_at))
             if gate_id:
                 q = q.where(Job.related_gate_id == gate_id)
             if status:
                 q = q.where(Job.status == status)
             if job_type:
                 q = q.where(Job.job_type == job_type)
+            q = q.offset(max(0, offset)).limit(max(1, min(limit, 500)))
             rows = session.execute(q).scalars().all()
             return [
                 {
@@ -2171,17 +2194,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/dashboard/jobs", response_class=HTMLResponse)
     def dashboard_jobs(
         limit: int = 50,
+        offset: int = 0,
         status: str | None = None,
         user: str = Depends(require_dashboard_auth),
     ) -> str:
         from src.db.models import JobStatus as _JS
 
         active_states = (_JS.QUEUED, _JS.RUNNING)
+        limit = max(1, min(limit, 200))
+        offset = max(0, offset)
         with session_scope() as session:
-            q = select(Job).order_by(desc(Job.created_at)).limit(limit)
+            q = select(Job).order_by(desc(Job.created_at))
             if status:
                 q = q.where(Job.status == status)
-            jobs = session.execute(q).scalars().all()
+            jobs = session.execute(q.offset(offset).limit(limit)).scalars().all()
             active_count = session.execute(
                 select(func.count()).select_from(Job).where(Job.status.in_(active_states))
             ).scalar_one()
@@ -2237,11 +2263,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             + filter_form
             + f"""
 <div class="card">
-  <h2>Background Jobs ({len(jobs)} shown)</h2>
+  <h2>Background Jobs ({len(jobs)} shown, from #{offset + 1})</h2>
   <table>
     <tr><th>ID</th><th>Type</th><th>Status</th><th>Progress</th><th>Message</th><th></th></tr>
     {rows or '<tr><td colspan="6" class="meta">No jobs found.</td></tr>'}
   </table>
+  {_pager("/dashboard/jobs", offset, limit, len(jobs), status)}
 </div>"""
         )
         return _page("Jobs", body)

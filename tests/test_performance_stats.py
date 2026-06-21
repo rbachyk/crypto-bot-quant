@@ -121,6 +121,17 @@ def test_env_scoping_separates_demo_from_paper(seeded_envs) -> None:
     assert compute_trading_stats(win, env="demo", strategy="PX").total_trades == 0
 
 
+def test_downsample_bounds_series_and_keeps_last_point() -> None:
+    """The equity-curve / trade-series downsampler caps the browser payload as trades grow,
+    always preserving the latest point; small series pass through unchanged."""
+    from src.api.stats import _downsample
+
+    out = _downsample(list(range(5000)), max_points=600)
+    assert len(out) == 600
+    assert out[0] == 0 and out[-1] == 4999  # last point always included
+    assert _downsample([1, 2, 3], 600) == [1, 2, 3]  # already small → unchanged
+
+
 def test_real_env_excludes_paper_experiments() -> None:
     """The 'real' env view = demo+testnet+live only, so ad-hoc paper runs never contribute to
     the real-trading statistics (the operator's filter for separating their own paper tests)."""
