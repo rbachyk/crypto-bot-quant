@@ -60,12 +60,29 @@ def test_build_refused_when_gates_not_green(monkeypatch) -> None:
         build_live_activation_request(requested_by="op1")
 
 
-def test_build_succeeds_when_gates_green(monkeypatch) -> None:
+def _green_gates(monkeypatch) -> None:
     monkeypatch.setattr(
         "src.api.stats.compute_gate_stats",
         lambda *_a, **_k: GateStats(
             total_critical_gates=20, critical_gates_passed=20, live_readiness_score=100.0
         ),
+    )
+
+
+def test_build_refused_without_real_lake_promotion(monkeypatch) -> None:
+    """Even with every gate green, live activation is refused unless an active strategy was
+    validated on REAL lake data (fixtures/reference-only promotions cannot reach a live account)."""
+    _green_gates(monkeypatch)
+    monkeypatch.setattr("src.strategies.promotion.active_strategy_ids", lambda *_a, **_k: [])
+    with pytest.raises(LiveActivationError, match="REAL lake data"):
+        build_live_activation_request(requested_by="op1")
+
+
+def test_build_succeeds_when_gates_green(monkeypatch) -> None:
+    _green_gates(monkeypatch)
+    # A strategy validated on real lake data is active (the Section-13 requirement).
+    monkeypatch.setattr(
+        "src.strategies.promotion.active_strategy_ids", lambda *_a, **_k: ["basis_reversion"]
     )
     req = build_live_activation_request(requested_by="op1")
     assert req.status == "pending"

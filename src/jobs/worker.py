@@ -27,6 +27,7 @@ from typing import cast
 
 import redis
 import structlog
+from sqlalchemy import update
 
 from src.config import Settings, get_settings
 from src.db.base import session_scope
@@ -199,7 +200,10 @@ class Worker:
 
     # -- single job ------------------------------------------------------ #
     def process_job(self, job_id: str) -> JobStatus:
-        # Load + guard.
+        # ATOMIC claim: flip QUEUED→RUNNING in a single UPDATE guarded by status='queued'. Only
+        # the worker whose UPDATE affects a row proceeds, so a job that is on the queue twice
+        # (reaper/requeue race) or false-reaped while still running can never be double-executed —
+        # the second claimant sees rowcount==0 and skips. (Replaces a check-then-act with no lock.)
         with session_scope() as session:
             job = session.get(Job, job_id)
             if job is None:
@@ -209,13 +213,26 @@ class Worker:
                 self._redis.delete(_cancel_key(job_id))
                 self._unwatch(job_id)
                 return JobStatus.CANCELLED
+            # Capture fields while the ORM object is fresh (the Core UPDATE below expires it).
             job_type = job.job_type
             params = dict(job.input_params or {})
-            job.status = JobStatus.RUNNING
-            job.started_at = datetime.now(UTC)
-            job.attempts += 1
-            attempts = job.attempts
+            attempts = job.attempts + 1  # what the UPDATE sets attempts to
             max_attempts = job.max_attempts
+            claimed = session.execute(
+                update(Job)
+                .where(Job.job_id == job_id, Job.status == JobStatus.QUEUED)
+                .values(
+                    status=JobStatus.RUNNING,
+                    started_at=datetime.now(UTC),
+                    attempts=Job.attempts + 1,
+                )
+            ).rowcount  # type: ignore[attr-defined]  # CursorResult.rowcount
+            if not claimed:
+                # Another worker already claimed it (or it isn't queued) — do not run it again.
+                self._unwatch(job_id)
+                session.refresh(job)
+                _log.info("job_claim_skipped", job_id=job_id, status=job.status.value)
+                return job.status
         publish_job_event(self._redis, job_id, status="running")  # async dashboard push
 
         ctx = JobContext(job_id, params, self._redis)

@@ -115,6 +115,27 @@ def test_approvals_create_list_decide_loop() -> None:
     # pending, and approve it (previously the table was read by the UI but never written).
     import uuid
 
+    # Live activation now requires an active strategy validated on REAL lake data (Section 13);
+    # persist one so the activation request can be built.
+    from src.strategies.promotion import persist_validations
+    from src.strategies.research import CandidateValidation, SideDecision
+
+    sd = SideDecision(
+        allow_long=True, allow_short=False, long_expectancy_r=0.2, short_expectancy_r=-0.1,
+        long_trades=30, short_trades=5, disabled=["short"],
+    )
+    persist_validations(
+        [
+            CandidateValidation(
+                candidate_id="basis_reversion", family="B",
+                strategy_version=_settings.strategy_version, promoted=True, status="promoted",
+                shelved_reasons=[], side_decision=sd, hypothesis={}, report={"expectancy_r": 0.2},
+                walk_forward={}, fee_stress={}, slippage_stress={}, noise_control={},
+            )
+        ],
+        data_source="lake",
+    )
+
     sid = f"LIVE-{uuid.uuid4().hex[:8]}"
     created = client.post(
         f"/api/approvals?subject_type=live_activation&subject_id={sid}", auth=AUTH

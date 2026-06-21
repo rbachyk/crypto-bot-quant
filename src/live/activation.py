@@ -85,6 +85,18 @@ def build_live_activation_request(
             "blocks_live gates pass (Road to Live < 100%)"
         )
 
+    # The gate chain can go green on synthetic/reference fixtures; live trading additionally
+    # REQUIRES at least one active strategy validated on REAL downloaded lake data (Section 13),
+    # so a fixture-only promotion can never reach a real account.
+    from src.strategies.promotion import active_strategy_ids
+
+    if not active_strategy_ids(settings.strategy_version, require_real_data=True):
+        raise LiveActivationError(
+            "live activation refused: no active strategy is validated on REAL lake data "
+            "(reference/synthetic-only promotions may not trade live — download data and "
+            "re-validate the strategy before requesting live activation)"
+        )
+
     catalog = load_catalog()
     blocks_live = [g for g, spec in catalog.items() if spec.blocks_live == "true"]
     with session_scope() as s:

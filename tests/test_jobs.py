@@ -61,6 +61,23 @@ def test_failed_job_visible_then_retry_requeues() -> None:
 
 
 @requires_redis
+def test_atomic_claim_skips_already_claimed_job() -> None:
+    """A job not in QUEUED state (already claimed by another worker / already terminal) is NOT
+    run again — the atomic QUEUED→RUNNING claim returns the existing status without executing,
+    preventing double execution under reaper/heartbeat races."""
+    queue, worker = JobQueue(), Worker()
+    job_id = queue.enqueue("selftest_echo", {"steps": 1}, requested_by="test")
+    # Simulate another worker having already claimed it.
+    with session_scope() as session:
+        session.get(Job, job_id).status = JobStatus.RUNNING
+    assert worker.process_job(job_id) is JobStatus.RUNNING  # skipped, not re-run
+    # A terminal job is likewise never re-run.
+    with session_scope() as session:
+        session.get(Job, job_id).status = JobStatus.SUCCEEDED
+    assert worker.process_job(job_id) is JobStatus.SUCCEEDED
+
+
+@requires_redis
 def test_retry_with_attempts_eventually_succeeds() -> None:
     queue, worker = JobQueue(), Worker()
     # max_attempts=2 means a transient failure would be retried once.

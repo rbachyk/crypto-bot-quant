@@ -1353,14 +1353,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         env = settings.exchange_env
         is_demo = env == "demo"
         with session_scope() as s:
-            runs = list(
-                s.execute(select(PaperRun).order_by(desc(PaperRun.created_at))).scalars().all()
+            # Filter to real-venue sessions and bound the result IN SQL (was: load every PaperRun
+            # then slice in Python — an unbounded full-table load on each render).
+            from sqlalchemy import or_
+
+            live_runs = list(
+                s.execute(
+                    select(PaperRun)
+                    .where(
+                        or_(
+                            PaperRun.session_id.like("live:%"),
+                            PaperRun.session_id.like("testnet:%"),
+                            PaperRun.session_id.like("demo:%"),
+                        )
+                    )
+                    .order_by(desc(PaperRun.created_at))
+                    .limit(50)
+                )
+                .scalars()
+                .all()
             )
-            live_runs = [
-                r
-                for r in runs
-                if str(r.session_id).startswith(("live:", "testnet:", "demo:"))
-            ][:50]
             rows = [
                 [
                     f"<code>{_esc(r.session_id)}</code>",
@@ -3046,10 +3058,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         with session_scope() as session:
             rows = (
-                session.execute(select(BacktestRun).order_by(desc(BacktestRun.created_at)))
+                session.execute(
+                    select(BacktestRun)
+                    .order_by(desc(BacktestRun.created_at))
+                    .limit(max(1, min(limit, 500)))
+                )
                 .scalars()
                 .all()
-            )[:limit]
+            )
             return [
                 {
                     "run_id": r.run_id,
@@ -3080,10 +3096,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         with session_scope() as session:
             rows = (
-                session.execute(select(BacktestRun).order_by(desc(BacktestRun.created_at)))
+                session.execute(
+                    select(BacktestRun).order_by(desc(BacktestRun.created_at)).limit(100)
+                )
                 .scalars()
                 .all()
-            )[:100]
+            )
             runs = [
                 (
                     r.run_id,

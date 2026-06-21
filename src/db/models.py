@@ -509,6 +509,10 @@ class PaperTradeRecord(Base):
     has_exchange_side_stop: Mapped[bool] = mapped_column(Boolean, default=False)
     execution_route: Mapped[str] = mapped_column(String(8), default="")
 
+    # created_at is the primary window-filter + sort key for every stats query; index it so the
+    # dashboard doesn't full-scan + sort paper_trades on each render as the table grows.
+    __table_args__ = (Index("ix_paper_trades_created_at", "created_at"),)
+
 
 class ShadowLog(Base):
     """ML shadow-mode prediction log (AGENTS.md Section 24 ``shadow_log``).
