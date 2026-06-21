@@ -345,6 +345,18 @@ def test_walk_forward_passes_on_the_reference_edge(cfg, meta, ref_inputs):
     assert wf.passed
 
 
+def test_walk_forward_fails_clearly_when_folds_are_too_thin(cfg, meta, ref_inputs):
+    """A too-short window can't realize enough trades per fold to judge the edge — WF must FAIL
+    with a clear trade-based 'insufficient trades' reason (not pass on noise, not a bars guess)."""
+    from src.backtest.service import rebase_window
+
+    iv = int(ref_inputs[0].bars[1]["ts"] - ref_inputs[0].bars[0]["ts"])
+    tiny = rebase_window(ref_inputs, 0, 12 * iv)  # ~12 bars total → folds far below min trades
+    wf = run_walk_forward(cfg, meta, tiny)
+    assert not wf.passed
+    assert any("insufficient trades" in r for r in wf.reasons), wf.reasons
+
+
 def test_walk_forward_folds_are_disjoint_and_ordered(cfg, meta, ref_inputs):
     wf = run_walk_forward(cfg, meta, ref_inputs)
     for prev, nxt in zip(wf.folds, wf.folds[1:], strict=False):

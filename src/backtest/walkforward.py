@@ -114,9 +114,6 @@ def run_walk_forward(
     iv = _iv(inputs)
     n_bars = max((len(s.bars) for s in inputs), default=0)
     out = WalkForwardResult()
-    if n_bars < (wf.folds + 1) * max(1, kc.min_trades_per_fold):
-        out.reasons.append("insufficient bars for the requested fold layout")
-
     span_ts = n_bars * iv
     holdout_bars = int(n_bars * wf.holdout_frac)
     test_end_ts = (n_bars - holdout_bars) * iv
@@ -132,6 +129,19 @@ def run_walk_forward(
         out.folds.append(FoldResult(i, lo, hi, passed, failures, report))
 
     out.folds_passed = sum(1 for f in out.folds if f.passed)
+
+    # Trade-based adequacy (not a bars heuristic): a fold with too few REALIZED trades cannot
+    # evaluate the edge. If too few folds clear the min-trades bar, the layout is too thin — FAIL
+    # clearly (extend the window or reduce the fold count) rather than judging the edge on noise.
+    folds_with_trades = sum(
+        1 for f in out.folds if f.report.trade_count >= kc.min_trades_per_fold
+    )
+    if folds_with_trades < kc.min_folds_passed:
+        out.reasons.append(
+            f"insufficient trades: only {folds_with_trades}/{len(out.folds)} folds have "
+            f">= {kc.min_trades_per_fold} trades (need {kc.min_folds_passed}) — too thin to "
+            "evaluate; extend the window or reduce folds"
+        )
 
     # 2) Locked hold-out — evaluated exactly once, here at the end (Section 16).
     holdout_report: BacktestReport | None = None

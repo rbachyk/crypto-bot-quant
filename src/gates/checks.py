@@ -1227,12 +1227,23 @@ def check_wf(settings: Settings) -> list[Criterion]:
         )
     )
 
-    positive = sum(1 for f in wf.folds if f.report.expectancy_r > 0)
+    # Count a fold as a positive-edge signal only when it has ENOUGH trades to be meaningful AND
+    # positive expectancy — so a thin fold (one lucky trade) is not mistaken for a stable edge.
+    # This reconciles "edge not isolated" with the trade-based fold adequacy / kill-criteria.
+    positive = sum(
+        1
+        for f in wf.folds
+        if f.report.expectancy_r > 0 and f.report.trade_count >= kc.min_trades_per_fold
+    )
     not_isolated = positive >= max(2, (len(wf.folds) + 1) // 2)
     out.append(
-        Criterion.ok("edge_not_isolated", f"{positive}/{len(wf.folds)} folds positive expectancy")
+        Criterion.ok(
+            "edge_not_isolated", f"{positive}/{len(wf.folds)} folds positive with enough trades"
+        )
         if not_isolated
-        else Criterion.fail("edge_not_isolated", f"edge isolated: only {positive} positive folds")
+        else Criterion.fail(
+            "edge_not_isolated", f"edge isolated: only {positive} adequately-traded positive folds"
+        )
     )
 
     if wf.holdout is not None:
