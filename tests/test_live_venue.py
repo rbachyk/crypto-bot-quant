@@ -121,6 +121,79 @@ def test_place_bracket_attaches_atomic_sl_tp_and_ownership() -> None:
     assert res.fully_filled and res.position.qty == 0.01
 
 
+def _builder_plan(*, tp_frac: float, settings: Settings):
+    """Build a real bracket plan through OrderBuilder (not hand-rolled) so the venue
+    integration is exercised end-to-end — this is what would have caught the TP-drop bug."""
+    from src.execution import OrderBuilder, OwnershipPolicy, load_execution_config
+    from src.ranking import Candidate
+    from src.risk import (
+        AccountState,
+        BreakerInputs,
+        PortfolioState,
+        RiskManager,
+        load_risk_config,
+    )
+
+    meta = load_metadata_config()
+    cand = Candidate(
+        symbol="BTC/USDT:USDT",
+        strategy="t",
+        strategy_version="t",
+        side=1,
+        entry_price=50_000.0,
+        stop_frac=0.01,
+        tp_frac=tp_frac,
+        regime="low_vol_up",
+        session=2,
+        spread_bps=3.0,
+        slippage_est=0.0005,
+        latency_ms=40.0,
+    )
+    acct = AccountState(
+        portfolio=PortfolioState(equity=100_000.0),
+        breakers=BreakerInputs(equity=100_000.0, peak_equity=100_000.0, daily_pnl=0.0),
+    )
+    decision = RiskManager(load_risk_config(), meta).evaluate(cand, acct)
+    res = OrderBuilder(load_execution_config(), OwnershipPolicy(settings)).build(
+        cand, decision, meta.spec("BTC/USDT:USDT")
+    )
+    assert res.ok and res.plan is not None
+    return res.plan
+
+
+def test_orderbuilder_bracket_attaches_both_sl_and_tp() -> None:
+    """Integration: OrderBuilder → CcxtLiveVenue.place_bracket attaches BOTH stopLoss and
+    takeProfit. Regression for the bug where the TP leg carried only ``price`` (not the
+    trigger the venue reads), so ``takeProfit`` was silently dropped from every real order."""
+    settings = _testnet_settings()
+    plan = _builder_plan(tp_frac=0.02, settings=settings)  # finite TP ⇒ TAKE_PROFIT leg
+    assert plan.take_profit is not None
+    fake = FakeCcxt()
+    CcxtLiveVenue(load_metadata_config(), settings, client=fake).place_bracket(
+        plan, ref_price=50_000.0, realized_slippage_frac=0.0005, latency_ms=5.0
+    )
+    params = fake.orders[0]["params"]
+    assert "stopLoss" in params and params["stopLoss"]["triggerPrice"] > 0
+    assert "takeProfit" in params and params["takeProfit"]["triggerPrice"] > 0
+    # TP target is above entry for a long (sanity on the trigger we forwarded).
+    assert params["takeProfit"]["triggerPrice"] > params["stopLoss"]["triggerPrice"]
+
+
+def test_orderbuilder_momentum_attaches_sl_and_trailing() -> None:
+    """A no-fixed-TP (momentum) plan still attaches the initial stopLoss plus a trailing
+    stop — the position is never opened without exchange-side protection (Section 2.2)."""
+    settings = _testnet_settings()
+    plan = _builder_plan(tp_frac=1.0, settings=settings)  # >= NO_FIXED_TP_FRAC ⇒ trailing
+    assert plan.take_profit is None and plan.trailing is not None
+    fake = FakeCcxt()
+    CcxtLiveVenue(load_metadata_config(), settings, client=fake).place_bracket(
+        plan, ref_price=50_000.0, realized_slippage_frac=0.0005, latency_ms=5.0
+    )
+    params = fake.orders[0]["params"]
+    assert "stopLoss" in params and params["stopLoss"]["triggerPrice"] > 0
+    assert params.get("trailingPercent", 0) > 0
+
+
 def test_requires_credentials_without_injected_client() -> None:
     settings = _testnet_settings(exchange_api_key="", exchange_api_secret="")
     with pytest.raises(ValueError, match="requires EXCHANGE_API"):

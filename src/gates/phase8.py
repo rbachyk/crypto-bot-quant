@@ -303,9 +303,16 @@ def check_paper_b(settings: Settings) -> list[Criterion]:  # noqa: ARG001
             sym = symbols[i % len(symbols)]
             strat_id, strat_family = strategies[i % len(strategies)]
             regime = regimes[i % len(regimes)]
-            side = 1 if (i % 3 != 2) else -1
-            # Simulate varied outcomes: winners, losers, held.
-            exit_move = 0.018 if (i % 4 == 0) else (-0.006 if (i % 4 == 1) else 0.005)
+            # Each simulated trade is a completed round-trip that CLOSES within its bar
+            # (a winner crosses the +2% TP, a loser the −0.8% stop). Closing the position
+            # frees its per-symbol concurrency slot for the next bar's same-symbol candidate
+            # — modelling a sequence of sequential trades over the paper window. (A position
+            # left open would correctly hold the slot and block re-entry, which the risk
+            # concurrency tests exercise directly.) Longs only: the exit simulation closes
+            # long round-trips deterministically.
+            side = 1
+            winner = i % 2 == 0
+            exit_move = 0.025 if winner else -0.012
             inputs.append(
                 PaperCandidateInput(
                     candidate=_make_candidate(

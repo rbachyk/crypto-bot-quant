@@ -50,6 +50,7 @@ from src.risk import (
     RiskManager,
     load_risk_config,
 )
+from src.risk.portfolio import Position
 
 
 @dataclass(slots=True)
@@ -122,6 +123,12 @@ class PaperTradingEngine:
             exec_cfg, self._meta, ownership, self._venue, self._kill_switch
         )
         self._reconciler = Reconciler(ownership)
+        # Risk-relevant facts for positions currently open in the venue, keyed by symbol.
+        # This is the engine's portfolio mirror — it is what the risk manager reasons over
+        # so the concurrency / heat / net-beta caps actually bind against open positions
+        # (previously the risk manager always saw an EMPTY portfolio, so the Section-17
+        # portfolio caps were dead in paper/demo). Kept in lock-step with the venue book.
+        self._open_positions: dict[str, Position] = {}
 
     # ------------------------------------------------------------------ #
     # Public API                                                            #
@@ -237,9 +244,13 @@ class PaperTradingEngine:
         candidate = inp.candidate
         ks_state = "engaged" if self._kill_switch.engaged() else "clear"
 
-        # Build the account state for risk (PortfolioState.positions is empty tuple
-        # for a fresh paper session — no concurrent positions tracked here).
-        portfolio = PortfolioState(equity=inp.equity)
+        # Build the account state for risk from the CURRENTLY-OPEN positions in the venue
+        # (not an empty tuple): this is what makes the Section-17 portfolio caps —
+        # max-concurrent-per-symbol/total/regime, portfolio heat, net-beta — actually
+        # enforce against existing exposure.
+        portfolio = PortfolioState(
+            equity=inp.equity, positions=tuple(self._open_positions.values())
+        )
         breakers = BreakerInputs(
             equity=inp.equity,
             # peak_equity is at least the current equity; a higher session peak lets the
@@ -359,6 +370,24 @@ class PaperTradingEngine:
             slippage_frac=fill.slippage_frac,
         )
         session.trades.append(paper_trade)
+        # Keep the engine's portfolio mirror in lock-step with the simulated exit so the
+        # risk caps bind correctly on subsequent candidates: a position still "open" holds
+        # its concurrency/heat/beta slot; a simulated stop/TP exit releases it (and the
+        # venue book) so the slot frees. In live/demo the venue book is the real exchange
+        # state, so this same mirror reflects genuine open exposure.
+        if exit_reason == "open":
+            self._open_positions[candidate.symbol] = Position(
+                symbol=candidate.symbol,
+                side=candidate.side,
+                qty=fill.qty,
+                entry_price=entry_price,
+                risk_amount=risk_amount,
+                beta_to_btc=self._risk.cfg.beta_to_btc(candidate.symbol),
+                regime=candidate.regime,
+            )
+        else:
+            self._open_positions.pop(candidate.symbol, None)
+            self._venue.positions.pop(candidate.symbol, None)
         session.decision_logs.append(
             self._decision_log(candidate, "execute", "approved", True, ks_state)
         )

@@ -139,13 +139,17 @@ class CcxtLiveVenue:
 
         params: dict[str, Any] = {"clientOrderId": entry.client_id}
         # Atomic exchange-resident protection attached to the entry (Section 2.2).
-        if plan.stop is not None and plan.stop.stop_price is not None:
-            params["stopLoss"] = {"triggerPrice": float(plan.stop.stop_price), "type": "market"}
-        if plan.take_profit is not None and plan.take_profit.stop_price is not None:
-            params["takeProfit"] = {
-                "triggerPrice": float(plan.take_profit.stop_price),
-                "type": "market",
-            }
+        sl_trigger = _leg_trigger(plan.stop)
+        if sl_trigger is not None:
+            params["stopLoss"] = {"triggerPrice": sl_trigger, "type": "market"}
+        tp_trigger = _leg_trigger(plan.take_profit)
+        if tp_trigger is not None:
+            params["takeProfit"] = {"triggerPrice": tp_trigger, "type": "market"}
+        # Momentum / no-fixed-TP exits arm an exchange-native trailing stop instead of a
+        # fixed TP. The initial stop above is always present, so the position is never
+        # unprotected even if the venue ignores the trailing param.
+        if plan.trailing is not None and plan.trailing.trail_offset:
+            params["trailingPercent"] = float(plan.trailing.trail_offset) * 100.0
 
         resp = self._ex.create_order(plan.symbol, order_type, entry.side, entry.qty, price, params)
 
@@ -286,6 +290,16 @@ def _num(value: Any) -> float | None:
         return float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _leg_trigger(leg: Order | None) -> float | None:
+    """Trigger price for a protective leg. Prefers ``stop_price`` (the trigger field) but
+    falls back to ``price`` so a take-profit built with only a target price still attaches —
+    a missing trigger would silently drop exchange-side protection (Section 2.2)."""
+    if leg is None:
+        return None
+    trigger = leg.stop_price if leg.stop_price is not None else leg.price
+    return float(trigger) if trigger is not None else None
 
 
 def get_venue(

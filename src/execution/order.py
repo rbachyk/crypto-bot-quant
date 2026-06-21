@@ -226,7 +226,12 @@ class OrderBuilder:
                 qty=qty,
                 order_type=OrderType.TAKE_PROFIT_MARKET,
                 role="take_profit",
+                # A take-profit-market is a TRIGGER order: ``stop_price`` is the trigger the
+                # venue arms (mirrors the stop leg). ``price`` is kept equal for any consumer
+                # that reads the target level. Both must be set or the venue layer (which
+                # attaches ``takeProfit`` off ``stop_price``) would silently drop the TP.
                 price=tp_price,
+                stop_price=tp_price,
                 reduce_only=True,
                 tags=self.ownership.tags(parent_id=entry.client_id),
             )
