@@ -269,6 +269,37 @@ def test_call_backs_off_and_retries_then_succeeds() -> None:
     assert rows  # data came through after the backoff
 
 
+class _SystemBusyClient:
+    """Raises a GENERIC exception carrying a Bybit retCode (10016 system busy) — i.e. a throttle
+    ccxt wrapped as a non-RateLimit type, classified retryable by message, not type."""
+
+    def __init__(self, fail_times: int) -> None:
+        self._left = fail_times
+        self.calls = 0
+
+    def load_markets(self) -> dict:
+        return {"BTC/USDT:USDT": {}}
+
+    def parse_timeframe(self, tf: str) -> int:
+        return TIMEFRAME_MS[tf] // 1000
+
+    def fetch_ohlcv(self, symbol, timeframe, since=0, limit=1000, params=None):  # noqa: A002
+        self.calls += 1
+        if self._left > 0:
+            self._left -= 1
+            raise Exception('bybit {"retCode":10016,"retMsg":"System busy, please try again"}')
+        return [[0, 1.0, 1.0, 1.0, 1.0, 1.0]] if since == 0 else []
+
+
+def test_call_retries_bybit_throttle_by_message_not_type() -> None:
+    client = _SystemBusyClient(fail_times=2)
+    src = CcxtDataSource(
+        "bybit", client=client, max_retries=5, retry_base_sec=0.0, retry_max_sec=0.0
+    )
+    rows = src.fetch(SeriesKey("bybit", OHLCV, "BTC/USDT:USDT", "5m"), 0, 5 * TIMEFRAME_MS["5m"])
+    assert client.calls >= 3 and rows  # 10016 retried despite the generic exception type
+
+
 def test_call_exhausts_retries_then_raises() -> None:
     client = _FlakyClient(fail_times=999)  # never recovers
     src = CcxtDataSource("bybit", client=client, max_retries=2, retry_base_sec=0.0)

@@ -99,14 +99,27 @@ class CcxtDataSource(DataSource):
             except Exception as exc:  # noqa: BLE001 - classify by type/message, re-raise if final
                 names = {c.__name__ for c in type(exc).__mro__}
                 msg = str(exc).lower()
-                retryable = bool(
+                # ccxt error TYPES that are always transient.
+                by_type = bool(
                     names
                     & {
                         "RateLimitExceeded", "DDoSProtection", "NetworkError",
-                        "ExchangeNotAvailable", "RequestTimeout",
+                        "ExchangeNotAvailable", "RequestTimeout", "OnMaintenance",
                     }
-                ) or ("10006" in msg or "too many visits" in msg or "rate limit" in msg)
-                if not retryable or attempt >= self._max_retries:
+                )
+                # Bybit retCodes / HTTP throttle + 5xx signatures that ccxt may wrap as a generic
+                # ExchangeError (10006 too-many-visits, 10016 system busy, 10018 IP rate limit,
+                # 10002 request-expired). Matched in the message so we self-throttle instead of
+                # crashing a long download on a transient throttle/outage.
+                by_msg = any(
+                    s in msg
+                    for s in (
+                        "10006", "10016", "10018", "10002", "too many visits", "rate limit",
+                        "too many requests", "system busy", "service unavailable",
+                        "http 429", "429 ", "http 503", " 503", "bad gateway", "http 502",
+                    )
+                )
+                if not (by_type or by_msg) or attempt >= self._max_retries:
                     raise
                 time.sleep(delay)
                 delay = min(delay * 2, self._retry_max_sec)

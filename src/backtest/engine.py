@@ -24,12 +24,16 @@ import bisect
 from dataclasses import dataclass, field
 from typing import cast
 
+import structlog
+
 from src.backtest.config import BacktestConfig
 from src.backtest.costs import BUY, SELL, FeeModel, FundingModel, SlippageModel
 from src.backtest.risk import RiskSimulator
 from src.backtest.strategy import PortfolioStrategy, Signal, Strategy
 from src.exchange.metadata import MetadataConfig
 from src.features.pipeline import FeatureFrame
+
+_log = structlog.get_logger("backtest.engine")
 
 
 # --------------------------------------------------------------------------- #
@@ -285,7 +289,14 @@ class BacktestEngine:
             # strategy implements the plain Strategy protocol.
             sig = cast(Strategy, self.strategy).evaluate(row)
             if sig is not None:
-                out[int(entry_bar)] = (sig, row)
+                bar = int(entry_bar)
+                # Deterministic on a collision: if two feature rows map to the same entry bar
+                # (mixed-grid data where decision_ts spacing != the OHLCV interval), KEEP THE
+                # FIRST (earliest decision_ts) and log the drop — never a silent last-writer-wins.
+                if bar in out:
+                    _log.warning("backtest_signal_bar_collision", symbol=sym_in.symbol, bar=bar)
+                else:
+                    out[bar] = (sig, row)
         return out
 
     def _portfolio_signals(
@@ -321,7 +332,11 @@ class BacktestEngine:
                 # implements the PortfolioStrategy protocol.
                 sig = cast(PortfolioStrategy, self.strategy).evaluate_portfolio(sym, row, others)
                 if sig is not None:
-                    out[sym][int(entry_bar)] = (sig, row)
+                    bar = int(entry_bar)
+                    if bar in out[sym]:  # collision → keep first (earliest dts), log the drop
+                        _log.warning("backtest_signal_bar_collision", symbol=sym, bar=bar)
+                    else:
+                        out[sym][bar] = (sig, row)
         return out
 
     # -- entry ----------------------------------------------------------- #
