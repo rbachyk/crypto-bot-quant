@@ -499,8 +499,18 @@ _AUTOREFRESH_JS = """
     if(e.getAttribute('data-job-msg')===jid)e.textContent=d.message;});
   }
  }
+ function jobIds(){
+  var s={};
+  document.querySelectorAll('[data-job],[data-job-prog],[data-job-msg]').forEach(function(e){
+   var id=e.getAttribute('data-job')||e.getAttribute('data-job-prog')||e.getAttribute('data-job-msg');
+   if(id)s[id]=1;
+  });
+  return Object.keys(s);
+ }
  try{
-  var es=new EventSource('/api/jobs/stream');
+  // Pass the page's job ids so the stream sends an immediate snapshot on connect (and on every
+  // auto-reconnect), syncing any transition missed between render and subscribe.
+  var es=new EventSource('/api/jobs/stream?ids='+encodeURIComponent(jobIds().join(',')));
   es.onmessage=function(ev){var d;try{d=JSON.parse(ev.data);}catch(e){return;}apply(d);};
   // onerror: EventSource reconnects automatically; nothing to do.
  }catch(e){}
@@ -1835,23 +1845,60 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _page(f"Per-Symbol Statistics: {symbol}", body)
 
     # ----- jobs ------------------------------------------------------------ #
+    def _job_snapshot(ids: list[str]) -> list[dict[str, Any]]:
+        """Current {job_id,status,progress,message} for the given ids — the initial-sync payload
+        the SSE stream sends on connect so chips reflect any transition that happened between the
+        page render and the EventSource subscribing (the cause of 'chip stuck on running')."""
+        if not ids:
+            return []
+        from src.jobs.events import format_progress
+
+        with session_scope() as session:
+            rows = session.execute(
+                select(
+                    Job.job_id, Job.status, Job.progress_current, Job.progress_total,
+                    Job.progress_message,
+                ).where(Job.job_id.in_(ids[:500]))
+            ).all()
+            return [
+                {
+                    "job_id": jid,
+                    "status": status.value,
+                    "progress": format_progress(cur, total),
+                    "message": msg or "",
+                }
+                for jid, status, cur, total, msg in rows
+            ]
+
     @app.get("/api/jobs/stream")
-    def jobs_stream(user: str = Depends(require_dashboard_auth)) -> StreamingResponse:
+    def jobs_stream(
+        ids: str = "", user: str = Depends(require_dashboard_auth)
+    ) -> StreamingResponse:
         """Server-Sent Events stream of job updates — the dashboard subscribes ONCE and receives
         status/progress/message pushes the instant a worker writes them (no client polling). Each
         event is a JSON line ``{job_id, status?, progress?, message?}``; a heartbeat comment keeps
-        the connection alive and lets us detect client disconnect."""
+        the connection alive and lets us detect client disconnect.
+
+        ``ids`` (the job chips currently on the page) get an immediate status snapshot on connect
+        so no transition is missed in the render→subscribe gap; EventSource also re-syncs on every
+        auto-reconnect by re-sending its ids."""
         import json as _json
         import time as _time
 
         from src.jobs.events import JOB_EVENTS_CHANNEL
 
+        wanted = [i for i in ids.split(",") if i]
+
         def _gen():
             client = _redis_client()
             pubsub = client.pubsub(ignore_subscribe_messages=True)
+            # Subscribe BEFORE the snapshot so an update landing during the snapshot read is
+            # buffered on the connection and still delivered by the stream loop (no gap).
             pubsub.subscribe(JOB_EVENTS_CHANNEL)
             try:
                 yield ": connected\n\n"  # open the stream immediately
+                for snap in _job_snapshot(wanted):  # initial sync for the page's chips
+                    yield f"data: {_json.dumps(snap)}\n\n"
                 last_beat = _time.time()
                 while True:
                     msg = pubsub.get_message(timeout=1.0)

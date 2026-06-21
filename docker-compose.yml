@@ -206,7 +206,11 @@ services:
     environment:
       <<: *app-env
       SERVICE_NAME: scheduler
-      SCHEDULER_ENABLED: "true"
+      # DISABLED: the periodic scheduler is off so nothing auto-enqueues recurring jobs
+      # (paper sessions / strategy validations that silently add dashboard trades). Re-enable
+      # by setting SCHEDULER_ENABLED=true (and the relevant ENABLE_* toggle) when you actually
+      # want background research running. With it false the service idles (it never ticks).
+      SCHEDULER_ENABLED: "false"
     # Periodic recurring jobs (research re-validation, paper sessions, ML shadow passes),
     # gated by the enable_* toggles. It only enqueues; the dedicated workers consume.
     command: ["python", "-m", "src.cli.main", "scheduler"]
