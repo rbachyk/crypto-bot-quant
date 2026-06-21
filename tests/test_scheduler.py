@@ -18,8 +18,13 @@ def _clear(sched: Scheduler) -> None:
 
 @requires_redis
 def test_due_respects_toggles() -> None:
-    # research on (default), ml shadow off (default).
-    sched = Scheduler(settings=Settings(_env_file=None))
+    # Background research is OFF by default (safe default) — nothing is due.
+    sched_off = Scheduler(settings=Settings(_env_file=None))
+    _clear(sched_off)
+    assert sched_off.due(time.time()) == []
+
+    # Turn research ON → strategy validation + paper session become schedulable; ml stays off.
+    sched = Scheduler(settings=Settings(_env_file=None, enable_background_research_jobs=True))
     _clear(sched)
     due = {j.job_type for j in sched.due(time.time())}
     assert "run_strategy_validation" in due
@@ -27,13 +32,17 @@ def test_due_respects_toggles() -> None:
     assert "run_ml_shadow_pass" not in due  # ml toggle is off
 
     # Flip the ML toggle → the ML shadow pass becomes schedulable.
-    sched_ml = Scheduler(settings=Settings(_env_file=None, enable_ml_shadow=True))
+    sched_ml = Scheduler(
+        settings=Settings(
+            _env_file=None, enable_background_research_jobs=True, enable_ml_shadow=True
+        )
+    )
     assert "run_ml_shadow_pass" in {j.job_type for j in sched_ml.due(time.time())}
 
 
 @requires_redis
 def test_tick_enqueues_then_not_due_until_interval() -> None:
-    sched = Scheduler(settings=Settings(_env_file=None))
+    sched = Scheduler(settings=Settings(_env_file=None, enable_background_research_jobs=True))
     _clear(sched)
     now = time.time()
     enqueued = set(sched.tick(now))
@@ -49,7 +58,7 @@ def test_runtime_pause_stops_enqueuing() -> None:
     """The dashboard pause toggle stops the scheduler from enqueuing without a restart."""
     from src.scheduler import is_scheduler_paused, set_scheduler_paused
 
-    sched = Scheduler(settings=Settings(_env_file=None))
+    sched = Scheduler(settings=Settings(_env_file=None, enable_background_research_jobs=True))
     _clear(sched)
     sched._redis.delete("qbot:sched:paused")
     assert not is_scheduler_paused(sched._redis)

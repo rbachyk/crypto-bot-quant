@@ -226,7 +226,7 @@ def _repair_missing_data(ctx: JobContext, params: dict) -> dict:
     """Detect gaps and backfill only the missing ranges (safe gap repair)."""
     from src.data import DataPlatform, load_data_config
 
-    cfg = load_data_config()
+    cfg = load_data_config(str(params.get("config_path")) if params.get("config_path") else None)
     platform = DataPlatform(cfg=cfg)
     keys = cfg.all_required_keys()
     written = 0
@@ -246,7 +246,8 @@ def _validate_data_quality(ctx: JobContext, params: dict) -> dict:
     """Run the Section 23 data-quality checks and persist the report."""
     from src.data import DataPlatform, load_data_config
 
-    platform = DataPlatform(cfg=load_data_config())
+    cfg = load_data_config(str(params.get("config_path")) if params.get("config_path") else None)
+    platform = DataPlatform(cfg=cfg)
     ctx.log("validating data quality")
     report = platform.validate()
     path = platform.write_quality_report(report, params.get("dataset_version"))
@@ -271,8 +272,11 @@ def _build_dataset_version(ctx: JobContext, params: dict) -> dict:
     from src.data import DataPlatform, load_data_config
 
     cfg_path = str(params.get("config_path")) if params.get("config_path") else None
+    # Load ONCE: a config with `as_of: now` re-resolves the window on every load, so two loads
+    # can land an hour apart — the download window would then differ from the validated/snapshotted
+    # one (spurious trailing-gap failures, non-reproducible snapshot id at hour boundaries).
     cfg = load_data_config(cfg_path)
-    platform = DataPlatform(cfg=load_data_config(cfg_path))
+    platform = DataPlatform(cfg=cfg)
     syms = cfg.active_symbols()
 
     # --- preflight: is the exchange reachable and do the symbols exist? --------------------- #

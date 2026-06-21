@@ -114,7 +114,9 @@ class Settings(BaseSettings):
     enable_live_trading: bool = False
     # Gate the SCHEDULER (src/scheduler.py): research/paper jobs run only when
     # enable_background_research_jobs is set; ML shadow passes only when enable_ml_shadow is set.
-    enable_background_research_jobs: bool = True
+    # OFF by default so nothing auto-enqueues recurring paper sessions / validations that add
+    # dashboard trades (matches compose + .env.example); opt in explicitly to run research.
+    enable_background_research_jobs: bool = False
     enable_ml_shadow: bool = False
     # Reserved: the online-learner and RL shadow layers currently run via their gates (LEARN-PROMO,
     # RL-SIM/RL-SHADOW), not scheduled jobs, so these toggles have no scheduled job to gate yet.

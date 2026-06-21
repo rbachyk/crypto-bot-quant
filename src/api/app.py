@@ -1889,6 +1889,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         wanted = [i for i in ids.split(",") if i]
 
+        # Bound each SSE connection's lifetime: a sync StreamingResponse holds an anyio
+        # threadpool thread (and a redis connection) for its whole life, so we cap it and let
+        # EventSource auto-reconnect. This recycles the thread + connection and prevents pool /
+        # redis-maxclients exhaustion from long-lived or stale tabs.
+        _SSE_MAX_SECONDS = 110
+
         def _gen():
             client = _redis_client()
             pubsub = client.pubsub(ignore_subscribe_messages=True)
@@ -1899,8 +1905,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 yield ": connected\n\n"  # open the stream immediately
                 for snap in _job_snapshot(wanted):  # initial sync for the page's chips
                     yield f"data: {_json.dumps(snap)}\n\n"
-                last_beat = _time.time()
-                while True:
+                started = _time.time()
+                last_beat = started
+                while _time.time() - started < _SSE_MAX_SECONDS:
                     msg = pubsub.get_message(timeout=1.0)
                     if msg and msg.get("type") == "message":
                         data = msg["data"]
@@ -1917,8 +1924,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         yield ": ping\n\n"  # heartbeat → keep-alive + disconnect detection
                         last_beat = _time.time()
             finally:
+                # Release BOTH the pubsub and the underlying connection (the per-request client
+                # has no shared pool, so not closing it leaks a redis connection per reconnect).
                 with contextlib.suppress(Exception):
                     pubsub.close()
+                with contextlib.suppress(Exception):
+                    client.close()
 
         return StreamingResponse(
             _gen(),

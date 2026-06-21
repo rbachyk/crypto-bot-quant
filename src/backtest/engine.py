@@ -437,8 +437,12 @@ class BacktestEngine:
         # Closing is taker on the opposite side (adverse slippage).
         exit_side = SELL if pos.side > 0 else BUY
         spread_bps = 2.0  # modelled exit spread floor; refined via min_half_spread_frac
+        # Use the REAL exit-bar notional for the impact term (mirrors the entry side). A hardcoded
+        # bar_notional=1.0 made the impact term ~`notional`× too large on exits, so any non-zero
+        # impact_coeff would blow up exit fills and corrupt every expectancy/promotion number.
+        bar_notional = float(bar.get("volume", 0.0) or 0.0) * ref_price
         slip = self.slippage.slippage_frac(
-            spread_bps=spread_bps, notional=pos.notional, bar_notional=1.0
+            spread_bps=spread_bps, notional=pos.notional, bar_notional=bar_notional or pos.notional
         )
         exit_price = self.slippage.fill_price(ref_price, exit_side, slip)
         exit_notional = pos.qty * exit_price

@@ -186,8 +186,17 @@ class CcxtLiveVenue:
             side=plan.side,
             qty=filled_qty,
             entry_price=avg,
-            stop_order_id=f"{entry.client_id}:sl" if plan.stop is not None else None,
-            tp_order_id=f"{entry.client_id}:tp" if plan.take_profit is not None else None,
+            # Only a FILLED position carries an exchange-side stop/TP marker. A zero-fill (e.g. a
+            # resting maker entry) must NOT report has_exchange_side_stop()==True, or the engine
+            # would treat an unfilled order as an executed, protected position (Section 2.2).
+            stop_order_id=(
+                f"{entry.client_id}:sl" if (filled_qty > 0 and plan.stop is not None) else None
+            ),
+            tp_order_id=(
+                f"{entry.client_id}:tp"
+                if (filled_qty > 0 and plan.take_profit is not None)
+                else None
+            ),
             owned=True,
         )
         resting: list[str] = []

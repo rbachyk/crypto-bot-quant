@@ -249,6 +249,14 @@ class Worker:
 
     # -- terminal transitions ------------------------------------------- #
     def _finish_succeeded(self, job_id: str, result: dict) -> JobStatus:
+        # Honor a cancel requested WHILE the handler ran: a handler that doesn't checkpoint via
+        # ctx.check_cancelled() would otherwise report SUCCEEDED and the cancel would be silently
+        # lost (the dashboard Cancel button would look like a no-op). Reflect it as CANCELLED.
+        try:
+            if self._redis.exists(_cancel_key(job_id)):
+                return self._finish_cancelled(job_id)
+        except Exception:  # noqa: BLE001 - a redis hiccup must not block finishing the job
+            pass
         with session_scope() as session:
             job = session.get(Job, job_id)
             if job is None:
