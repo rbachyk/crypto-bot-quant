@@ -203,19 +203,19 @@ class LiveLoop:
         own = OwnershipPolicy(self.settings)
         foreign_orders = sorted(o for o, v in exch_orders.items() if not own.is_own(v.client_id))
         foreign_positions = sorted(s for s, p in exch_positions.items() if not p.owned)
-        # Sync the mirror to the owned real state (drop closed, reflect new).
-        venue.open_orders = {o: v for o, v in exch_orders.items() if own.is_own(v.client_id)}
-        venue.positions = {s: p for s, p in exch_positions.items() if p.owned}
-        unprotected = sorted(
-            s for s, p in venue.positions.items() if not p.has_exchange_side_stop()
-        )
-        if unprotected:
-            _alert_reconcile(
-                self.env_label,
-                f"OWNED position(s) without an exchange-side stop: {unprotected}. Section 2.2 "
-                "violation — re-arm protection or emergency-close.",
-                title="reconciliation: unprotected owned position",
-            )
+        # Refresh/adopt OWNED items from the exchange (updates real stop/TP protection and picks up
+        # positions opened outside this session). We do NOT drop mirror entries the exchange does
+        # not list this tick — a just-placed position can lag in fetch_positions, and a false drop
+        # would mis-state exposure; closed positions are reconciled as the exchange catches up.
+        for sym, p in exch_positions.items():
+            if p.owned:
+                venue.positions[sym] = p
+                if not p.has_exchange_side_stop():
+                    # Log (not alert) so a multi-day loop can't flood the alert sink every tick.
+                    _log.warning("live_owned_position_unprotected", symbol=sym)
+        for oid, v in exch_orders.items():
+            if own.is_own(v.client_id):
+                venue.open_orders[oid] = v
         if foreign_orders or foreign_positions:
             _alert_reconcile(
                 self.env_label,

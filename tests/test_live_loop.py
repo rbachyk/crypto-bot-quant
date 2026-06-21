@@ -238,22 +238,22 @@ def test_per_tick_reconciliation_halts_on_foreign_position(tmp_path) -> None:
     assert session.foreign_order_halt_triggered
 
 
-def test_per_tick_reconciliation_syncs_mirror_to_real_book(tmp_path) -> None:
-    """The mirror is synced to the owned real exchange state each tick: an owned position that
-    closed exchange-side drops out (so caps/risk see real exposure)."""
+def test_per_tick_reconciliation_refreshes_owned_protection(tmp_path) -> None:
+    """Per tick, an owned exchange position is refreshed into the mirror with its REAL stop
+    state (so an owned position lacking an exchange-side stop is visible), and a clean book
+    does not halt."""
     settings = _testnet_settings()
-    fake = FakeCcxt()  # exchange reports NO open positions/orders
+    fake = FakeCcxt(positions=[
+        {"symbol": "ETH/USDT:USDT", "side": "long", "contracts": 0.1, "entryPrice": 3_000.0,
+         "stopLossPrice": 2_950.0,
+         "info": {"clientOrderId": f"{_PREFIX}e1", "stopLoss": "2950"}},
+    ])
     venue = CcxtLiveVenue(load_metadata_config(), settings, client=fake)
-    # Seed a stale mirror position as if one had been opened earlier.
-    from src.execution.venue import VenuePosition
-
-    venue.positions["BTC/USDT:USDT"] = VenuePosition(
-        symbol="BTC/USDT:USDT", side=1, qty=0.01, entry_price=50_000.0, owned=True
-    )
     loop = LiveLoop(mode="testnet", venue=venue, settings=settings)
     session = loop.engine.new_session("t")
-    assert loop._reconcile_live(session) is False  # clean book
-    assert venue.positions == {}  # stale position dropped (closed exchange-side)
+    assert loop._reconcile_live(session) is False  # clean book, no halt
+    assert "ETH/USDT:USDT" in venue.positions
+    assert venue.positions["ETH/USDT:USDT"].has_exchange_side_stop() is True  # real stop read
 
 
 def test_startup_reconciliation_clean_paper_is_noop(tmp_path) -> None:
