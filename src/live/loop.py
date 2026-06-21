@@ -25,6 +25,8 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+import structlog
+
 from src.config import Settings, get_settings
 from src.data.config import DataConfig, load_data_config
 from src.exchange.metadata import MetadataConfig, load_metadata_config
@@ -33,8 +35,28 @@ from src.execution.ownership import OwnershipPolicy
 from src.execution.reconciliation import StartupReconResult, reconcile_startup
 from src.execution.venue import Venue
 from src.killswitch import KillSwitch
+from src.monitoring import Alert, AlertSeverity, get_alert_sink
 from src.paper.engine import PaperCandidateInput, PaperTradingEngine
 from src.paper.session import PaperSession
+
+_log = structlog.get_logger("live.loop")
+
+
+def _alert_reconcile(
+    environment: str,
+    recommended_action: str,
+    *,
+    title: str = "reconciliation: unknown order/position detected",
+) -> None:
+    get_alert_sink().send(
+        Alert(
+            title=title,
+            severity=AlertSeverity.CRITICAL,
+            component="execution",
+            environment=environment,
+            recommended_action=recommended_action,
+        )
+    )
 
 _MODES = ("paper", "testnet", "live")
 
@@ -149,6 +171,68 @@ class LiveLoop:
             kill_switch=self.kill_switch,
             venue=self.venue,
         )
+        # Bind the bounded-live max_open_positions cap to REAL concurrency: count owned positions
+        # in the (per-tick reconciled) venue mirror, so a closed position frees a slot instead of
+        # relying on an internal counter that only ever incremented.
+        if guard is not None and hasattr(guard, "set_position_source"):
+            guard.set_position_source(
+                lambda: sum(
+                    1 for p in self.venue.positions.values() if getattr(p, "owned", True)
+                )
+            )
+
+    def _reconcile_live(self, session: PaperSession) -> bool:
+        """Per-tick reconciliation against the REAL exchange book (real venues only, Section 7).
+
+        Re-pulls live orders + positions, syncs the venue mirror to the owned real state (so a
+        position closed exchange-side via its SL/TP drops out and the risk/guard see real
+        exposure), HALTS on any foreign/manual order or position, and alerts on an owned position
+        missing its exchange-side stop (Section 2.2). A transient fetch error never halts — the
+        next tick retries. Returns True if a halt is required."""
+        venue = self.venue
+        if not (
+            hasattr(venue, "fetch_open_orders") and hasattr(venue, "fetch_exchange_positions")
+        ):
+            return False  # offline paper venue → no real book; engine reconciliation handles it
+        try:
+            exch_orders = venue.fetch_open_orders()
+            exch_positions = venue.fetch_exchange_positions()
+        except Exception:  # noqa: BLE001 - a transient fetch error must not halt the loop
+            _log.warning("live_reconcile_fetch_error", exc_info=True)
+            return False
+        own = OwnershipPolicy(self.settings)
+        foreign_orders = sorted(o for o, v in exch_orders.items() if not own.is_own(v.client_id))
+        foreign_positions = sorted(s for s, p in exch_positions.items() if not p.owned)
+        # Sync the mirror to the owned real state (drop closed, reflect new).
+        venue.open_orders = {o: v for o, v in exch_orders.items() if own.is_own(v.client_id)}
+        venue.positions = {s: p for s, p in exch_positions.items() if p.owned}
+        unprotected = sorted(
+            s for s, p in venue.positions.items() if not p.has_exchange_side_stop()
+        )
+        if unprotected:
+            _alert_reconcile(
+                self.env_label,
+                f"OWNED position(s) without an exchange-side stop: {unprotected}. Section 2.2 "
+                "violation — re-arm protection or emergency-close.",
+                title="reconciliation: unprotected owned position",
+            )
+        if foreign_orders or foreign_positions:
+            _alert_reconcile(
+                self.env_label,
+                f"foreign order(s)={foreign_orders} position(s)={foreign_positions}; halt new "
+                "entries and investigate (Section 7).",
+            )
+            session.foreign_order_halt_triggered = True
+            session.reconciliation_events.append(
+                {
+                    "phase": "tick",
+                    "halt_triggered": True,
+                    "foreign_orders": foreign_orders,
+                    "foreign_positions": foreign_positions,
+                }
+            )
+            return True
+        return False
 
     def reconcile_startup(self) -> StartupReconResult:
         """Reconcile the REAL exchange book against this bot before any tick (Section 7).
@@ -214,9 +298,15 @@ class LiveLoop:
             before_exec = session.executed_count
             before_rej = session.rejected_count
             self.engine.process_candidates(group, session)
-            # Reconcile the bot's mirror against the venue every tick (Section 7);
-            # a foreign order halts the loop.
-            if self.engine.run_reconciliation(session):
+            # Reconcile every tick (Section 7); a foreign order/position halts the loop. A real
+            # venue (testnet/demo/live) re-pulls the ACTUAL exchange book (detecting foreign items
+            # and closes that happened exchange-side); offline paper uses the engine's own mirror.
+            tick_halt = (
+                self._reconcile_live(session)
+                if self.mode != "paper"
+                else self.engine.run_reconciliation(session)
+            )
+            if tick_halt:
                 result.halted = True
                 tick = LiveTick(
                     decision_ts,

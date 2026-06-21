@@ -223,6 +223,39 @@ def test_startup_reconciliation_adopts_owned_and_runs(tmp_path) -> None:
     assert "ETH/USDT:USDT" in venue.positions  # adopted into the mirror
 
 
+def test_per_tick_reconciliation_halts_on_foreign_position(tmp_path) -> None:
+    """Mid-session, a foreign/manual position appearing on the real exchange book halts the loop
+    (the per-tick Section-7 control now re-pulls actual exchange state, not the venue mirror)."""
+    settings = _testnet_settings()
+    fake = FakeCcxt(positions=[
+        {"symbol": "XRP/USDT:USDT", "side": "long", "contracts": 5.0, "entryPrice": 0.5,
+         "info": {"clientOrderId": "MANUAL_human_1"}},
+    ])
+    venue = CcxtLiveVenue(load_metadata_config(), settings, client=fake)
+    loop = LiveLoop(mode="testnet", venue=venue, settings=settings)
+    session = loop.engine.new_session("t")
+    assert loop._reconcile_live(session) is True  # foreign → halt
+    assert session.foreign_order_halt_triggered
+
+
+def test_per_tick_reconciliation_syncs_mirror_to_real_book(tmp_path) -> None:
+    """The mirror is synced to the owned real exchange state each tick: an owned position that
+    closed exchange-side drops out (so caps/risk see real exposure)."""
+    settings = _testnet_settings()
+    fake = FakeCcxt()  # exchange reports NO open positions/orders
+    venue = CcxtLiveVenue(load_metadata_config(), settings, client=fake)
+    # Seed a stale mirror position as if one had been opened earlier.
+    from src.execution.venue import VenuePosition
+
+    venue.positions["BTC/USDT:USDT"] = VenuePosition(
+        symbol="BTC/USDT:USDT", side=1, qty=0.01, entry_price=50_000.0, owned=True
+    )
+    loop = LiveLoop(mode="testnet", venue=venue, settings=settings)
+    session = loop.engine.new_session("t")
+    assert loop._reconcile_live(session) is False  # clean book
+    assert venue.positions == {}  # stale position dropped (closed exchange-side)
+
+
 def test_startup_reconciliation_clean_paper_is_noop(tmp_path) -> None:
     """Offline paper has no real exchange book — startup reconciliation is a clean no-op."""
     feed = _feed(tmp_path)

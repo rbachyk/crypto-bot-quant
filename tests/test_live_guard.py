@@ -104,6 +104,19 @@ def test_enforces_max_open_positions_and_register_close() -> None:
     assert g.allow_live_order(_plan())[0]
 
 
+def test_max_open_positions_binds_to_live_position_source() -> None:
+    """When a live position source is wired (the reconciled venue mirror), the cap reflects REAL
+    concurrency — closing a position frees a slot without needing register_close()."""
+    limits = LiveLimits(max_orders_per_session=9, max_open_positions=1, account_equity=10_000.0)
+    g = _guard(limits=limits)
+    live_count = {"n": 1}  # pretend one position is already open on the exchange
+    g.set_position_source(lambda: live_count["n"])
+    ok, reason = g.allow_live_order(_plan())  # at the cap → blocked
+    assert not ok and "max_open_positions" in reason
+    live_count["n"] = 0  # the exchange position closed (reconciliation refreshed the mirror)
+    assert g.allow_live_order(_plan())[0]  # slot freed → allowed
+
+
 def test_paper_settings_short_circuit_without_db() -> None:
     # A real paper Settings has live_trading_allowed False → denied before any DB call.
     guard = LiveActivationGuard(

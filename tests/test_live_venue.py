@@ -366,6 +366,26 @@ def test_startup_reconciliation_detects_foreign_and_adopts_owned() -> None:
     assert "HALT" in res.report()
 
 
+def test_fetch_positions_reads_real_exchange_side_stop() -> None:
+    """A reconciled position reflects the REAL exchange-side stop/TP, so an owned position with
+    no stop is correctly reported unprotected (not trusting a self-minted marker)."""
+    fake = FakeCcxt()
+    fake._positions = [
+        {  # protected: carries a stopLoss in info
+            "symbol": "BTC/USDT:USDT", "side": "long", "contracts": 0.01, "entryPrice": 50_000.0,
+            "stopLossPrice": 49_000.0,
+            "info": {"clientOrderId": f"{_PREFIX}e1", "stopLoss": "49000"},
+        },
+        {  # UNPROTECTED: no stop on the exchange
+            "symbol": "ETH/USDT:USDT", "side": "long", "contracts": 0.1, "entryPrice": 3_000.0,
+            "info": {"clientOrderId": f"{_PREFIX}e2", "stopLoss": "0"},
+        },
+    ]
+    pos = _venue(fake).fetch_exchange_positions()
+    assert pos["BTC/USDT:USDT"].has_exchange_side_stop() is True
+    assert pos["ETH/USDT:USDT"].has_exchange_side_stop() is False
+
+
 def test_emergency_close_requires_confirmation() -> None:
     venue = _venue(FakeCcxt())
     with pytest.raises(PermissionError, match="confirmation"):

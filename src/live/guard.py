@@ -98,6 +98,15 @@ class LiveActivationGuard:
         self._approved = approved
         self._orders_placed = 0
         self._open_positions = 0
+        # Optional source of the CURRENT concurrent owned-position count. When wired (by the live
+        # loop, from the reconciled venue mirror) the max_open_positions cap binds to REAL
+        # concurrency — a closed position frees a slot — instead of an internal counter that only
+        # ever incremented (register_close was never called).
+        self._position_source: Callable[[], int] | None = None
+
+    def set_position_source(self, source: Callable[[], int]) -> None:
+        """Wire a live concurrent-position counter so the cap reflects real open exposure."""
+        self._position_source = source
 
     def allow_live_order(self, plan: OrderPlan) -> tuple[bool, str]:
         """The four-gate live-safety check + bounded caps. Returns (allowed, reason)."""
@@ -112,7 +121,8 @@ class LiveActivationGuard:
                 False,
                 f"bounded-live cap: max_orders_per_session={self.limits.max_orders_per_session}",
             )
-        if self._open_positions >= self.limits.max_open_positions:
+        open_now = self._position_source() if self._position_source else self._open_positions
+        if open_now >= self.limits.max_open_positions:
             return False, f"bounded-live cap: max_open_positions={self.limits.max_open_positions}"
         notional = self._notional(plan)
         cap = self.limits.account_equity * self.limits.max_order_notional_pct

@@ -294,20 +294,33 @@ class CcxtLiveVenue:
         return out
 
     def fetch_exchange_positions(self) -> dict[str, VenuePosition]:
-        """Live exchange positions (for reconciliation vs the bot's mirror, Section 7)."""
+        """Live exchange positions (for reconciliation vs the bot's mirror, Section 7).
+
+        Reads the REAL exchange-side protection (stopLoss / takeProfit / trailingStop) off each
+        position so ``has_exchange_side_stop()`` reflects what the venue actually holds — an
+        adopted or reconciled position with NO stop is correctly reported unprotected (Section 2.2),
+        instead of trusting a self-minted marker."""
         out: dict[str, VenuePosition] = {}
         for p in self._ex.fetch_positions() or []:
             qty = _num(p.get("contracts")) or 0.0
             if qty <= 0:
                 continue
             sym = str(p.get("symbol"))
-            cid = str((p.get("info") or {}).get("clientOrderId") or "")
+            info = p.get("info") or {}
+            cid = str(info.get("clientOrderId") or "")
+            owned = cid.startswith(self.settings.order_client_id_prefix)
+            sl = _num(p.get("stopLossPrice")) or _num(info.get("stopLoss"))
+            tp = _num(p.get("takeProfitPrice")) or _num(info.get("takeProfit"))
+            trail = _num(info.get("trailingStop"))
             out[sym] = VenuePosition(
                 symbol=sym,
                 side=1 if str(p.get("side")) == "long" else -1,
                 qty=qty,
                 entry_price=_num(p.get("entryPrice")) or 0.0,
-                owned=cid.startswith(self.settings.order_client_id_prefix),
+                stop_order_id=f"{sym}:sl" if (sl and sl > 0) else None,
+                tp_order_id=f"{sym}:tp" if (tp and tp > 0) else None,
+                trail_order_id=f"{sym}:trail" if (trail and trail > 0) else None,
+                owned=owned,
             )
         return out
 
