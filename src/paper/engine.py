@@ -147,6 +147,16 @@ class PaperTradingEngine:
         Each input is processed in sequence (as one decision bar). The kill
         switch and reconciliation are respected on every call.
         """
+        # Snapshot the account's free margin ONCE per batch (a real venue only) so the risk
+        # manager's pre-trade free-margin blocker (Section 17) reasons over real account state;
+        # SimulatedVenue has no such method, so it stays None and the check is skipped.
+        self._free_margin = None
+        fetch = getattr(self._venue, "fetch_free_margin", None)
+        if callable(fetch):
+            try:
+                self._free_margin = fetch()
+            except Exception:  # noqa: BLE001 - a balance hiccup must not stop processing
+                self._free_margin = None
         for inp in inputs:
             self._process_one(inp, session)
         session.ended_at = datetime.now(UTC)
@@ -265,6 +275,7 @@ class PaperTradingEngine:
             portfolio=portfolio,
             breakers=breakers,
             unknown_order_present=inp.inject_foreign_order,
+            free_margin=getattr(self, "_free_margin", None),
         )
 
         # Setup quality gate (used downstream by ranker; score persisted in session).

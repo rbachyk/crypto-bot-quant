@@ -5,9 +5,8 @@ correctly (exit non-zero when not ready / nothing promoted) without needing netw
 
 from __future__ import annotations
 
-from typer.testing import CliRunner
-
 from src.cli.main import app
+from typer.testing import CliRunner
 
 from tests.conftest import requires_db
 

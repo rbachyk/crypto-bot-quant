@@ -232,6 +232,47 @@ def test_concurrency_caps() -> None:
     assert not d.approved and "max_concurrent_total" in d.reasons
 
 
+def test_free_margin_blocker_rejects_when_buffer_breached() -> None:
+    """The pre-trade free-margin blocker refuses an order that would breach the minimum free
+    margin (active only when the account's free margin is known — a real venue)."""
+    cand = _cand()
+    tight = AccountState(
+        portfolio=PortfolioState(equity=EQUITY),
+        breakers=BreakerInputs(equity=EQUITY, peak_equity=EQUITY, daily_pnl=0.0),
+        free_margin=100.0,  # almost no free margin
+    )
+    d = _rm().evaluate(cand, tight)
+    assert not d.approved and "insufficient_free_margin" in d.reasons
+    # Ample free margin → not blocked by this check.
+    ample = AccountState(
+        portfolio=PortfolioState(equity=EQUITY),
+        breakers=BreakerInputs(equity=EQUITY, peak_equity=EQUITY, daily_pnl=0.0),
+        free_margin=EQUITY,
+    )
+    assert _rm().evaluate(cand, ample).approved
+
+
+def test_liquidation_distance_blocker_rejects_when_too_close() -> None:
+    """The pre-trade liquidation-distance blocker refuses an entry whose (venue-provided)
+    liquidation price sits closer than min_liquidation_distance; absent the price it's skipped."""
+    cand = _cand(entry_price=50_000.0, side=1)
+    close = AccountState(
+        portfolio=PortfolioState(equity=EQUITY),
+        breakers=BreakerInputs(equity=EQUITY, peak_equity=EQUITY, daily_pnl=0.0),
+        liquidation_price=49_000.0,  # 2% away < 10% required
+    )
+    d = _rm().evaluate(cand, close)
+    assert not d.approved and "liquidation_too_close" in d.reasons
+    # A far liquidation price passes; no price (paper) skips the check.
+    far = AccountState(
+        portfolio=PortfolioState(equity=EQUITY),
+        breakers=BreakerInputs(equity=EQUITY, peak_equity=EQUITY, daily_pnl=0.0),
+        liquidation_price=40_000.0,  # 20% away
+    )
+    assert _rm().evaluate(cand, far).approved
+    assert _rm().evaluate(cand, _flat()).approved  # liquidation_price None → skipped
+
+
 def test_per_symbol_conflict() -> None:
     existing = Position(
         symbol=BTC,

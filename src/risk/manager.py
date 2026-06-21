@@ -23,6 +23,7 @@ The decision vocabulary is approve / resize / reject / block:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from src.exchange.metadata import MetadataConfig
@@ -40,6 +41,14 @@ class AccountState:
     portfolio: PortfolioState
     breakers: BreakerInputs
     unknown_order_present: bool = False  # reconciliation found a foreign order
+    # Free (available) margin on the account, when known (real venue). When provided, the
+    # pre-trade free-margin blocker enforces the minimum free-margin buffer (Section 17); None
+    # (paper / no account data) skips that check.
+    free_margin: float | None = None
+    # The would-be liquidation price for a new position on the candidate's symbol, when the venue
+    # can estimate it (real venue). When provided, the pre-trade liquidation-distance blocker
+    # refuses an entry whose liquidation sits too close; None (paper) skips the check.
+    liquidation_price: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +80,9 @@ class RiskDecision:
 def _round_step(qty: float, step: float) -> float:
     if step <= 0:
         return qty
-    return int(qty / step) * step
+    # floor (not int() truncation) so this matches the order builder's quantisation exactly —
+    # a divergence could push a risk-approved size below min-notional at build time (Section 18).
+    return math.floor(qty / step) * step
 
 
 class RiskManager:
@@ -201,6 +212,23 @@ class RiskManager:
         leverage = notional / equity
         if leverage > self.envelope.max_leverage + 1e-9:
             return RiskDecision(False, "reject", reasons=("leverage_exceeds_envelope",))
+
+        # 4a) Pre-trade liquidation-distance blocker (Section 17). Only when the venue supplies the
+        #     would-be liquidation price (a real account): refuse an entry whose liquidation sits
+        #     closer than min_liquidation_distance.
+        if state.liquidation_price is not None and not self.breakers.liquidation_distance_ok(
+            candidate.entry_price, state.liquidation_price, candidate.side
+        ):
+            return RiskDecision(False, "reject", reasons=("liquidation_too_close",))
+
+        # 4b) Pre-trade free-margin blocker (Section 17). Only when the account's free margin is
+        #     known (a real venue): refuse if posting this order's margin would breach the minimum
+        #     free-margin buffer.
+        if state.free_margin is not None:
+            required_margin = notional / self.envelope.max_leverage
+            if not self.breakers.margin_available(required_margin, state.free_margin, equity):
+                return RiskDecision(False, "reject", reasons=("insufficient_free_margin",))
+
         risk_pct_used = risk_amount / equity
         if risk_pct_used > self.envelope.max_risk_pct_per_trade + 1e-9:
             return RiskDecision(False, "reject", reasons=("risk_pct_exceeds_envelope",))

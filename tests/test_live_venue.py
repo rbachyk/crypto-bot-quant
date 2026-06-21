@@ -406,6 +406,32 @@ class _EnvClient:
         self.demo = on
 
 
+def test_place_order_refuses_a_bare_entry() -> None:
+    """An entry must go through place_bracket (stop attached atomically); place_order — used for
+    cancel/replace of protective legs — refuses an entry so it can't fill unprotected."""
+    from src.execution.order import Order, OrderType
+
+    venue = _venue(FakeCcxt())
+    entry = Order(
+        client_id=f"{_PREFIX}entry_9", symbol="BTC/USDT:USDT", side="buy", qty=0.01,
+        order_type=OrderType.MARKET, role="entry", tags=_TAGS,
+    )
+    with pytest.raises(ValueError, match="cannot place an entry"):
+        venue.place_order(entry)
+
+
+def test_apply_exchange_env_raises_when_testnet_sandbox_unavailable() -> None:
+    """A ccxt build without sandbox support must RAISE for testnet, never silently fall through
+    to the live mainnet endpoints with testnet keys."""
+    from types import SimpleNamespace
+
+    from src.execution.live_venue import apply_exchange_env
+
+    no_sandbox = SimpleNamespace()  # no set_sandbox_mode / enable_demo_trading
+    with pytest.raises(ValueError, match="no sandbox support"):
+        apply_exchange_env(no_sandbox, "testnet")
+
+
 def test_apply_exchange_env_routes_to_the_right_environment() -> None:
     from src.execution.live_venue import apply_exchange_env
 

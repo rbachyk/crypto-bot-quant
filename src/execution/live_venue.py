@@ -54,8 +54,16 @@ def apply_exchange_env(ex: Any, exchange_env: str) -> None:
                 "this ccxt build has no demo-trading support; upgrade ccxt or use testnet"
             )
         ex.enable_demo_trading(True)
-    elif exchange_env != "live" and hasattr(ex, "set_sandbox_mode"):
+    elif exchange_env == "testnet":
+        # Must explicitly switch to the sandbox. If the ccxt build lacks sandbox support we RAISE
+        # rather than silently fall through to the LIVE mainnet endpoints with testnet keys.
+        if not hasattr(ex, "set_sandbox_mode"):
+            raise ValueError(
+                "this ccxt build has no sandbox support; cannot route testnet safely "
+                "(it would otherwise hit the live mainnet endpoints)"
+            )
         ex.set_sandbox_mode(True)  # testnet — no real funds
+    # live → mainnet, no switch.
 
 
 class LiveOrderGuard(Protocol):
@@ -257,7 +265,16 @@ class CcxtLiveVenue:
         return new_order.client_id
 
     def place_order(self, order: Order) -> None:
-        """Place a single (non-bracket) order — used by cancel/replace."""
+        """Place a single (non-bracket) order — used by cancel/replace of PROTECTIVE legs only.
+
+        Refuses an ``entry`` order: an entry must go through :meth:`place_bracket` so its
+        exchange-resident stop is attached atomically (Section 2.2). A bare entry placed here
+        could fill with no protection."""
+        if order.role == "entry":
+            raise ValueError(
+                "place_order cannot place an entry (no attached stop); use place_bracket so "
+                "protection is attached atomically (Section 2.2)"
+            )
         self._ensure_tradable_metadata(order.symbol)
         otype = "limit" if order.order_type in _MAKER_TYPES else "market"
         price = float(order.price) if order.price is not None else None
@@ -292,6 +309,19 @@ class CcxtLiveVenue:
                 else {},
             )
         return out
+
+    def fetch_free_margin(self) -> float | None:
+        """Free (available) margin in the quote currency, for the pre-trade free-margin blocker
+        (Section 17). Returns None if the balance can't be read (the blocker then skips)."""
+        try:
+            bal = self._ex.fetch_balance() or {}
+        except Exception:  # noqa: BLE001 - a balance hiccup must not crash the loop
+            return None
+        quote = "USDT"
+        free = (bal.get("free") or {}).get(quote)
+        if free is None:
+            free = ((bal.get(quote) or {}) if isinstance(bal.get(quote), dict) else {}).get("free")
+        return _num(free)
 
     def fetch_exchange_positions(self) -> dict[str, VenuePosition]:
         """Live exchange positions (for reconciliation vs the bot's mirror, Section 7).
