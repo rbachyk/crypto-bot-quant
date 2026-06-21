@@ -299,6 +299,43 @@ def ml_shadow_lake(
     typer.echo(job_id)
 
 
+@app.command(name="promote-lake")
+def promote_lake(
+    config_path: str = typer.Option(
+        "configs/data.bybit.yaml", "--config", help="data config yaml (real-data snapshot)"
+    ),
+    timeframe: str = typer.Option("", "--timeframe", help="decision timeframe ('' = base)"),
+) -> None:
+    """Validate every enabled candidate on REAL downloaded lake data and persist promote/shelve
+    verdicts tagged ``data_source='lake'`` — the strategies that demo/testnet/live are allowed to
+    run (Section 13). Runs INLINE (no worker needed). Requires a downloaded snapshot first
+    (``qbot download``). Exits non-zero if nothing promotes."""
+    from src.data.config import load_data_config
+    from src.strategies.lake_research import validate_all_on_lake
+    from src.strategies.promotion import persist_validations
+
+    data_cfg = load_data_config(config_path or None)
+    validations = validate_all_on_lake(data_cfg, timeframe=timeframe or None)
+    written = persist_validations(validations, data_source="lake")
+    promoted = [v.candidate_id for v in validations if v.promoted]
+    shelved = {
+        v.candidate_id: ("; ".join(v.shelved_reasons) or "did not clear gates")
+        for v in validations
+        if not v.promoted
+    }
+    typer.echo(
+        json.dumps(
+            {"validated": written, "promoted": promoted, "shelved": shelved}, indent=2
+        )
+    )
+    if not promoted:
+        typer.echo(
+            "no candidate promoted on real data — extend the window or retune thresholds "
+            "(do NOT loosen the gates)."
+        )
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def leaderboard(
     kind: str = typer.Option("backtest", "--kind", help="run kind ('all' = every kind)"),
@@ -393,10 +430,29 @@ def demo_readiness() -> None:
 
     Composes the demo-safety controls (kill switch, ownership, risk caps, verified exchange
     metadata, TP/SL capability, real-data strategy eligibility, reconciliation). Places no
-    orders. Exits non-zero unless the verdict is PASS."""
+    orders. Exits non-zero unless the verdict is PASS.
+
+    When demo/testnet credentials are configured it connects a (read-only) venue so the
+    reconciliation check runs against the REAL exchange book and can PASS; without credentials
+    that one check stays BLOCKED (it cannot confirm a clean book up front)."""
     from src.live.demo_guard import DemoReadinessGuard
 
-    report = DemoReadinessGuard().evaluate()
+    settings = get_settings()
+    venue = None
+    if (
+        settings.exchange_env in ("demo", "testnet")
+        and settings.exchange_api_key
+        and settings.exchange_api_secret
+    ):
+        try:
+            from src.exchange.metadata import load_metadata_for
+            from src.execution.live_venue import get_venue
+
+            venue = get_venue(load_metadata_for(settings.exchange_id), settings, live=True)
+        except Exception as exc:  # noqa: BLE001 - no creds / no network → recon stays BLOCKED
+            typer.echo(f"(reconciliation will stay BLOCKED — could not connect venue: {exc})")
+
+    report = DemoReadinessGuard(settings, venue=venue).evaluate()
     typer.echo(report.report())
     typer.echo(json.dumps(report.to_dict(), indent=2))
     if not report.ok:

@@ -23,7 +23,7 @@ from src.backtest.walkforward import run_walk_forward
 from src.config import Settings, get_settings
 from src.data.config import DataConfig
 from src.data.store import SeriesStore
-from src.exchange.metadata import MetadataConfig, load_metadata_config
+from src.exchange.metadata import MetadataConfig, load_metadata_for
 from src.strategies.candidates import build_strategy
 from src.strategies.config import CandidateConfig, StrategiesConfig, load_strategies_config
 from src.strategies.research import CandidateValidation, SideDecision, _decide_sides
@@ -116,7 +116,10 @@ def validate_all_on_lake(
     settings = settings or get_settings()
     strat_cfg = load_strategies_config()
     cfg = load_backtest_config()
-    meta = load_metadata_config()
+    # Validate on the SAME metadata the live venue executes with (per the data config's exchange),
+    # so a strategy is sized/promoted on the exact tick/lot/min-notional it will trade on — not the
+    # offline skeleton spec. Falls back to skeleton for the skeleton exchange.
+    meta = load_metadata_for(data_cfg.exchange_id)
     tf = timeframe or data_cfg.base_timeframe
     syms = symbols or data_cfg.active_symbols()
     store = store if store is not None else SeriesStore(settings.data_lake_path)
