@@ -94,6 +94,86 @@ def test_live_loop_runs_the_realtime_feed() -> None:
     assert result.session.session_id.startswith("paper:")
 
 
+class FlakyFeedSource:
+    """Delivers bars but raises a transient error on every other call — simulating the
+    intermittent REST/websocket faults that accumulate over a multi-day session."""
+
+    def __init__(self, bars: list[dict]) -> None:
+        self._seq = [(int(b["ts"]), b) for b in bars]
+        self._i = 0
+        self._call = 0
+
+    def connected(self) -> bool:
+        return True
+
+    def latest_bar(self, symbol):
+        self._call += 1
+        if self._call % 2 == 0:
+            raise ConnectionError("transient exchange disconnect")
+        if self._i >= len(self._seq):
+            return self._seq[-1] if self._seq else None
+        item = self._seq[self._i]
+        self._i += 1
+        return item
+
+    def backfill(self, *a, **k):
+        return []
+
+
+def test_transient_feed_errors_do_not_kill_the_stream() -> None:
+    """A feed source that intermittently raises must NOT end the session — the regression for
+    the multi-day stop where one unguarded latest_bar() exception killed the whole loop."""
+    feed = LiveCandidateFeed(
+        _cfg(),
+        feed_source=FlakyFeedSource(_new_bars(24)),
+        rest_source=DeterministicSource(EX),
+        timeframe=TF,
+        symbols=[SYM],
+        seed_end_ms=SEED_END,
+        poll_sec=0.1,  # continuous → keeps polling through the transient errors
+        max_groups=6,  # the stream survives the raised errors and still reaches the cap
+    )
+    groups = list(feed.groups())
+    assert len(groups) == 6  # delivered despite a transient error on every other poll
+
+
+def test_continuous_session_resumes_after_data_integrity_halt() -> None:
+    """A continuous session pauses (does not end) while data integrity is down, then resumes —
+    a transient exchange-wide halt must not silently end a multi-day run (Section 8)."""
+    from src.live.data_manager import DataHealth
+
+    class _FlappingDataManager:
+        """Halts for the first few polls, then recovers."""
+
+        def __init__(self) -> None:
+            self.polls = 0
+
+        def poll(self, now_ms):
+            self.polls += 1
+            halted = self.polls <= 3  # down for 3 cycles, then healthy
+            return DataHealth(
+                ts=now_ms, connected=not halted, exchange_halt=halted,
+                reason="blip" if halted else "",
+            )
+
+        def is_fresh(self, sym):
+            return True
+
+    feed = LiveCandidateFeed(
+        _cfg(),
+        feed_source=ScriptedFeedSource(_new_bars(8)),
+        rest_source=DeterministicSource(EX),
+        timeframe=TF,
+        symbols=[SYM],
+        data_manager=_FlappingDataManager(),
+        seed_end_ms=SEED_END,
+        poll_sec=1.0,  # continuous → waits through the halt instead of ending
+        max_groups=3,
+    )
+    groups = list(feed.groups())
+    assert len(groups) == 3  # resumed and produced candidates after the halt cleared
+
+
 def test_continuous_feed_stops_on_should_stop() -> None:
     """A continuous (poll_sec>0) session must terminate promptly when Stop is requested —
     otherwise it would wait for new bars forever and never honour the dashboard Stop button."""

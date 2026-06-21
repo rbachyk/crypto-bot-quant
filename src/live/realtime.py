@@ -20,6 +20,8 @@ import time
 from collections import deque
 from collections.abc import Iterator
 
+import structlog
+
 from src.config import Settings, get_settings
 from src.data.config import DataConfig
 from src.data.schema import (
@@ -39,6 +41,8 @@ from src.paper.lake import build_candidate
 from src.regime.detector import load_regime_config
 
 _POINT_IN_TIME = (MARK, INDEX, FUNDING, OPEN_INTEREST, SPREAD)
+
+_log = structlog.get_logger("live.realtime")
 
 
 class RollingReader(FeatureDataReader):
@@ -200,6 +204,29 @@ class LiveCandidateFeed:
                 _emit(strat.evaluate_portfolio(sym, row, peers), sid, ver, promoted)
         return out
 
+    def _advance_symbol(
+        self, sym: str, last_ts: dict[str, int]
+    ) -> tuple[str, dict, dict] | None:
+        """Pull the latest closed bar for one symbol and compute its feature row, or None if
+        nothing new. Isolated so a transient per-symbol error (a REST blip, a dropped websocket,
+        a one-off feature error) is caught by the caller and never kills the whole stream."""
+        if self.data_manager is not None and not self.data_manager.is_fresh(sym):
+            return None
+        got = self.feed_source.latest_bar(sym)
+        if got is None:
+            return None
+        ts, bar = got
+        if ts <= last_ts[sym]:
+            return None
+        last_ts[sym] = ts
+        self._reader.append_bar(sym, bar)
+        frame = compute_features(sym, self._reader, self.feat_cfg)
+        if not frame.rows:
+            return None
+        row = frame.rows[-1]
+        self._latest_rows[sym] = row
+        return (sym, bar, row)
+
     def groups(self) -> Iterator[tuple[int, list[PaperCandidateInput]]]:
         if not self._reader.ohlcv(self.symbols[0]):
             self.seed()
@@ -209,36 +236,52 @@ class LiveCandidateFeed:
             if self._should_stop is not None and self._should_stop():
                 return  # operator pressed Stop (dashboard) → end the stream cleanly
             now = int(time.time() * 1000)
-            if self.data_manager is not None and self.data_manager.poll(now).exchange_halt:
+            try:
+                halted = (
+                    self.data_manager is not None and self.data_manager.poll(now).exchange_halt
+                )
+            except Exception:  # noqa: BLE001 - a data-manager poll error must not kill the stream
+                _log.warning("live_feed_poll_error", exc_info=True)
+                if self._sleep_or_stop():
+                    return
+                continue
+            if halted:
+                # Section 8: stop trading while exchange-wide data integrity is down. A CONTINUOUS
+                # (polling) session does NOT end here — it waits and re-checks so a transient
+                # outage (a websocket drop, a REST blip — near-certain over a multi-day run)
+                # pauses trading and then resumes when data is healthy again, rather than silently
+                # ending the session. A finite/one-shot run ends as before.
+                if self.poll_sec > 0:
+                    _log.warning("live_feed_exchange_halt_waiting")
+                    if self._sleep_or_stop():
+                        return
+                    continue
                 return
             # Pass 1 — collect every symbol that has a NEW closed bar this cycle and refresh its
             # feature row, so the cross-asset peer view (self._latest_rows) is complete before
-            # any portfolio strategy is evaluated.
+            # any portfolio strategy is evaluated. A per-symbol error is logged and skipped — the
+            # stream survives transient exchange/network faults over a multi-day session.
             advanced: list[tuple[str, dict, dict]] = []  # (sym, bar, row)
             for sym in self.symbols:
-                if self.data_manager is not None and not self.data_manager.is_fresh(sym):
+                try:
+                    got = self._advance_symbol(sym, last_ts)
+                except Exception:  # noqa: BLE001 - one bad symbol must not end the session
+                    _log.warning("live_feed_symbol_error", symbol=sym, exc_info=True)
                     continue
-                got = self.feed_source.latest_bar(sym)
-                if got is None:
-                    continue
-                ts, bar = got
-                if ts <= last_ts[sym]:
-                    continue
-                last_ts[sym] = ts
-                self._reader.append_bar(sym, bar)
-                frame = compute_features(sym, self._reader, self.feat_cfg)
-                if not frame.rows:
-                    continue
-                row = frame.rows[-1]
-                self._latest_rows[sym] = row
-                advanced.append((sym, bar, row))
+                if got is not None:
+                    advanced.append(got)
 
             # Pass 2 — for each advanced symbol, evaluate per-row AND cross-asset strategies; all
             # signals on that symbol compete in one group so ranking + the one-position-per-symbol
-            # cap arbitrate (only one trade per symbol across all strategies).
+            # cap arbitrate (only one trade per symbol across all strategies). A build error on
+            # one symbol is logged and skipped, never ending the stream.
             progressed = False
             for sym, bar, row in advanced:
-                cands = self._candidates_for(sym, bar, row)
+                try:
+                    cands = self._candidates_for(sym, bar, row)
+                except Exception:  # noqa: BLE001 - one bad symbol must not end the session
+                    _log.warning("live_candidate_build_error", symbol=sym, exc_info=True)
+                    continue
                 if not cands:
                     continue
                 emitted += 1
@@ -248,12 +291,19 @@ class LiveCandidateFeed:
                     return
             if not progressed:
                 if self.poll_sec > 0:
-                    # Wait for the next closed bar, but in 1s slices so a Stop is honoured fast.
-                    waited = 0.0
-                    while waited < self.poll_sec:
-                        if self._should_stop is not None and self._should_stop():
-                            return
-                        time.sleep(min(1.0, self.poll_sec - waited))
-                        waited += 1.0
+                    if self._sleep_or_stop():
+                        return  # Stop pressed during the wait
                 else:
                     return  # nothing new and not polling → finite stream (tests / one-shot)
+
+    def _sleep_or_stop(self) -> bool:
+        """Wait ``poll_sec`` (or 1s if not polling) in 1s slices so a dashboard Stop is honoured
+        fast. Returns True if the operator pressed Stop during the wait."""
+        budget = self.poll_sec if self.poll_sec > 0 else 1.0
+        waited = 0.0
+        while waited < budget:
+            if self._should_stop is not None and self._should_stop():
+                return True
+            time.sleep(min(1.0, budget - waited))
+            waited += 1.0
+        return False
