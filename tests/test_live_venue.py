@@ -22,6 +22,10 @@ def _testnet_settings(**over) -> Settings:
     base = {
         "_env_file": None,
         "exchange_env": "testnet",
+        # The offline test venue is the 'skeleton' exchange, matching the skeleton metadata
+        # the tests load — so the venue's metadata guard (Section 6) sees a verified, matched
+        # spec. A real Bybit run would use exchange_id='bybit' + verified Bybit metadata.
+        "exchange_id": "skeleton",
         "exchange_api_key": "k",
         "exchange_api_secret": "s",
         "order_client_id_prefix": _PREFIX,
@@ -196,6 +200,35 @@ def test_orderbuilder_momentum_attaches_sl_and_trailing() -> None:
     params = fake.orders[0]["params"]
     assert "stopLoss" in params and params["stopLoss"]["triggerPrice"] > 0
     assert params.get("trailingPercent", 0) > 0
+
+
+def test_order_blocked_when_metadata_is_for_wrong_exchange() -> None:
+    """A venue trading 'bybit' with metadata verified only for the offline 'skeleton' venue
+    must refuse to place orders — never size/route on a placeholder spec (Section 6)."""
+    fake = FakeCcxt()
+    # Skeleton metadata (exchange_id='skeleton') but the venue trades exchange_id='bybit'.
+    venue = CcxtLiveVenue(load_metadata_config(), _testnet_settings(exchange_id="bybit"), client=fake)
+    with pytest.raises(PermissionError, match="unverified exchange metadata"):
+        venue.place_bracket(
+            _plan(), ref_price=50_000.0, realized_slippage_frac=0.0, latency_ms=5.0
+        )
+    assert not fake.orders  # nothing sent to the exchange
+
+
+def test_order_blocked_when_metadata_unverified() -> None:
+    """Metadata marked ``verified: false`` (operator review pending) blocks order placement
+    even when the exchange matches — the Bybit demo/testnet metadata ships unverified."""
+    from src.exchange.metadata import load_metadata_for
+
+    bybit_meta = load_metadata_for("bybit")
+    assert bybit_meta.exchange_id == "bybit" and not bybit_meta.verified
+    fake = FakeCcxt()
+    venue = CcxtLiveVenue(bybit_meta, _testnet_settings(exchange_id="bybit"), client=fake)
+    with pytest.raises(PermissionError, match="UNVERIFIED|unverified"):
+        venue.place_bracket(
+            _plan(), ref_price=50_000.0, realized_slippage_frac=0.0, latency_ms=5.0
+        )
+    assert not fake.orders
 
 
 def test_requires_credentials_without_injected_client() -> None:

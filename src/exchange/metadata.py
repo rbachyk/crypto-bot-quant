@@ -101,12 +101,43 @@ class MetadataConfig:
     verified_at: str
     supported_order_types: list[str]
     specs: dict[str, VerifiedSpec] = field(default_factory=dict)
+    # Operator-verification flag (Section 6). ``False`` means the file is a fetched/template
+    # spec NOT yet reviewed against the venue's authoritative reference — it must NOT trade a
+    # real (even virtual-funds) account until an operator verifies it and flips this true.
+    verified: bool = True
 
     def symbols(self) -> list[str]:
         return list(self.specs.keys())
 
     def spec(self, symbol: str) -> VerifiedSpec | None:
         return self.specs.get(symbol)
+
+    def tradable_blocker(self, symbol: str, *, exchange_id: str | None = None) -> str | None:
+        """Why ``symbol`` may NOT be order-placed under this metadata, or None if it is safe.
+
+        Blocks (Section 6 / Section 2.1) when the metadata is for a different venue than the
+        one being traded, is unverified, or the symbol's spec is missing/incomplete/contradictory.
+        This is the last-line check the real venue runs before sending an order."""
+        if exchange_id is not None and self.exchange_id != exchange_id:
+            return (
+                f"metadata is for exchange '{self.exchange_id}', not '{exchange_id}' "
+                "(wrong/placeholder metadata — verify the venue's real spec first)"
+            )
+        if not self.verified:
+            return (
+                f"metadata '{self.metadata_version}' for '{self.exchange_id}' is UNVERIFIED "
+                "(pending operator review against the venue reference, Section 6)"
+            )
+        spec = self.spec(symbol)
+        if spec is None:
+            return f"no verified metadata for {symbol}"
+        missing = spec.missing_fields()
+        if missing:
+            return f"metadata for {symbol} is incomplete: missing {missing}"
+        contradictions = spec.contradictions()
+        if contradictions:
+            return f"metadata for {symbol} is contradictory: {contradictions}"
+        return None
 
 
 @lru_cache
@@ -128,7 +159,21 @@ def load_metadata_config(path: str | None = None) -> MetadataConfig:
         verified_at=str(data.get("verified_at", "")),
         supported_order_types=order_types,
         specs=specs,
+        verified=bool(data.get("verified", True)),
     )
+
+
+def load_metadata_for(exchange_id: str, *, settings: object | None = None) -> MetadataConfig:
+    """Load the verified metadata for ``exchange_id`` (Section 6).
+
+    Prefers ``configs/metadata.<exchange_id>.yaml`` when present (the per-venue verified spec);
+    otherwise falls back to the default ``configs/metadata.yaml``. The caller (the real venue)
+    still runs :meth:`MetadataConfig.tradable_blocker` per symbol, so an exchange-mismatched or
+    unverified fallback blocks order placement rather than trading on the wrong spec."""
+    candidate = METADATA_YAML.with_name(f"metadata.{exchange_id}.yaml")
+    if candidate.exists():
+        return load_metadata_config(str(candidate))
+    return load_metadata_config()
 
 
 def sync_verified_metadata(session: Session, cfg: MetadataConfig | None = None) -> int:

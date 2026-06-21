@@ -143,7 +143,11 @@ def test_live_loop_drives_testnet_venue(tmp_path) -> None:
     feed = _feed(tmp_path)
     fake = FakeCcxt()
     settings = Settings(
-        _env_file=None, exchange_env="testnet", exchange_api_key="k", exchange_api_secret="s"
+        _env_file=None,
+        exchange_env="testnet",
+        exchange_id="skeleton",  # matches the injected skeleton metadata (venue guard, Section 6)
+        exchange_api_key="k",
+        exchange_api_secret="s",
     )
     venue = CcxtLiveVenue(load_metadata_config(), settings, client=fake)
     result = LiveLoop(mode="testnet", venue=venue, settings=settings).run(feed, session_name="t")
@@ -161,6 +165,7 @@ def _testnet_settings(**over) -> Settings:
     base = {
         "_env_file": None,
         "exchange_env": "testnet",
+        "exchange_id": "skeleton",  # offline test venue matches the skeleton metadata
         "exchange_api_key": "k",
         "exchange_api_secret": "s",
         "order_client_id_prefix": _PREFIX,

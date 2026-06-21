@@ -132,6 +132,8 @@ class CcxtLiveVenue:
             if not allowed:
                 raise PermissionError(f"live order refused by activation guard: {reason}")
 
+        self._ensure_tradable_metadata(plan.symbol)
+
         entry = plan.entry
         maker = entry.order_type in _MAKER_TYPES
         order_type = "limit" if maker else "market"
@@ -208,6 +210,17 @@ class CcxtLiveVenue:
             return False, "no activation guard configured for a live venue"
         return self._guard.allow_live_order(plan)
 
+    def _ensure_tradable_metadata(self, symbol: str) -> None:
+        """Refuse to place an order without verified, exchange-matched metadata (Section 6).
+
+        The last line of defence before an order leaves for the exchange: if the loaded
+        metadata is for a different venue, is unverified (operator review pending), or the
+        symbol's spec is missing/incomplete/contradictory, we BLOCK rather than size/route an
+        order on a placeholder spec."""
+        blocker = self.meta.tradable_blocker(symbol, exchange_id=self.exchange_id)
+        if blocker is not None:
+            raise PermissionError(f"order blocked — unverified exchange metadata: {blocker}")
+
     # -- order management ------------------------------------------------ #
     def order_status(self, client_id: str) -> str:
         if client_id in self.open_orders:
@@ -236,6 +249,7 @@ class CcxtLiveVenue:
 
     def place_order(self, order: Order) -> None:
         """Place a single (non-bracket) order — used by cancel/replace."""
+        self._ensure_tradable_metadata(order.symbol)
         otype = "limit" if order.order_type in _MAKER_TYPES else "market"
         price = float(order.price) if order.price is not None else None
         self._ex.create_order(

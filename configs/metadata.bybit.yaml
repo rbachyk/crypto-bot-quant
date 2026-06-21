@@ -1,0 +1,86 @@
+# metadata.bybit.yaml — Bybit USDT-perpetual contract metadata (Section 6).
+#
+# This is the per-venue metadata used when EXCHANGE_ID=bybit (demo / testnet / live).
+# The values below are the standard Bybit USDT-perpetual contract parameters, but they
+# are marked `verified: false` because they have NOT yet been reviewed by an operator
+# against Bybit's authoritative contract reference for the target environment.
+#
+# SAFETY (Section 2.1 / Section 6): while `verified: false`, the real venue REFUSES to
+# place any order (`MetadataConfig.tradable_blocker` returns a blocker, the DemoReadiness
+# guard reports BLOCKED). To enable demo/testnet execution an operator must:
+#   1. Open Bybit's contract spec page (or call `fetch_markets`) for each symbol and the
+#      target environment (api-demo / testnet / mainnet).
+#   2. Confirm every field below (tick_size, qty_step, min_order_size, min_notional,
+#      max_leverage, fees, funding_interval_hours, order types) matches exactly.
+#   3. Correct any value, bump `metadata_version`, set `verified_at`, and flip
+#      `verified: true`.
+# Any metadata change => new version => re-verification.
+
+version: 1
+
+metadata:
+  exchange_id: bybit
+  metadata_version: bybit_meta_0001
+  verified_against: "PENDING operator verification against Bybit USDT-perp contract reference"
+  verified_at: ""
+  verified: false  # <- flip to true ONLY after operator review (Section 6)
+
+  supported_order_types:
+    - "limit"
+    - "market"
+    - "stop_market"
+    - "stop_limit"
+    - "take_profit_market"
+    - "trailing_stop"
+
+  symbols:
+    "BTC/USDT:USDT":
+      status: "trading"
+      contract_type: "perpetual"
+      quote_currency: "USDT"
+      tick_size: 0.1
+      lot_size: 0.001
+      qty_step: 0.001
+      price_precision: 1
+      min_order_size: 0.001
+      min_notional: 5.0
+      max_leverage: 100
+      margin_mode: "isolated"
+      position_mode: "one_way"
+      maker_fee: 0.0002
+      taker_fee: 0.00055
+      funding_interval_hours: 8
+
+    "ETH/USDT:USDT":
+      status: "trading"
+      contract_type: "perpetual"
+      quote_currency: "USDT"
+      tick_size: 0.01
+      lot_size: 0.01
+      qty_step: 0.01
+      price_precision: 2
+      min_order_size: 0.01
+      min_notional: 5.0
+      max_leverage: 100
+      margin_mode: "isolated"
+      position_mode: "one_way"
+      maker_fee: 0.0002
+      taker_fee: 0.00055
+      funding_interval_hours: 8
+
+    "SOL/USDT:USDT":
+      status: "trading"
+      contract_type: "perpetual"
+      quote_currency: "USDT"
+      tick_size: 0.01
+      lot_size: 0.1
+      qty_step: 0.1
+      price_precision: 2
+      min_order_size: 0.1
+      min_notional: 5.0
+      max_leverage: 50
+      margin_mode: "isolated"
+      position_mode: "one_way"
+      maker_fee: 0.0002
+      taker_fee: 0.00055
+      funding_interval_hours: 8

@@ -122,7 +122,17 @@ class LiveLoop:
             raise ValueError(f"mode must be one of {_MODES}, got {mode!r}")
         self.mode = mode
         self.settings = settings or get_settings()
-        self.meta = meta or load_metadata_config()
+        # Paper uses the offline skeleton spec; a real venue (testnet/demo/live) must use the
+        # metadata verified for ITS exchange so the venue's pre-trade metadata guard (Section 6)
+        # reasons over the right spec — an unverified/placeholder spec blocks order placement.
+        if meta is not None:
+            self.meta = meta
+        elif mode == "paper":
+            self.meta = load_metadata_config()
+        else:
+            from src.exchange.metadata import load_metadata_for
+
+            self.meta = load_metadata_for(self.settings.exchange_id)
         self.kill_switch = kill_switch or KillSwitch(self.settings)
         # Optional Section-8 live data manager; when exchange-wide data integrity fails it
         # halts ALL trading (mirrors the kill switch).

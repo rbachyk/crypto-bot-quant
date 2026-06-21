@@ -132,6 +132,7 @@ def test_real_guard_plugs_into_live_venue() -> None:
     settings = Settings(
         _env_file=None,
         exchange_env="live",
+        exchange_id="skeleton",  # matches the skeleton metadata so the venue guard passes
         exchange_api_key="k",
         exchange_api_secret="s",
         order_client_id_prefix=_PREFIX,
