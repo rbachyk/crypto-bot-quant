@@ -14,12 +14,13 @@ require explicit confirmation and are logged to audit_log.
 
 from __future__ import annotations
 
+import contextlib
 import html
 from pathlib import Path
 from typing import Any
 
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from sqlalchemy import desc, func, select
 
 from src.api.auth import require_dashboard_auth
@@ -472,39 +473,36 @@ _ENV_SELECT = (
 _AUTOREFRESH_JS = """
 <script>
 (function(){
- // Update job-status chips ASYNCHRONOUSLY (no full-page reload): poll a tiny JSON endpoint for
- // the ids present on the page and rewrite each chip in place. Stops once every job is terminal.
+ // Update job-status chips + progress ASYNCHRONOUSLY via Server-Sent Events: subscribe ONCE and
+ // apply each pushed update in place (no full-page reload, NO polling). The browser's EventSource
+ // auto-reconnects if the stream drops.
  var CLS={passed:'pass',succeeded:'pass',failed:'fail',cancelled:'fail',expired:'fail',
           blocked:'blocked',not_run:'not_run',queued:'not_run',running:'running'};
- var TERMINAL={succeeded:1,failed:1,cancelled:1,expired:1,blocked:1};
- function chips(){return document.querySelectorAll('[data-job]');}
- function ids(){return Array.prototype.map.call(chips(),function(e){return e.getAttribute('data-job');});}
- function active(){return Array.prototype.some.call(chips(),function(e){return !TERMINAL[e.getAttribute('data-status')];});}
- function poll(){
-  if(!active())return;
-  fetch('/api/jobs/status?ids='+encodeURIComponent(ids().join(',')),{credentials:'same-origin'})
-   .then(function(r){return r.ok?r.json():{};})
-   .then(function(m){
-    chips().forEach(function(e){
-     var d=m[e.getAttribute('data-job')];if(!d)return;var s=d.status;
-     if(s&&s!==e.getAttribute('data-status')){
-      e.setAttribute('data-status',s);
-      e.className='badge '+(CLS[s]||'not_run');
-      e.textContent=s.toUpperCase();
-     }
-    });
-    // progress + message update in place (live during a run)
-    document.querySelectorAll('[data-job-prog]').forEach(function(e){
-     var d=m[e.getAttribute('data-job-prog')];if(d&&d.progress!=null)e.textContent=d.progress;
-    });
-    document.querySelectorAll('[data-job-msg]').forEach(function(e){
-     var d=m[e.getAttribute('data-job-msg')];if(d&&d.message!=null)e.textContent=d.message;
-    });
-    setTimeout(poll,active()?2500:0);
-   })
-   .catch(function(){setTimeout(poll,6000);});
+ if(typeof EventSource==='undefined')return;  // very old browser: status still renders on reload
+ function apply(d){
+  if(!d||!d.job_id)return;var jid=d.job_id;
+  if(d.status){
+   document.querySelectorAll('[data-job]').forEach(function(e){
+    if(e.getAttribute('data-job')!==jid)return;
+    e.setAttribute('data-status',d.status);
+    e.className='badge '+(CLS[d.status]||'not_run');
+    e.textContent=d.status.toUpperCase();
+   });
+  }
+  if(d.progress!=null){
+   document.querySelectorAll('[data-job-prog]').forEach(function(e){
+    if(e.getAttribute('data-job-prog')===jid)e.textContent=d.progress;});
+  }
+  if(d.message!=null){
+   document.querySelectorAll('[data-job-msg]').forEach(function(e){
+    if(e.getAttribute('data-job-msg')===jid)e.textContent=d.message;});
+  }
  }
- if(active())setTimeout(poll,3000);
+ try{
+  var es=new EventSource('/api/jobs/stream');
+  es.onmessage=function(ev){var d;try{d=JSON.parse(ev.data);}catch(e){return;}apply(d);};
+  // onerror: EventSource reconnects automatically; nothing to do.
+ }catch(e){}
 })();
 </script>
 """
@@ -1836,12 +1834,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _page(f"Per-Symbol Statistics: {symbol}", body)
 
     # ----- jobs ------------------------------------------------------------ #
+    @app.get("/api/jobs/stream")
+    def jobs_stream(user: str = Depends(require_dashboard_auth)) -> StreamingResponse:
+        """Server-Sent Events stream of job updates — the dashboard subscribes ONCE and receives
+        status/progress/message pushes the instant a worker writes them (no client polling). Each
+        event is a JSON line ``{job_id, status?, progress?, message?}``; a heartbeat comment keeps
+        the connection alive and lets us detect client disconnect."""
+        import json as _json
+        import time as _time
+
+        from src.jobs.events import JOB_EVENTS_CHANNEL
+
+        def _gen():
+            client = _redis_client()
+            pubsub = client.pubsub(ignore_subscribe_messages=True)
+            pubsub.subscribe(JOB_EVENTS_CHANNEL)
+            try:
+                yield ": connected\n\n"  # open the stream immediately
+                last_beat = _time.time()
+                while True:
+                    msg = pubsub.get_message(timeout=1.0)
+                    if msg and msg.get("type") == "message":
+                        data = msg["data"]
+                        if isinstance(data, bytes):
+                            data = data.decode("utf-8", "ignore")
+                        # Validate it is JSON before forwarding (defensive).
+                        try:
+                            _json.loads(data)
+                        except (TypeError, ValueError):
+                            continue
+                        yield f"data: {data}\n\n"
+                        last_beat = _time.time()
+                    elif _time.time() - last_beat > 15:
+                        yield ": ping\n\n"  # heartbeat → keep-alive + disconnect detection
+                        last_beat = _time.time()
+            finally:
+                with contextlib.suppress(Exception):
+                    pubsub.close()
+
+        return StreamingResponse(
+            _gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+        )
+
     @app.get("/api/jobs/status")
     def jobs_status(
         ids: str = "", user: str = Depends(require_dashboard_auth)
     ) -> dict[str, dict[str, Any]]:
-        """Lightweight {job_id: {status, progress, message}} for the given ids — polled by the
-        dashboard to update status chips AND progress in place (no full-page reload)."""
+        """Lightweight {job_id: {status, progress, message}} for the given ids. Retained as a
+        fallback/initial-snapshot endpoint; live updates now arrive via /api/jobs/stream (SSE)."""
         wanted = [i for i in ids.split(",") if i][:200]
         if not wanted:
             return {}

@@ -32,6 +32,7 @@ from src.config import Settings, get_settings
 from src.db.base import session_scope
 from src.db.models import Job, JobStatus
 from src.jobs.context import JobCancelled, JobContext, _cancel_key
+from src.jobs.events import format_progress, publish_job_event
 from src.jobs.registry import registry
 from src.jobs.routing import (
     PROCESSING_PREFIX,
@@ -215,6 +216,7 @@ class Worker:
             job.attempts += 1
             attempts = job.attempts
             max_attempts = job.max_attempts
+        publish_job_event(self._redis, job_id, status="running")  # async dashboard push
 
         ctx = JobContext(job_id, params, self._redis)
 
@@ -259,8 +261,13 @@ class Worker:
             job.artifact_uri = result.get("artifact_uri") if isinstance(result, dict) else None
             if isinstance(result, dict) and result.get("message"):
                 job.progress_message = str(result["message"])
+            final_prog = format_progress(job.progress_current, job.progress_total)
+            final_msg = job.progress_message
         self._redis.delete(_cancel_key(job_id))
         self._unwatch(job_id)
+        publish_job_event(
+            self._redis, job_id, status="succeeded", progress=final_prog, message=final_msg
+        )
         return JobStatus.SUCCEEDED
 
     def _finish_failed(self, job_id: str, reason: str, hint: str) -> JobStatus:
@@ -275,6 +282,7 @@ class Worker:
             job.next_action_hint = hint
         self._redis.delete(_cancel_key(job_id))
         self._unwatch(job_id)
+        publish_job_event(self._redis, job_id, status="failed", message=reason)
         return JobStatus.FAILED
 
     def _finish_cancelled(self, job_id: str) -> JobStatus:
@@ -288,6 +296,7 @@ class Worker:
             job.failure_reason = "cancelled"
         self._redis.delete(_cancel_key(job_id))
         self._unwatch(job_id)
+        publish_job_event(self._redis, job_id, status="cancelled", message="cancelled")
         return JobStatus.CANCELLED
 
     def _requeue(self, job_id: str) -> JobStatus:

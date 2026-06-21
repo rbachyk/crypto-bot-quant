@@ -53,6 +53,16 @@ class JobContext:
             job.progress_total = total
             if message:
                 job.progress_message = message
+        # Push the update to the dashboard SSE stream (async; no client polling).
+        from src.jobs.events import format_progress, publish_job_event
+
+        publish_job_event(
+            self._redis,
+            self.job_id,
+            status="running",
+            progress=format_progress(current, total),
+            message=message or None,
+        )
 
     # -- cancellation ---------------------------------------------------- #
     def is_cancelled(self) -> bool:

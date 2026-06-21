@@ -20,6 +20,7 @@ from src.config import Settings, get_settings
 from src.db.base import session_scope
 from src.db.models import Job, JobStatus
 from src.jobs.context import _cancel_key
+from src.jobs.events import publish_job_event
 from src.jobs.routing import ALL_CLASSES, queue_class, queue_key
 
 
@@ -63,6 +64,7 @@ class JobQueue:
             )
         # Route to the job's class queue so heavy work lands on its dedicated worker(s).
         self._redis.lpush(queue_key(queue_class(job_type)), job_id)
+        publish_job_event(self._redis, job_id, status="queued", progress="-")  # async push
         return job_id
 
     # -- cancel ---------------------------------------------------------- #
@@ -84,6 +86,9 @@ class JobQueue:
                 job.finished_at = datetime.now(UTC)
                 job.failure_reason = "cancelled before start"
                 self._redis.set(_cancel_key(job_id), "1")
+                publish_job_event(
+                    self._redis, job_id, status="cancelled", message="cancelled before start"
+                )
                 return True
             # RUNNING: signal cooperative cancellation.
             self._redis.set(_cancel_key(job_id), "1")
@@ -108,6 +113,7 @@ class JobQueue:
             job_type = job.job_type
         self._redis.delete(_cancel_key(job_id))
         self._redis.lpush(queue_key(queue_class(job_type)), job_id)
+        publish_job_event(self._redis, job_id, status="queued", progress="-")  # async push
         return True
 
     # -- introspection --------------------------------------------------- #
