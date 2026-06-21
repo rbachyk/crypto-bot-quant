@@ -869,6 +869,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     return JSONResponse({"detail": "origin mismatch (CSRF)"}, status_code=403)
         return await call_next(request)
 
+    # Graceful degradation: an unhandled error in ONE page (e.g. a DB hiccup or a missing config)
+    # must not return a raw 500 stack trace — render a minimal error shell for dashboard routes and
+    # a JSON 500 for the API, so the rest of the control center stays usable.
+    @app.exception_handler(Exception)
+    async def _unhandled_error(request: Request, exc: Exception):  # type: ignore[no-untyped-def]
+        import structlog
+
+        structlog.get_logger("api").warning(
+            "route_error", path=str(request.url.path), error=str(exc)
+        )
+        from fastapi.responses import JSONResponse
+
+        path = request.url.path
+        if path.startswith("/api") or path in ("/health", "/livez", "/readyz"):
+            return JSONResponse({"detail": "internal error"}, status_code=500)
+        # Standalone minimal HTML (does NOT call _page, which itself touches db/redis and could
+        # fail again during an outage).
+        return HTMLResponse(
+            "<!doctype html><html><head><meta charset='utf-8'><title>Error</title></head>"
+            "<body style='font-family:system-ui;background:#0b0e14;color:#c9d1d9;padding:2.5rem'>"
+            "<h2>Something went wrong</h2>"
+            "<p>This view hit an error and could not render. The rest of the dashboard is "
+            "unaffected — check the service logs, then retry.</p>"
+            "<p><a style='color:#58a6ff' href='/'>← Back to overview</a></p>"
+            "</body></html>",
+            status_code=500,
+        )
+
     # ----- health (unauthenticated; for orchestration/monitoring) ---------- #
     @app.get("/health")
     def health() -> dict[str, Any]:

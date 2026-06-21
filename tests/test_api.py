@@ -64,13 +64,15 @@ def test_csrf_blocks_foreign_origin_post() -> None:
 
 def test_csrf_allows_same_origin_and_non_browser_post() -> None:
     """Same-origin (sec-fetch-site=same-origin) and non-browser callers (no fetch-metadata,
-    no origin — e.g. the test client / CLI) are allowed through the CSRF guard. Uses a
-    side-effect-free endpoint so it does not mutate global state for other tests."""
-    same = client.post(
-        "/api/scheduler/resume", auth=AUTH, headers={"sec-fetch-site": "same-origin"}
-    )
-    assert same.status_code != 403  # same-origin allowed
-    plain = client.post("/api/scheduler/resume", auth=AUTH)
+    no origin — e.g. the test client / CLI) are allowed through the CSRF guard. A non-raising
+    client is used so the assertion isolates the MIDDLEWARE result from whatever the endpoint
+    does (it must not be a 403), independent of redis/db availability."""
+    from fastapi.testclient import TestClient
+
+    nr = TestClient(create_app(_settings), raise_server_exceptions=False)
+    same = nr.post("/api/scheduler/resume", auth=AUTH, headers={"sec-fetch-site": "same-origin"})
+    assert same.status_code != 403  # same-origin allowed through the guard
+    plain = nr.post("/api/scheduler/resume", auth=AUTH)
     assert plain.status_code != 403  # non-browser (no fetch-metadata/origin) allowed
 
 
