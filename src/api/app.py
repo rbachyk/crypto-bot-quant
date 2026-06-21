@@ -846,6 +846,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.dependency_overrides[get_settings] = lambda: settings
 
+    # CSRF defense for the HTTP-Basic-auth control plane (kill switch, env-reset, live-activation
+    # approval, job enqueue/cancel): a browser auto-sends cached Basic credentials, so a cross-site
+    # POST could trigger these. Reject any unsafe-method request the browser marks cross-site
+    # (Fetch-Metadata) or whose Origin host doesn't match Host. Non-browser callers (CLI, the test
+    # client, health probes) send neither header and are unaffected.
+    @app.middleware("http")
+    async def _csrf_guard(request: Request, call_next):  # type: ignore[no-untyped-def]
+        if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+            from fastapi.responses import JSONResponse
+
+            sfs = request.headers.get("sec-fetch-site", "")
+            if sfs in ("cross-site", "cross-origin"):
+                return JSONResponse({"detail": "cross-site request blocked (CSRF)"}, status_code=403)
+            origin = request.headers.get("origin")
+            if origin:
+                from urllib.parse import urlparse
+
+                if urlparse(origin).netloc and urlparse(origin).netloc != request.headers.get(
+                    "host", ""
+                ):
+                    return JSONResponse({"detail": "origin mismatch (CSRF)"}, status_code=403)
+        return await call_next(request)
+
     # ----- health (unauthenticated; for orchestration/monitoring) ---------- #
     @app.get("/health")
     def health() -> dict[str, Any]:
@@ -1871,7 +1894,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ]
 
     @app.get("/api/jobs/stream")
-    def jobs_stream(
+    async def jobs_stream(
         ids: str = "", user: str = Depends(require_dashboard_auth)
     ) -> StreamingResponse:
         """Server-Sent Events stream of job updates — the dashboard subscribes ONCE and receives
@@ -1881,60 +1904,66 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         ``ids`` (the job chips currently on the page) get an immediate status snapshot on connect
         so no transition is missed in the render→subscribe gap; EventSource also re-syncs on every
-        auto-reconnect by re-sending its ids."""
+        auto-reconnect by re-sending its ids.
+
+        ASYNC by design: an async generator streams on the event loop, so a long-lived connection
+        does NOT pin an anyio threadpool thread (the sync version would exhaust the 40-thread pool
+        and hang the whole dashboard under a few open tabs). Uses redis.asyncio so the connection
+        is released cleanly on disconnect."""
+        import asyncio
         import json as _json
-        import time as _time
+
+        import redis.asyncio as aioredis
+        from starlette.concurrency import run_in_threadpool
 
         from src.jobs.events import JOB_EVENTS_CHANNEL
 
         wanted = [i for i in ids.split(",") if i]
+        _SSE_MAX_SECONDS = 110  # bound per connection; EventSource auto-reconnects
 
-        # Bound each SSE connection's lifetime: a sync StreamingResponse holds an anyio
-        # threadpool thread (and a redis connection) for its whole life, so we cap it and let
-        # EventSource auto-reconnect. This recycles the thread + connection and prevents pool /
-        # redis-maxclients exhaustion from long-lived or stale tabs.
-        _SSE_MAX_SECONDS = 110
-
-        def _gen():
-            client = _redis_client()
-            pubsub = client.pubsub(ignore_subscribe_messages=True)
-            # Subscribe BEFORE the snapshot so an update landing during the snapshot read is
-            # buffered on the connection and still delivered by the stream loop (no gap).
-            pubsub.subscribe(JOB_EVENTS_CHANNEL)
+        async def _gen():
+            client = aioredis.from_url(settings.redis_url, decode_responses=True)
+            pubsub = client.pubsub()
+            await pubsub.subscribe(JOB_EVENTS_CHANNEL)
             try:
-                yield ": connected\n\n"  # open the stream immediately
-                for snap in _job_snapshot(wanted):  # initial sync for the page's chips
+                yield ": connected\n\n"
+                # The snapshot is a sync DB read → run off the event loop.
+                for snap in await run_in_threadpool(_job_snapshot, wanted):
                     yield f"data: {_json.dumps(snap)}\n\n"
-                started = _time.time()
+                loop = asyncio.get_event_loop()
+                started = loop.time()
                 last_beat = started
-                while _time.time() - started < _SSE_MAX_SECONDS:
-                    msg = pubsub.get_message(timeout=1.0)
+                while loop.time() - started < _SSE_MAX_SECONDS:
+                    msg = await pubsub.get_message(
+                        ignore_subscribe_messages=True, timeout=1.0
+                    )
                     if msg and msg.get("type") == "message":
                         data = msg["data"]
                         if isinstance(data, bytes):
                             data = data.decode("utf-8", "ignore")
-                        # Validate it is JSON before forwarding (defensive).
                         try:
                             _json.loads(data)
                         except (TypeError, ValueError):
                             continue
                         yield f"data: {data}\n\n"
-                        last_beat = _time.time()
-                    elif _time.time() - last_beat > 15:
-                        yield ": ping\n\n"  # heartbeat → keep-alive + disconnect detection
-                        last_beat = _time.time()
+                        last_beat = loop.time()
+                    elif loop.time() - last_beat > 15:
+                        yield ": ping\n\n"
+                        last_beat = loop.time()
             finally:
-                # Release BOTH the pubsub and the underlying connection (the per-request client
-                # has no shared pool, so not closing it leaks a redis connection per reconnect).
                 with contextlib.suppress(Exception):
-                    pubsub.close()
+                    await pubsub.aclose()
                 with contextlib.suppress(Exception):
-                    client.close()
+                    await client.aclose()
 
         return StreamingResponse(
             _gen(),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
         )
 
     @app.get("/api/jobs/status")
@@ -2137,7 +2166,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             rows += (
                 f"<tr>"
                 f"<td><a href='/dashboard/jobs/{j.job_id}'>{j.job_id[:12]}…</a></td>"
-                f"<td>{j.job_type}</td>"
+                f"<td>{_esc(j.job_type)}</td>"
                 f"<td>{_job_badge(j.status.value, j.job_id)}</td>"
                 f"<td data-job-prog='{j.job_id}'>{prog}</td>"
                 f"<td class='meta' data-job-msg='{j.job_id}'>{_esc((j.progress_message or '')[:60])}</td>"
@@ -2209,11 +2238,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
   <h2>Job: {job.job_id}</h2>
   <table>
     <tr><th>Field</th><th>Value</th></tr>
-    <tr><td>Type</td><td>{job.job_type}</td></tr>
+    <tr><td>Type</td><td>{_esc(job.job_type)}</td></tr>
     <tr><td>Status</td><td>{_job_badge(job.status.value, job.job_id)}</td></tr>
     <tr><td>Created</td><td>{job.created_at.isoformat()}</td></tr>
     <tr><td>Progress</td><td><span data-job-prog="{job.job_id}">{job.progress_current}/{job.progress_total}</span> — <span data-job-msg="{job.job_id}">{_esc(job.progress_message)}</span></td></tr>
-    <tr><td>Related Gate</td><td>{job.related_gate_id or "-"}</td></tr>
+    <tr><td>Related Gate</td><td>{_esc(job.related_gate_id or "-")}</td></tr>
     <tr><td>Failure Reason</td><td>{_esc(job.failure_reason) or "-"}</td></tr>
     <tr><td>Next Action</td><td>{_esc(job.next_action_hint) or "-"}</td></tr>
   </table>
@@ -2461,8 +2490,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             table_rows += (
                 f"<tr>"
                 f"<td><a href='/dashboard/gates/{gate_id}'>{gate_id}</a></td>"
-                f"<td>{spec.name}</td>"
-                f"<td>{spec.phase}</td>"
+                f"<td>{_esc(spec.name)}</td>"
+                f"<td>{_esc(spec.phase)}</td>"
                 f"<td>{_status_badge(status)}</td>"
                 f"<td>{last_run}</td>"
                 f"<td><a href='/dashboard/gates/{gate_id}' class='btn btn-neutral' style='padding:2px 8px;font-size:12px'>Detail</a> "
@@ -2530,7 +2559,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 # so the button targets the working gate-rerun endpoint and shows the hint.
                 run_btn = (
                     f'<form method="post" action="/api/gates/{gate_id}/run"'
-                    f' style="display:inline" title="recommended: {a.recommended_job}">'
+                    f' style="display:inline" title="recommended: {_esc(a.recommended_job)}">'
                     f'<button class="btn" type="submit"'
                     f' style="padding:2px 6px;font-size:11px">'
                     f"&#9654; re-run gate</button></form>"
@@ -2555,7 +2584,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
   <p><b>Pass condition:</b> {spec.pass_condition if spec else "N/A"}</p>
   {f'<p class="meta"><b>Failure reason:</b> {_esc(result.failure_reason)}</p>' if result and result.failure_reason else ""}
   {f'<p class="meta">Last run: {result.started_at.isoformat() if result else "never"}</p>'}
-  {f'<p class="meta">Report: <code>{result.report_path}</code></p>' if result and result.report_path else ""}
+  {f'<p class="meta">Report: <code>{_esc(result.report_path)}</code></p>' if result and result.report_path else ""}
 </div>
 {(f'<div class="card"><h2>Criteria</h2><table><tr><th>ID</th><th>Status</th><th>Detail</th></tr>{criteria_rows}</table></div>') if criteria_rows else ""}
 <div class="card">{remediation_html or '<p class="meta">No remediation actions.</p>'}</div>"""
@@ -2613,7 +2642,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             table_rows += (
                 f"<tr>"
                 f"<td><a href='/dashboard/gates/{gate_id}'>{gate_id}</a></td>"
-                f"<td>{spec.name}</td>"
+                f"<td>{_esc(spec.name)}</td>"
                 f"<td>{'✓' if spec.blocks_live == 'true' else ''}</td>"
                 f"<td>{_status_badge(status)}</td>"
                 f"<td style='max-width:300px'>{next_action}</td>"
@@ -2700,7 +2729,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for a in actions:
             rows += (
                 f"<tr>"
-                f"<td>{a.gate_id}</td>"
+                f"<td>{_esc(a.gate_id)}</td>"
                 f"<td>Step {a.step_index + 1}</td>"
                 f"<td>{_esc(a.description[:100])}</td>"
                 f"<td>{_status_badge(a.status.value)}</td>"
@@ -2904,8 +2933,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 f"<td>{lg.ts.strftime('%Y-%m-%d %H:%M:%S')}</td>"
                 f"<td>{_esc(lg.actor)}</td>"
                 f"<td>{_esc(lg.action)}</td>"
-                f"<td>{lg.target or '-'}</td>"
-                f"<td>{lg.environment}</td>"
+                f"<td>{_esc(lg.target or '-')}</td>"
+                f"<td>{_esc(lg.environment)}</td>"
                 f"</tr>"
             )
         body = f"""

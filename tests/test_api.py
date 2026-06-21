@@ -42,6 +42,37 @@ def test_dashboard_renders_with_auth() -> None:
     assert "Control Center" in resp.text
 
 
+def test_csrf_blocks_cross_site_post() -> None:
+    """A browser-marked cross-site POST (Fetch-Metadata) to a state-changing endpoint is
+    rejected even with valid credentials — defends the Basic-auth control plane from CSRF."""
+    r = client.post(
+        "/api/killswitch/engage",
+        auth=AUTH,
+        headers={"sec-fetch-site": "cross-site"},
+    )
+    assert r.status_code == 403
+
+
+def test_csrf_blocks_foreign_origin_post() -> None:
+    r = client.post(
+        "/api/killswitch/engage",
+        auth=AUTH,
+        headers={"origin": "https://evil.example.com"},
+    )
+    assert r.status_code == 403
+
+
+def test_csrf_allows_same_origin_and_non_browser_post() -> None:
+    """Same-origin (sec-fetch-site=same-origin) and non-browser callers (no fetch-metadata,
+    no origin — e.g. the test client / CLI) are allowed through the CSRF guard."""
+    same = client.post(
+        "/api/killswitch/engage", auth=AUTH, headers={"sec-fetch-site": "same-origin"}
+    )
+    assert same.status_code != 403
+    plain = client.post("/api/killswitch/disengage", auth=AUTH)
+    assert plain.status_code != 403
+
+
 def test_api_me_requires_auth() -> None:
     assert client.get("/api/me").status_code == 401
     assert client.get("/api/me", auth=AUTH).json()["user"] == "admin"
