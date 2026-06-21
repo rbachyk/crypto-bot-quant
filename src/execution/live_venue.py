@@ -29,6 +29,7 @@ from src.config import Settings, get_settings
 from src.exchange.metadata import MetadataConfig
 from src.execution.order import BUY, Order, OrderPlan, OrderType
 from src.execution.venue import BracketResult, Fill, Venue, VenuePosition
+from src.monitoring import Alert, AlertSeverity, get_alert_sink
 
 # Order types that rest as maker (no taker slippage).
 _MAKER_TYPES = (OrderType.POST_ONLY, OrderType.LIMIT)
@@ -187,24 +188,35 @@ class CcxtLiveVenue:
         )
         self.fills.append(fill)
 
-        # The stop is attached to the position on the exchange; record a marker id so
-        # has_exchange_side_stop() is True (the Section 2.2 invariant the engine checks).
+        # CONFIRM the exchange accepted the stop (Section 2.2) instead of trusting that we sent the
+        # param. Re-read the position: True = a real stop is present, False = position present but
+        # UNPROTECTED (the param was silently rejected — downgrade + alert so the engine doesn't
+        # treat it as protected), None = not visible yet (fill latency) → keep the optimistic
+        # marker; the per-tick reconciliation re-verifies next tick. A zero-fill carries no marker.
+        protected = self._confirm_exchange_stop(plan.symbol) if (filled_qty > 0) else None
+        has_stop = filled_qty > 0 and plan.stop is not None and protected is not False
+        has_tp = filled_qty > 0 and plan.take_profit is not None and protected is not False
+        if filled_qty > 0 and plan.stop is not None and protected is False:
+            get_alert_sink().send(
+                Alert(
+                    title="order placed but exchange-side stop NOT confirmed",
+                    severity=AlertSeverity.CRITICAL,
+                    component="execution",
+                    environment=self.exchange_env,
+                    recommended_action=(
+                        f"Position {plan.symbol} opened but the exchange shows no stop — the "
+                        "stopLoss param was rejected. Re-arm protection or emergency-close "
+                        "immediately (Section 2.2)."
+                    ),
+                )
+            )
         position = VenuePosition(
             symbol=plan.symbol,
             side=plan.side,
             qty=filled_qty,
             entry_price=avg,
-            # Only a FILLED position carries an exchange-side stop/TP marker. A zero-fill (e.g. a
-            # resting maker entry) must NOT report has_exchange_side_stop()==True, or the engine
-            # would treat an unfilled order as an executed, protected position (Section 2.2).
-            stop_order_id=(
-                f"{entry.client_id}:sl" if (filled_qty > 0 and plan.stop is not None) else None
-            ),
-            tp_order_id=(
-                f"{entry.client_id}:tp"
-                if (filled_qty > 0 and plan.take_profit is not None)
-                else None
-            ),
+            stop_order_id=f"{entry.client_id}:sl" if has_stop else None,
+            tp_order_id=f"{entry.client_id}:tp" if has_tp else None,
             owned=True,
         )
         resting: list[str] = []
@@ -226,6 +238,21 @@ class CcxtLiveVenue:
         if self._guard is None:
             return False, "no activation guard configured for a live venue"
         return self._guard.allow_live_order(plan)
+
+    def _confirm_exchange_stop(self, symbol: str) -> bool | None:
+        """Confirm the exchange-side stop right after placement (Section 2.2).
+
+        Returns True if the exchange position carries a stop, False if the position is present
+        but UNPROTECTED (the stop param was rejected), or None if the position isn't visible yet
+        (fill latency) — in which case the caller keeps the optimistic marker and the per-tick
+        reconciliation re-verifies. Best-effort: any fetch error returns None (don't false-fail)."""
+        try:
+            pos = self.fetch_exchange_positions().get(symbol)
+        except Exception:  # noqa: BLE001 - a fetch hiccup must not fail the placement
+            return None
+        if pos is None:
+            return None
+        return pos.has_exchange_side_stop()
 
     def _ensure_tradable_metadata(self, symbol: str) -> None:
         """Refuse to place an order without verified, exchange-matched metadata (Section 6).
