@@ -64,13 +64,14 @@ def test_csrf_blocks_foreign_origin_post() -> None:
 
 def test_csrf_allows_same_origin_and_non_browser_post() -> None:
     """Same-origin (sec-fetch-site=same-origin) and non-browser callers (no fetch-metadata,
-    no origin — e.g. the test client / CLI) are allowed through the CSRF guard."""
+    no origin — e.g. the test client / CLI) are allowed through the CSRF guard. Uses a
+    side-effect-free endpoint so it does not mutate global state for other tests."""
     same = client.post(
-        "/api/killswitch/engage", auth=AUTH, headers={"sec-fetch-site": "same-origin"}
+        "/api/scheduler/resume", auth=AUTH, headers={"sec-fetch-site": "same-origin"}
     )
-    assert same.status_code != 403
-    plain = client.post("/api/killswitch/disengage", auth=AUTH)
-    assert plain.status_code != 403
+    assert same.status_code != 403  # same-origin allowed
+    plain = client.post("/api/scheduler/resume", auth=AUTH)
+    assert plain.status_code != 403  # non-browser (no fetch-metadata/origin) allowed
 
 
 def test_api_me_requires_auth() -> None:
@@ -110,10 +111,21 @@ def test_dashboard_killswitch_engage_and_recovery(tmp_path) -> None:
 
 
 @requires_db
-def test_approvals_create_list_decide_loop() -> None:
+def test_approvals_create_list_decide_loop(monkeypatch) -> None:
     # The approvals surface is fully wired: an operator can REQUEST an approval, see it
     # pending, and approve it (previously the table was read by the UI but never written).
     import uuid
+
+    from src.api.stats import GateStats
+
+    # Make the activation precondition deterministic regardless of test order: force gates green
+    # and persist a real-lake promotion (live activation requires both).
+    monkeypatch.setattr(
+        "src.api.stats.compute_gate_stats",
+        lambda *_a, **_k: GateStats(
+            total_critical_gates=20, critical_gates_passed=20, live_readiness_score=100.0
+        ),
+    )
 
     # Live activation now requires an active strategy validated on REAL lake data (Section 13);
     # persist one so the activation request can be built.
