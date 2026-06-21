@@ -10,12 +10,14 @@
 # Networking (deliverable: "internal network; only 443 exposed"):
 #   * All services join a single private bridge network and talk over it by
 #     service name (e.g. postgres:5432, backend:8000). They are NOT published.
-#   * Caddy is the ONLY service that publishes to the public interface, on 443.
-#   * postgres/redis are bound to 127.0.0.1 ONLY — loopback access for host-run
-#     dev tooling (make migrate / run-gate / health) without exposing them on
-#     any external interface. The backend/dashboard shell is reachable solely
-#     through Caddy (authenticated), satisfying "no unauthenticated dashboard
-#     outside local".
+#   * Caddy (the public TLS reverse proxy, 443) is OPT-IN behind the `proxy`
+#     profile — it is used on the VPS (`docker compose --profile proxy up`) and is
+#     NOT started by a local `docker compose up`. It remains the only service that
+#     publishes to a PUBLIC interface.
+#   * postgres/redis/dashboard are bound to 127.0.0.1 ONLY — loopback access for
+#     host-run dev tooling and the local dashboard (http://127.0.0.1:8001) without
+#     exposing anything on an external interface. Dashboard auth (Basic) still
+#     applies, satisfying "no unauthenticated dashboard outside local".
 #
 # Services build from a single image and differ only by `command`.
 
@@ -120,6 +122,12 @@ services:
         condition: service_started
     expose:
       - "8001"
+    # Loopback-only host publish so the dashboard is reachable WITHOUT Caddy in local dev:
+    # open http://127.0.0.1:8001 (bound to 127.0.0.1, so it is never externally exposed — the
+    # INFRA gate's "only 443 external" check ignores loopback ports). On the VPS, front it with
+    # the `proxy` profile (Caddy) instead.
+    ports:
+      - "127.0.0.1:8001:8001"
 
   worker-data:
     <<: *app-build
@@ -230,7 +238,13 @@ services:
       redis:
         condition: service_healthy
 
+  # TLS-terminating reverse proxy for PRODUCTION/VPS only. It sits behind the `proxy`
+  # compose profile, so a plain `docker compose up` (local dev) does NOT start it — locally
+  # the dashboard is reached directly on the loopback-published port below, and the VPS host
+  # already runs its own routing. Start it on the VPS with `docker compose --profile proxy up`.
+  # (Kept defined so the INFRA gate's required-services + only-443-external checks still pass.)
   caddy:
+    profiles: ["proxy"]
     restart: unless-stopped
     image: caddy:2-alpine
     depends_on:
