@@ -121,6 +121,34 @@ def test_env_scoping_separates_demo_from_paper(seeded_envs) -> None:
     assert compute_trading_stats(win, env="demo", strategy="PX").total_trades == 0
 
 
+def test_real_env_excludes_paper_experiments() -> None:
+    """The 'real' env view = demo+testnet+live only, so ad-hoc paper runs never contribute to
+    the real-trading statistics (the operator's filter for separating their own paper tests)."""
+    rows = [("paper_only_sess", "RX"), ("demo:real_sess", "RX"), ("testnet:real_sess", "RX")]
+    with session_scope() as s:
+        for sid, _ in rows:
+            s.query(PaperTradeRecord).filter_by(session_id=sid).delete()
+        for sid, strat in rows:
+            for i in range(2):
+                s.add(
+                    PaperTradeRecord(
+                        session_id=sid, trade_id=f"{sid}_{i}", symbol="BTC/USDT:USDT",
+                        strategy=strat, side=1, pnl=5.0, pnl_r=0.1, fee=0.0, slippage_cost=0.0,
+                        regime="range",
+                    )
+                )
+    try:
+        win = resolve_window("all", None, None)
+        # real = demo (2) + testnet (2), paper (2) EXCLUDED.
+        assert compute_trading_stats(win, env="real", strategy="RX").total_trades == 4
+        assert compute_trading_stats(win, env="paper", strategy="RX").total_trades == 2
+        assert compute_trading_stats(win, env="all", strategy="RX").total_trades == 6
+    finally:
+        with session_scope() as s:
+            for sid, _ in rows:
+                s.query(PaperTradeRecord).filter_by(session_id=sid).delete()
+
+
 def test_get_environment_summary_and_traded_symbols(seeded_envs) -> None:
     from src.api.stats import get_environment_summary, get_traded_symbols
 

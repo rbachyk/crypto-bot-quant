@@ -31,7 +31,12 @@ x-app-env: &app-env
   DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://postgres:postgres@postgres:5432/trading_bot}
   REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
   ENABLE_LIVE_TRADING: ${ENABLE_LIVE_TRADING:-false}
-  ENABLE_BACKGROUND_RESEARCH_JOBS: ${ENABLE_BACKGROUND_RESEARCH_JOBS:-true}
+  # OFF by default: the scheduler must NOT auto-enqueue recurring paper sessions / strategy
+  # validations that silently add trades to the dashboard. (The redis pause flag is ephemeral —
+  # wiped whenever redis is recreated — so this env toggle is the durable off-switch.) Paper
+  # runs are started MANUALLY (dashboard/CLI); this toggle does not affect those. Opt back into
+  # background research by setting ENABLE_BACKGROUND_RESEARCH_JOBS=true in .env.
+  ENABLE_BACKGROUND_RESEARCH_JOBS: ${ENABLE_BACKGROUND_RESEARCH_JOBS:-false}
   DASHBOARD_AUTH_MODE: ${DASHBOARD_AUTH_MODE:-basic}
   DASHBOARD_USERNAME: ${DASHBOARD_USERNAME:-admin}
   DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-change-me-in-env}

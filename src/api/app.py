@@ -463,6 +463,7 @@ _ENV_SELECT = (
     '<select id="envsel" title="Trading environment — applies to all statistics and is '
     'remembered across pages">'
     '<option value="all">All environments</option>'
+    '<option value="real">Real (demo+testnet+live)</option>'
     '<option value="paper">Paper</option>'
     '<option value="demo">Demo</option>'
     '<option value="testnet">Testnet</option>'

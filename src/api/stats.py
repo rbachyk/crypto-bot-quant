@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from src.db.base import session_scope
 from src.db.models import (
@@ -58,6 +58,12 @@ def _apply_env(query, env: str | None):
         for pfx in _REAL_ENV_PREFIXES:
             query = query.where(~PaperTradeRecord.session_id.like(f"{pfx}%"))
         return query
+    if env == "real":
+        # Real = the demo/testnet/live venues only — EXCLUDES ad-hoc paper experiments so they
+        # never contribute to the headline statistics (the dashboard's "Real" env view).
+        return query.where(
+            or_(*(PaperTradeRecord.session_id.like(f"{pfx}%") for pfx in _REAL_ENV_PREFIXES))
+        )
     return query.where(PaperTradeRecord.session_id.like(f"{env}:%"))
 
 
