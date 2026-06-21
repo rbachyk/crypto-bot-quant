@@ -244,6 +244,32 @@ class CcxtLiveVenue:
         self.open_orders[order.client_id] = order
 
     # -- reconciliation -------------------------------------------------- #
+    def fetch_open_orders(self) -> dict[str, Order]:
+        """Live resting orders on the exchange, keyed by clientOrderId (for startup
+        reconciliation vs the bot's mirror, Section 7). Orders whose clientOrderId lacks
+        the bot's ownership prefix are foreign/manual and must halt new entries."""
+        out: dict[str, Order] = {}
+        for o in self._ex.fetch_open_orders() or []:
+            info = o.get("info") or {}
+            cid = str(o.get("clientOrderId") or info.get("clientOrderId") or o.get("id") or "")
+            if not cid:
+                continue
+            side = str(o.get("side") or "").lower()
+            out[cid] = Order(
+                client_id=cid,
+                symbol=str(o.get("symbol") or ""),
+                side="buy" if side == "buy" else "sell",
+                qty=_num(o.get("amount")) or 0.0,
+                order_type=OrderType.LIMIT,
+                price=_num(o.get("price")),
+                # Only orders carrying our prefix are tagged as ours; the reconciler keys
+                # ownership off is_own(client_id), so an empty tag dict here is deliberate.
+                tags={"bot_instance_id": self.settings.bot_instance_id}
+                if cid.startswith(self.settings.order_client_id_prefix)
+                else {},
+            )
+        return out
+
     def fetch_exchange_positions(self) -> dict[str, VenuePosition]:
         """Live exchange positions (for reconciliation vs the bot's mirror, Section 7)."""
         out: dict[str, VenuePosition] = {}

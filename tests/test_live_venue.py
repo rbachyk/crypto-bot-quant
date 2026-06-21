@@ -72,6 +72,7 @@ class FakeCcxt:
         self.orders: list[dict] = []
         self.cancelled: list[str] = []
         self._positions: list[dict] = []
+        self._open_orders: list[dict] = []
 
     def create_order(self, symbol, type, side, qty, price, params=None):  # noqa: A002
         self.orders.append(
@@ -92,6 +93,9 @@ class FakeCcxt:
 
     def fetch_positions(self):
         return self._positions
+
+    def fetch_open_orders(self):
+        return self._open_orders
 
 
 class AllowGuard:
@@ -266,6 +270,65 @@ def test_fetch_exchange_positions_marks_ownership() -> None:
     assert pos["BTC/USDT:USDT"].owned is True
     assert pos["ETH/USDT:USDT"].owned is False  # foreign / manual order → not owned
     assert "SOL/USDT:USDT" not in pos  # zero-qty positions ignored
+
+
+def test_fetch_open_orders_marks_ownership() -> None:
+    fake = FakeCcxt()
+    fake._open_orders = [
+        {
+            "symbol": "BTC/USDT:USDT",
+            "side": "buy",
+            "amount": 0.01,
+            "price": 49_000.0,
+            "clientOrderId": f"{_PREFIX}entry_1",
+            "info": {},
+        },
+        {
+            "symbol": "ETH/USDT:USDT",
+            "side": "sell",
+            "amount": 0.1,
+            "price": 3_100.0,
+            "clientOrderId": "MANUAL_human_42",
+            "info": {},
+        },
+    ]
+    orders = _venue(fake).fetch_open_orders()
+    assert orders[f"{_PREFIX}entry_1"].tags.get("bot_instance_id")  # owned → tagged
+    assert not orders["MANUAL_human_42"].tags  # foreign → no ownership tag
+
+
+def test_startup_reconciliation_detects_foreign_and_adopts_owned() -> None:
+    from src.execution.ownership import OwnershipPolicy
+    from src.execution.reconciliation import reconcile_startup
+
+    fake = FakeCcxt()
+    fake._open_orders = [
+        {
+            "symbol": "BTC/USDT:USDT",
+            "side": "buy",
+            "amount": 0.01,
+            "price": 49_000.0,
+            "clientOrderId": "MANUAL_human_42",
+            "info": {},
+        }
+    ]
+    fake._positions = [
+        {
+            "symbol": "ETH/USDT:USDT",
+            "side": "long",
+            "contracts": 0.1,
+            "entryPrice": 3_000.0,
+            "info": {"clientOrderId": f"{_PREFIX}entry_1"},
+        }
+    ]
+    settings = _testnet_settings()
+    venue = CcxtLiveVenue(load_metadata_config(), settings, client=fake)
+    res = reconcile_startup(venue, OwnershipPolicy(settings), environment="testnet")
+    assert res.halt_required  # foreign order present
+    assert "MANUAL_human_42" in res.foreign_orders
+    assert "ETH/USDT:USDT" in res.owned_positions  # our position adopted
+    assert "ETH/USDT:USDT" in venue.positions
+    assert "HALT" in res.report()
 
 
 def test_emergency_close_requires_confirmation() -> None:

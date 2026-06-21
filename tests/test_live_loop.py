@@ -120,8 +120,10 @@ def test_live_loop_rejects_bad_mode() -> None:
 
 
 class FakeCcxt:
-    def __init__(self) -> None:
+    def __init__(self, positions=None, open_orders=None) -> None:
         self.orders: list[dict] = []
+        self._positions = positions or []
+        self._open_orders = open_orders or []
 
     def create_order(self, symbol, type, side, qty, price, params=None):  # noqa: A002
         self.orders.append({"symbol": symbol, "side": side, "params": params or {}})
@@ -131,7 +133,10 @@ class FakeCcxt:
         return {}
 
     def fetch_positions(self):
-        return []
+        return self._positions
+
+    def fetch_open_orders(self):
+        return self._open_orders
 
 
 def test_live_loop_drives_testnet_venue(tmp_path) -> None:
@@ -147,6 +152,78 @@ def test_live_loop_drives_testnet_venue(tmp_path) -> None:
     assert fake.orders  # real (testnet) orders were placed through the loop
     # every order carried the ownership prefix as clientOrderId
     assert all(o["params"].get("clientOrderId") for o in fake.orders)
+
+
+_PREFIX = "QBOT_LOCAL_v1_"
+
+
+def _testnet_settings(**over) -> Settings:
+    base = {
+        "_env_file": None,
+        "exchange_env": "testnet",
+        "exchange_api_key": "k",
+        "exchange_api_secret": "s",
+        "order_client_id_prefix": _PREFIX,
+    }
+    base.update(over)
+    return Settings(**base)
+
+
+def test_startup_reconciliation_halts_on_foreign_position(tmp_path) -> None:
+    """A pre-existing FOREIGN (manual) position on the exchange halts the loop before any
+    tick — we never trade on top of an un-attributable book (Section 7)."""
+    feed = _feed(tmp_path)
+    fake = FakeCcxt(
+        positions=[
+            {
+                "symbol": "XRP/USDT:USDT",
+                "side": "long",
+                "contracts": 10.0,
+                "entryPrice": 0.5,
+                "info": {"clientOrderId": "MANUAL_human_1"},
+            }
+        ]
+    )
+    settings = _testnet_settings()
+    venue = CcxtLiveVenue(load_metadata_config(), settings, client=fake)
+    result = LiveLoop(mode="testnet", venue=venue, settings=settings).run(feed, session_name="t")
+    assert result.halted
+    assert result.executed == 0  # never traded
+    assert result.startup_recon is not None and result.startup_recon.halt_required
+    assert "XRP/USDT:USDT" in result.startup_recon.foreign_positions
+    assert not fake.orders
+
+
+def test_startup_reconciliation_adopts_owned_and_runs(tmp_path) -> None:
+    """An OWNED position already on the exchange (carries our prefix) is adopted into the
+    mirror and does not halt; the loop runs normally."""
+    feed = _feed(tmp_path)
+    fake = FakeCcxt(
+        positions=[
+            {
+                "symbol": "ETH/USDT:USDT",
+                "side": "long",
+                "contracts": 0.1,
+                "entryPrice": 3_000.0,
+                "info": {"clientOrderId": f"{_PREFIX}entry_1"},
+            }
+        ]
+    )
+    settings = _testnet_settings()
+    venue = CcxtLiveVenue(load_metadata_config(), settings, client=fake)
+    result = LiveLoop(mode="testnet", venue=venue, settings=settings).run(feed, session_name="t")
+    assert not result.halted
+    assert result.startup_recon is not None and not result.startup_recon.halt_required
+    assert "ETH/USDT:USDT" in result.startup_recon.owned_positions
+    assert "ETH/USDT:USDT" in venue.positions  # adopted into the mirror
+
+
+def test_startup_reconciliation_clean_paper_is_noop(tmp_path) -> None:
+    """Offline paper has no real exchange book — startup reconciliation is a clean no-op."""
+    feed = _feed(tmp_path)
+    result = LiveLoop(mode="paper").run(feed, session_name="t")
+    assert result.startup_recon is not None and not result.startup_recon.halt_required
+    assert not result.halted
 
 
 def test_live_loop_halts_on_data_integrity_failure(tmp_path) -> None:

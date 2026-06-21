@@ -29,6 +29,8 @@ from src.config import Settings, get_settings
 from src.data.config import DataConfig, load_data_config
 from src.exchange.metadata import MetadataConfig, load_metadata_config
 from src.execution.live_venue import LiveOrderGuard, get_venue
+from src.execution.ownership import OwnershipPolicy
+from src.execution.reconciliation import StartupReconResult, reconcile_startup
 from src.execution.venue import Venue
 from src.killswitch import KillSwitch
 from src.paper.engine import PaperCandidateInput, PaperTradingEngine
@@ -91,6 +93,7 @@ class LiveRunResult:
     mode: str
     ticks: list[LiveTick] = field(default_factory=list)
     halted: bool = False
+    startup_recon: StartupReconResult | None = None
 
     @property
     def executed(self) -> int:
@@ -137,6 +140,19 @@ class LiveLoop:
             venue=self.venue,
         )
 
+    def reconcile_startup(self) -> StartupReconResult:
+        """Reconcile the REAL exchange book against this bot before any tick (Section 7).
+
+        For a real venue (testnet/demo/live) this fetches live open orders + positions,
+        adopts the ones carrying our ownership prefix into the venue mirror, and flags any
+        foreign/manual item — which must halt new entries. For offline paper it is a no-op
+        clean book."""
+        return reconcile_startup(
+            self.venue,
+            OwnershipPolicy(self.settings),
+            environment=self.env_label,
+        )
+
     @property
     def env_label(self) -> str:
         """Session-id prefix identifying the trading environment, so statistics separate
@@ -161,6 +177,17 @@ class LiveLoop:
         (e.g. a dashboard Stop button via the job-cancel flag) can halt the loop cleanly."""
         session = self.engine.new_session(f"{self.env_label}:{session_name}")
         result = LiveRunResult(session=session, mode=self.mode)
+
+        # Section 7: before ANY tick, reconcile the real exchange book. A foreign/manual
+        # order or position means we cannot trust exchange state → halt before trading.
+        startup = self.reconcile_startup()
+        result.startup_recon = startup
+        session.reconciliation_events.append({"phase": "startup", **startup.to_dict()})
+        if startup.halt_required:
+            result.halted = True
+            session.foreign_order_halt_triggered = True
+            return result
+
         for i, (decision_ts, group) in enumerate(feed.groups()):
             if max_ticks is not None and i >= max_ticks:
                 break
