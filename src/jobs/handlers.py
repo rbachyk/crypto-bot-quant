@@ -275,9 +275,18 @@ def _build_dataset_version(ctx: JobContext, params: dict) -> dict:
     # Load ONCE: a config with `as_of: now` re-resolves the window on every load, so two loads
     # can land an hour apart — the download window would then differ from the validated/snapshotted
     # one (spurious trailing-gap failures, non-reproducible snapshot id at hour boundaries).
-    cfg = load_data_config(cfg_path)
+    cfg = load_data_config(cfg_path, as_of_ms=params.get("as_of_ms"))
     platform = DataPlatform(cfg=cfg)
     syms = cfg.active_symbols()
+    # Surface the FROZEN window end so an operator can reproduce this exact snapshot later: pass
+    # the same as_of_ms (or set as_of to this ISO in the data yaml). Under `as_of: now` the window
+    # advances hourly, so without pinning a re-run yields a different snapshot id by design.
+    from src.data.schema import ms_to_iso
+
+    ctx.log(
+        f"window frozen at as_of={ms_to_iso(cfg.window_end_ms)} (as_of_ms={cfg.window_end_ms}) — "
+        "pin this for a reproducible re-snapshot"
+    )
 
     # --- preflight: is the exchange reachable and do the symbols exist? --------------------- #
     ctx.log(
