@@ -124,7 +124,9 @@ class DemoReadinessGuard:
             return ReadinessCheck(
                 "environment", FAIL, f"EXCHANGE_ENV={self.environment!r} is not demo/testnet"
             )
-        return ReadinessCheck("environment", PASS, f"virtual-funds environment '{self.environment}'")
+        return ReadinessCheck(
+            "environment", PASS, f"virtual-funds environment '{self.environment}'"
+        )
 
     def _check_kill_switch(self) -> ReadinessCheck:
         from src.killswitch import KillSwitch
@@ -145,7 +147,8 @@ class DemoReadinessGuard:
                 "un-attributable (Section 7)",
             )
         return ReadinessCheck(
-            "order_ownership", PASS, f"clientOrderId prefix '{own.prefix}' (instance {own.bot_instance_id})"
+            "order_ownership", PASS,
+            f"clientOrderId prefix '{own.prefix}' (instance {own.bot_instance_id})",
         )
 
     def _check_risk_caps(self) -> ReadinessCheck:
@@ -209,7 +212,8 @@ class DemoReadinessGuard:
         has_tp = bool(ot & {"take_profit_market", "trailing_stop"})
         if has_sl and has_tp:
             return ReadinessCheck(
-                "tp_sl_capability", PASS, "venue supports exchange-resident stop + take-profit/trailing"
+                "tp_sl_capability", PASS,
+                "venue supports exchange-resident stop + take-profit/trailing",
             )
         missing = []
         if not has_sl:
@@ -265,7 +269,8 @@ class DemoReadinessGuard:
             )
         return ReadinessCheck(
             "reconciliation", PASS,
-            f"clean book (owned orders={len(res.owned_orders)} positions={len(res.owned_positions)})",
+            f"clean book (owned orders={len(res.owned_orders)} "
+            f"positions={len(res.owned_positions)})",
         )
 
 

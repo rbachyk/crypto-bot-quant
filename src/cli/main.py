@@ -408,7 +408,7 @@ def demo_smoke(
     no_cleanup: bool = typer.Option(
         False, "--no-cleanup", help="leave the smoke position/orders open (default: close them)"
     ),
-    max_ticks: int = typer.Option(1, "--max-ticks", help="bounded tick cap (default 1 = one order)"),
+    max_ticks: int = typer.Option(1, "--max-ticks", help="bounded tick cap (1 = one order)"),
 ) -> None:
     """Safe, bounded demo smoke test: at most one minimal-notional order with mandatory SL/TP.
 

@@ -55,7 +55,6 @@ def test_publish_job_event_is_best_effort() -> None:
 def test_worker_publishes_lifecycle_events_to_channel() -> None:
     """Running a job emits running → progress → succeeded on the SSE channel."""
     import redis
-
     from src.config import get_settings
     from src.jobs import JobQueue, Worker
 

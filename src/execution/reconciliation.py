@@ -135,9 +135,11 @@ class StartupReconResult:
         lines = [
             f"Startup reconciliation [{self.environment}] — {verdict}",
             f"  owned orders adopted     : {len(self.owned_orders)} {list(self.owned_orders)}",
-            f"  owned positions adopted  : {len(self.owned_positions)} {list(self.owned_positions)}",
+            f"  owned positions adopted  : {len(self.owned_positions)} "
+            f"{list(self.owned_positions)}",
             f"  FOREIGN orders           : {len(self.foreign_orders)} {list(self.foreign_orders)}",
-            f"  FOREIGN positions        : {len(self.foreign_positions)} {list(self.foreign_positions)}",
+            f"  FOREIGN positions        : {len(self.foreign_positions)} "
+            f"{list(self.foreign_positions)}",
         ]
         if self.halt_required:
             lines.append(

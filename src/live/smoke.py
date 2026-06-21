@@ -145,7 +145,9 @@ def _smoke_feed(settings: Settings, meta: Any) -> Any:
     symbol = meta.symbols()[0]
     spec = meta.spec(symbol)
     # A reference price near the tick grid; the venue fills at the returned average anyway.
-    ref = float(spec.fields.get("min_notional", 5.0)) / float(spec.fields.get("min_order_size", 0.001))
+    ref = float(spec.fields.get("min_notional", 5.0)) / float(
+        spec.fields.get("min_order_size", 0.001)
+    )
     cand = Candidate(
         symbol=symbol,
         strategy="demo_smoke",
@@ -170,7 +172,9 @@ def _smoke_feed(settings: Settings, meta: Any) -> Any:
         config_live_approved=True,
         decision_ts=1_700_000_000_000,
     )
-    return ReplayFeed([PaperCandidateInput(candidate=cand, equity=_SMOKE_EQUITY, exit_move_frac=0.0)])
+    return ReplayFeed(
+        [PaperCandidateInput(candidate=cand, equity=_SMOKE_EQUITY, exit_move_frac=0.0)]
+    )
 
 
 __all__ = ["run_demo_smoke", "DemoSmokeResult"]

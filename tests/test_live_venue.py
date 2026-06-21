@@ -207,7 +207,9 @@ def test_order_blocked_when_metadata_is_for_wrong_exchange() -> None:
     must refuse to place orders — never size/route on a placeholder spec (Section 6)."""
     fake = FakeCcxt()
     # Skeleton metadata (exchange_id='skeleton') but the venue trades exchange_id='bybit'.
-    venue = CcxtLiveVenue(load_metadata_config(), _testnet_settings(exchange_id="bybit"), client=fake)
+    venue = CcxtLiveVenue(
+        load_metadata_config(), _testnet_settings(exchange_id="bybit"), client=fake
+    )
     with pytest.raises(PermissionError, match="unverified exchange metadata"):
         venue.place_bracket(
             _plan(), ref_price=50_000.0, realized_slippage_frac=0.0, latency_ms=5.0

@@ -8,6 +8,7 @@ every publish is wrapped and swallowed.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from typing import Any
 
@@ -40,10 +41,9 @@ def publish_job_event(
         payload["progress"] = progress
     if message is not None:
         payload["message"] = message
-    try:
+    # A pub/sub hiccup must not affect the job.
+    with contextlib.suppress(Exception):
         redis_client.publish(JOB_EVENTS_CHANNEL, json.dumps(payload))
-    except Exception:  # noqa: BLE001 - a pub/sub hiccup must not affect the job
-        pass
 
 
 __all__ = ["JOB_EVENTS_CHANNEL", "format_progress", "publish_job_event"]
