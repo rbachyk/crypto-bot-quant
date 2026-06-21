@@ -133,15 +133,40 @@ def promoted_strategy_details(strategy_version: str | None = None) -> list[Promo
     return out
 
 
+#: provenance value that marks a verdict produced from REAL downloaded market data (vs
+#: ``reference`` synthetic fixtures). Only ``lake``-validated strategies may trade demo/live.
+REAL_DATA_SOURCE = "lake"
+
+
 def active_strategy_ids(
-    strategy_version: str | None = None, *, limit: int | None = None
+    strategy_version: str | None = None,
+    *,
+    limit: int | None = None,
+    require_real_data: bool = False,
 ) -> list[str]:
     """candidate_ids of the strategies the live/demo engine runs — the top-N promoted by
-    expectancy_r (``limit`` overrides ``max_active_strategies``; ``None``/0 = the config cap)."""
+    expectancy_r (``limit`` overrides ``max_active_strategies``; ``None``/0 = the config cap).
+
+    ``require_real_data=True`` (set for demo/testnet/live) keeps ONLY strategies whose latest
+    validation ran on real lake data — a synthetic/reference-only promotion must never trade a
+    real (even virtual-funds) account (Section 13). It can legitimately yield an empty set."""
     details = [d for d in promoted_strategy_details(strategy_version) if d.active]
+    if require_real_data:
+        details = [d for d in details if d.data_source == REAL_DATA_SOURCE]
     if limit is not None and limit > 0:
         details = details[:limit]
     return [d.candidate_id for d in details]
+
+
+def reference_only_active_ids(strategy_version: str | None = None) -> list[str]:
+    """Active (top-N) promoted strategies whose validation is reference-only — i.e. the ones
+    blocked from demo/live by :func:`active_strategy_ids(require_real_data=True)`. For the
+    demo-readiness report so a blocked strategy is explained, not silently dropped."""
+    return [
+        d.candidate_id
+        for d in promoted_strategy_details(strategy_version)
+        if d.active and d.data_source != REAL_DATA_SOURCE
+    ]
 
 
 def is_strategy_promoted(candidate_id: str, strategy_version: str | None = None) -> bool:

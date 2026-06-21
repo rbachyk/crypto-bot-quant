@@ -6,9 +6,11 @@ from __future__ import annotations
 import uuid
 
 from src.strategies.promotion import (
+    active_strategy_ids,
     is_strategy_promoted,
     persist_validations,
     promoted_strategies,
+    reference_only_active_ids,
 )
 from src.strategies.research import CandidateValidation, SideDecision
 
@@ -58,3 +60,23 @@ def test_persist_and_query_promotions() -> None:
     # Upsert is idempotent per (candidate_id, version) — no duplicate row.
     assert persist_validations([good]) == 1
     assert promoted_strategies(ver).count("good_one") == 1
+
+
+@requires_db
+def test_demo_live_requires_real_lake_data() -> None:
+    """A strategy promoted on synthetic/reference data only must be BLOCKED from demo/live;
+    re-validating it on real lake data makes it eligible (Section 13)."""
+    ver = f"strat_test_{uuid.uuid4().hex[:6]}"
+    # ``basis_reversion`` is a known candidate id in configs/strategies.yaml.
+    cand = _validation("basis_reversion", ver, promoted=True)
+
+    # Promoted on reference (synthetic) data → eligible for paper, BLOCKED for demo/live.
+    assert persist_validations([cand], data_source="reference") == 1
+    assert "basis_reversion" in active_strategy_ids(ver, require_real_data=False)
+    assert "basis_reversion" not in active_strategy_ids(ver, require_real_data=True)
+    assert "basis_reversion" in reference_only_active_ids(ver)
+
+    # Re-validated on real lake data → now eligible for demo/live too.
+    assert persist_validations([cand], data_source="lake") == 1
+    assert "basis_reversion" in active_strategy_ids(ver, require_real_data=True)
+    assert "basis_reversion" not in reference_only_active_ids(ver)

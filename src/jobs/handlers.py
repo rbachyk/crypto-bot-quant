@@ -782,16 +782,27 @@ def _run_live_session(ctx: JobContext, params: dict) -> dict:
 
     if multi_strategy:
         from src.paper.lake import resolve_active_strategies
+        from src.strategies.promotion import reference_only_active_ids
 
-        active, skipped = resolve_active_strategies(settings)
+        # Non-paper runs (testnet/demo/live) may ONLY run strategies validated on real lake
+        # data; reference-only promotions are blocked (Section 13).
+        require_real_data = mode != "paper"
+        active, skipped = resolve_active_strategies(settings, require_real_data=require_real_data)
         ctx.log(
             f"active promoted strategies: {[sid for _s, sid, _v in active] or 'NONE'}"
             + (f" (skipped stale/unknown ids: {skipped})" if skipped else "")
         )
+        blocked = reference_only_active_ids(settings.strategy_version) if require_real_data else []
+        if blocked:
+            ctx.log(
+                f"blocked from {mode}: {blocked} — validated on synthetic/reference data only. "
+                "Re-validate on downloaded lake data before they can trade a real account.",
+                level="WARNING",
+            )
         if not active:
             ctx.log(
-                "no promoted strategies are active — run strategy validation and promote at "
-                "least one before trading (live trades nothing without a promoted strategy).",
+                "no promoted strategies are active — run strategy validation on real lake data "
+                "and promote at least one before trading (live trades nothing without one).",
                 level="WARNING",
             )
     ctx.log(

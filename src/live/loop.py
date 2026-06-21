@@ -264,11 +264,16 @@ def run_replay_session(
     tf = timeframe or data_cfg.base_timeframe
     syms = symbols or data_cfg.active_symbols()
 
+    # Section 13: any non-paper run (testnet/demo/live) places orders on a real account and
+    # may ONLY run strategies validated on real lake data — never synthetic/reference-only.
+    require_real_data = mode != "paper"
     strategies = None
     if multi_strategy:
         from src.paper.lake import resolve_active_strategies
 
-        active, _skipped = resolve_active_strategies(settings)
+        active, _skipped = resolve_active_strategies(
+            settings, require_real_data=require_real_data
+        )
         strategies = active
     # Real-money mode is bounded by the activation guard (gates + sign-off + caps).
     if guard is None and mode == "live":
@@ -314,7 +319,11 @@ def run_replay_session(
         from src.paper.lake import build_active_lake_inputs
 
         inputs, _ids = build_active_lake_inputs(
-            data_cfg, timeframe=tf, symbols=syms, settings=settings
+            data_cfg,
+            timeframe=tf,
+            symbols=syms,
+            settings=settings,
+            require_real_data=require_real_data,
         )
         feed = ReplayFeed(inputs)
         loop = LiveLoop(mode=mode, settings=settings, guard=guard, data_manager=data_manager)
