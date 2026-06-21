@@ -104,6 +104,22 @@ def test_net_beta_cap_binds_against_open_position() -> None:
     assert session.rejected and session.rejected[0].symbol == ETH
 
 
+def test_daily_loss_breaker_trips_from_accumulated_realized_losses() -> None:
+    """Realized losses from CLOSED trades accumulate and trip the daily-loss breaker, halting
+    new entries — the loss breakers were previously dead (hardcoded 0) in a real run."""
+    eng = _engine()
+    session = eng.new_session()
+    # Each trade's stop is hit (exit_move beyond −0.8% stop) → a realized loss is booked.
+    losers = [
+        PaperCandidateInput(candidate=_cand(BTC), equity=100_000.0, exit_move_frac=-0.03)
+        for _ in range(5)
+    ]
+    eng.process_candidates(losers, session)
+    assert eng._realized_pnl < 0  # losses accumulated
+    assert session.executed_count < 5  # the breaker halted entries before all 5
+    assert any("risk_block" in r.reason for r in session.rejected)  # blocked by a breaker
+
+
 def test_closed_position_frees_the_concurrency_slot() -> None:
     """A BTC trade that round-trips (hits TP) releases its slot, so the next BTC entry is
     allowed — the cap binds on *currently* open positions, not historical ones."""

@@ -129,6 +129,10 @@ class PaperTradingEngine:
         # (previously the risk manager always saw an EMPTY portfolio, so the Section-17
         # portfolio caps were dead in paper/demo). Kept in lock-step with the venue book.
         self._open_positions: dict[str, Position] = {}
+        # Realized PnL accumulated across the session (from CLOSED trades), fed to the loss
+        # breakers so they can actually trip (Section 17). Per-symbol for the per-symbol breaker.
+        self._realized_pnl: float = 0.0
+        self._per_symbol_pnl: dict[str, float] = {}
 
     # ------------------------------------------------------------------ #
     # Public API                                                            #
@@ -266,10 +270,15 @@ class PaperTradingEngine:
             # peak_equity is at least the current equity; a higher session peak lets the
             # drawdown breaker trip. consecutive_losses drives the loss-streak breaker.
             peak_equity=max(inp.peak_equity, inp.equity),
-            daily_pnl=inp.daily_pnl,
+            # Realized session PnL is accumulated from CLOSED trades and folded in, so the
+            # daily / weekly / per-symbol loss breakers actually trip in a real run (they were
+            # hardcoded to 0 → dead). inp.* stay as an externally-provided baseline.
+            daily_pnl=inp.daily_pnl + self._realized_pnl,
             consecutive_losses=inp.consecutive_losses,
             abnormal_slippage_active=False,
             reconciled=not inp.inject_foreign_order,
+            weekly_pnl=self._realized_pnl,
+            per_symbol_pnl=dict(self._per_symbol_pnl),
         )
         account = AccountState(
             portfolio=portfolio,
@@ -399,6 +408,12 @@ class PaperTradingEngine:
         else:
             self._open_positions.pop(candidate.symbol, None)
             self._venue.positions.pop(candidate.symbol, None)
+            # The trade closed → its PnL is REALIZED. Accumulate it for the loss breakers so a
+            # losing session halts new entries on the next candidate (Section 17).
+            self._realized_pnl += pnl
+            self._per_symbol_pnl[candidate.symbol] = (
+                self._per_symbol_pnl.get(candidate.symbol, 0.0) + pnl
+            )
         session.decision_logs.append(
             self._decision_log(candidate, "execute", "approved", True, ks_state)
         )
