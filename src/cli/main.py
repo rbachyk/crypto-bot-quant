@@ -387,6 +387,44 @@ def reports(
         typer.echo(json.dumps(generate_standard_reports(), indent=2))
 
 
+@app.command(name="demo-readiness")
+def demo_readiness() -> None:
+    """Pre-flight demo readiness gate — PASS / FAIL / BLOCKED with per-check detail.
+
+    Composes the demo-safety controls (kill switch, ownership, risk caps, verified exchange
+    metadata, TP/SL capability, real-data strategy eligibility, reconciliation). Places no
+    orders. Exits non-zero unless the verdict is PASS."""
+    from src.live.demo_guard import DemoReadinessGuard
+
+    report = DemoReadinessGuard().evaluate()
+    typer.echo(report.report())
+    typer.echo(json.dumps(report.to_dict(), indent=2))
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
+@app.command(name="demo-smoke")
+def demo_smoke(
+    no_cleanup: bool = typer.Option(
+        False, "--no-cleanup", help="leave the smoke position/orders open (default: close them)"
+    ),
+    max_ticks: int = typer.Option(1, "--max-ticks", help="bounded tick cap (default 1 = one order)"),
+) -> None:
+    """Safe, bounded demo smoke test: at most one minimal-notional order with mandatory SL/TP.
+
+    Runs the readiness gate first and places NOTHING unless it PASSes; then drives the real
+    demo/testnet venue for at most ``--max-ticks`` tick(s), reconciles immediately, and (by
+    default) closes the smoke position so the demo book is left flat. Never enables live
+    trading. Exits non-zero if readiness blocked or the run halted."""
+    from src.live.smoke import run_demo_smoke
+
+    result = run_demo_smoke(cleanup=not no_cleanup, max_ticks=max_ticks)
+    typer.echo(result.report())
+    typer.echo(json.dumps(result.to_dict(), indent=2))
+    if not result.ok:
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def config() -> None:
     """Print the active (non-secret) configuration and versions."""
