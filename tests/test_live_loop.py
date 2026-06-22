@@ -256,6 +256,26 @@ def test_per_tick_reconciliation_refreshes_owned_protection(tmp_path) -> None:
     assert venue.positions["ETH/USDT:USDT"].has_exchange_side_stop() is True  # real stop read
 
 
+def test_per_tick_reconciliation_debounce_drops_closed_position(tmp_path) -> None:
+    """An owned mirror position the exchange stops listing (closed via its SL/TP) is retired after
+    a debounce, freeing its concurrency slot — not leaked forever (and not false-dropped on the
+    first absent tick, which could be fill latency)."""
+    settings = _testnet_settings()
+    fake = FakeCcxt()  # exchange reports NO open positions
+    venue = CcxtLiveVenue(load_metadata_config(), settings, client=fake)
+    from src.execution.venue import VenuePosition
+
+    venue.positions["BTC/USDT:USDT"] = VenuePosition(
+        symbol="BTC/USDT:USDT", side=1, qty=0.01, entry_price=50_000.0, owned=True
+    )
+    loop = LiveLoop(mode="testnet", venue=venue, settings=settings)
+    session = loop.engine.new_session("t")
+    loop._reconcile_live(session)
+    assert "BTC/USDT:USDT" in venue.positions  # 1st absent tick → kept (debounce)
+    loop._reconcile_live(session)
+    assert "BTC/USDT:USDT" not in venue.positions  # 2nd absent tick → dropped (slot freed)
+
+
 def test_startup_reconciliation_clean_paper_is_noop(tmp_path) -> None:
     """Offline paper has no real exchange book — startup reconciliation is a clean no-op."""
     feed = _feed(tmp_path)

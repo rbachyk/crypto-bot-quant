@@ -122,14 +122,27 @@ def test_env_scoping_separates_demo_from_paper(seeded_envs) -> None:
 
 
 def test_downsample_bounds_series_and_keeps_last_point() -> None:
-    """The equity-curve / trade-series downsampler caps the browser payload as trades grow,
-    always preserving the latest point; small series pass through unchanged."""
+    """The cumulative-curve downsampler caps the browser payload, always preserving the latest
+    point; small series pass through unchanged."""
     from src.api.stats import _downsample
 
     out = _downsample(list(range(5000)), max_points=600)
     assert len(out) == 600
     assert out[0] == 0 and out[-1] == 4999  # last point always included
     assert _downsample([1, 2, 3], 600) == [1, 2, 3]  # already small → unchanged
+
+
+def test_bucket_sum_series_preserves_total_pnl() -> None:
+    """The per-trade DELTA series is re-accumulated client-side, so downsampling must PRESERVE the
+    sum (bucket+sum), or the equity line / period bars understate P&L past the cap."""
+    from src.api.stats import _bucket_sum_series
+
+    series = [(1_000 + i, float(i % 7) - 3.0) for i in range(5000)]  # mixed +/- deltas
+    out = _bucket_sum_series(series, max_points=600)
+    assert len(out) <= 600
+    assert abs(sum(p[1] for p in out) - sum(p[1] for p in series)) < 1e-6  # total preserved
+    assert out[-1][0] == series[-1][0]  # ends at the latest timestamp
+    assert _bucket_sum_series(series[:3], 600) == series[:3]  # small → unchanged
 
 
 def test_real_env_excludes_paper_experiments() -> None:

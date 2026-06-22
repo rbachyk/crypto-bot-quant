@@ -42,6 +42,19 @@ def test_dashboard_renders_with_auth() -> None:
     assert "Control Center" in resp.text
 
 
+def test_path_params_are_escaped_no_reflected_xss() -> None:
+    """A path param that reaches the rendered HTML (symbol stats form action, gate id) must be
+    HTML-escaped — no reflected XSS into the authenticated control plane."""
+    payload = '"><script>alert(1)</script>'
+    from urllib.parse import quote
+
+    r = client.get(f"/dashboard/stats/{quote(payload, safe='')}", auth=AUTH)
+    assert r.status_code == 200
+    assert "<script>alert(1)" not in r.text  # escaped, not reflected raw
+    g = client.get(f"/dashboard/gates/{quote(payload, safe='')}", auth=AUTH)
+    assert "<script>alert(1)" not in g.text
+
+
 def test_csrf_blocks_cross_site_post() -> None:
     """A browser-marked cross-site POST (Fetch-Metadata) to a state-changing endpoint is
     rejected even with valid credentials — defends the Basic-auth control plane from CSRF."""

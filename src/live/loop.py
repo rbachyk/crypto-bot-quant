@@ -41,6 +41,10 @@ from src.paper.session import PaperSession
 
 _log = structlog.get_logger("live.loop")
 
+# A mirror position absent from the exchange book for this many consecutive reconciliations is
+# treated as closed and dropped (debounce against fill-latency false drops).
+_ABSENT_DROP_TICKS = 2
+
 
 def _alert_reconcile(
     environment: str,
@@ -180,6 +184,8 @@ class LiveLoop:
                     1 for p in self.venue.positions.values() if getattr(p, "owned", True)
                 )
             )
+        # Consecutive-absence counter for debounced retirement of exchange-side-closed positions.
+        self._absent_ticks: dict[str, int] = {}
 
     def _reconcile_live(self, session: PaperSession) -> bool:
         """Per-tick reconciliation against the REAL exchange book (real venues only, Section 7).
@@ -203,16 +209,28 @@ class LiveLoop:
         own = OwnershipPolicy(self.settings)
         foreign_orders = sorted(o for o, v in exch_orders.items() if not own.is_own(v.client_id))
         foreign_positions = sorted(s for s, p in exch_positions.items() if not p.owned)
-        # Refresh/adopt OWNED items from the exchange (updates real stop/TP protection and picks up
-        # positions opened outside this session). We do NOT drop mirror entries the exchange does
-        # not list this tick — a just-placed position can lag in fetch_positions, and a false drop
-        # would mis-state exposure; closed positions are reconciled as the exchange catches up.
+        # Refresh/adopt OWNED items from the exchange (real stop/TP protection + positions opened
+        # outside this session).
+        owned_now = {s for s, p in exch_positions.items() if p.owned}
         for sym, p in exch_positions.items():
             if p.owned:
                 venue.positions[sym] = p
+                self._absent_ticks.pop(sym, None)
                 if not p.has_exchange_side_stop():
                     # Log (not alert) so a multi-day loop can't flood the alert sink every tick.
                     _log.warning("live_owned_position_unprotected", symbol=sym)
+        # DEBOUNCED drop of closed positions: a mirror position the exchange no longer lists is
+        # retired only after it's been absent for _ABSENT_DROP_TICKS consecutive reconciliations —
+        # so a just-placed position lagging in fetch_positions is NOT false-dropped, but a real
+        # exchange-side SL/TP close frees its concurrency slot (the bounded-live cap counts the
+        # mirror) instead of leaking it forever.
+        for sym in list(venue.positions):
+            if sym in owned_now:
+                continue
+            self._absent_ticks[sym] = self._absent_ticks.get(sym, 0) + 1
+            if self._absent_ticks[sym] >= _ABSENT_DROP_TICKS:
+                venue.positions.pop(sym, None)
+                self._absent_ticks.pop(sym, None)
         for oid, v in exch_orders.items():
             if own.is_own(v.client_id):
                 venue.open_orders[oid] = v

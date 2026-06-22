@@ -55,7 +55,7 @@ _MAX_SERIES_POINTS = 600
 def _downsample(seq: list, max_points: int = _MAX_SERIES_POINTS) -> list:
     """Evenly sample a series down to at most ``max_points`` (keeping the last point), so the
     dashboard payload/SVG stays bounded as the trade count grows. Returns the input unchanged when
-    already small."""
+    already small. For a CUMULATIVE series (sampling just coarsens the curve)."""
     n = len(seq)
     if n <= max_points:
         return seq
@@ -63,6 +63,28 @@ def _downsample(seq: list, max_points: int = _MAX_SERIES_POINTS) -> list:
     out = [seq[int(i * step)] for i in range(max_points)]
     if out[-1] != seq[-1]:
         out[-1] = seq[-1]  # always include the latest point
+    return out
+
+
+def _bucket_sum_series(
+    series: list[tuple[int, float]], max_points: int = _MAX_SERIES_POINTS
+) -> list[tuple[int, float]]:
+    """Downsample a per-trade DELTA series into at most ``max_points`` contiguous buckets, SUMMING
+    each bucket's deltas (timestamp = the bucket's last trade). The client re-accumulates this
+    series into the equity curve and sums it into period bars, so the total must be preserved —
+    plain point-dropping would make those charts understate P&L past the cap."""
+    n = len(series)
+    if n <= max_points:
+        return series
+    step = n / max_points
+    out: list[tuple[int, float]] = []
+    for b in range(max_points):
+        lo = int(b * step)
+        hi = int((b + 1) * step) if b < max_points - 1 else n
+        if hi <= lo:
+            continue
+        chunk = series[lo:hi]
+        out.append((chunk[-1][0], round(sum(p[1] for p in chunk), 4)))
     return out
 
 
@@ -315,8 +337,10 @@ def compute_trading_stats(
     # Downsample the curve + per-trade series for the browser payload (the SVG only needs ~a few
     # hundred points). KPIs/drawdown above use the full data, so accuracy is unaffected — this
     # only bounds the response size as the trade count grows (soak/demo runs).
-    st.equity_curve = _downsample(curve)
-    st.trade_series = _downsample(
+    st.equity_curve = _downsample(curve)  # cumulative → sampling is fine
+    # The per-trade delta series is re-accumulated client-side (equity line + period bars), so it
+    # must be SUM-preserving — bucket+sum, never drop points.
+    st.trade_series = _bucket_sum_series(
         [(int(t.created_at.timestamp() * 1000), round(t.pnl, 4)) for t in rows]
     )
 

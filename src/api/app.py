@@ -761,7 +761,7 @@ def _scope_selector(
         + "</div>"
     )
     return (
-        f'<form method="get" action="{action}" class="toolbar">'
+        f'<form method="get" action="{_esc(action)}" class="toolbar">'
         + "".join(grps)
         + '<noscript><button class="btn" type="submit">Apply</button></noscript></form>'
     )
@@ -2613,7 +2613,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 c_badge = _status_badge(c_status.lower())
                 detail = c.get("detail") or c.get("failure_reason") or ""
                 criteria_rows += (
-                    f"<tr><td>{c.get('id', '?')}</td><td>{c_badge}</td><td>{detail}</td></tr>"
+                    f"<tr><td>{_esc(c.get('id', '?'))}</td><td>{c_badge}</td>"
+                    f"<td>{_esc(detail)}</td></tr>"
                 )
         remediation_html = ""
         if actions:
@@ -2625,7 +2626,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 # The actionable remediation is to re-run THIS gate once the step is addressed,
                 # so the button targets the working gate-rerun endpoint and shows the hint.
                 run_btn = (
-                    f'<form method="post" action="/api/gates/{gate_id}/run"'
+                    f'<form method="post" action="/api/gates/{_esc(gate_id)}/run"'
                     f' style="display:inline" title="recommended: {_esc(a.recommended_job)}">'
                     f'<button class="btn" type="submit"'
                     f' style="padding:2px 6px;font-size:11px">'
@@ -2641,13 +2642,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
         body = f"""
 <p><a href="/dashboard/gates" class="btn btn-neutral">← All Gates</a>
-   <form method="post" action="/api/gates/{gate_id}/run" style="display:inline;margin-left:8px">
+   <form method="post" action="/api/gates/{_esc(gate_id)}/run" style="display:inline;margin-left:8px">
      <button class="btn" type="submit">▶ Re-run Gate</button>
    </form></p>
 <div class="card">
-  <h2>Gate: {gate_id} — {spec.name if spec else gate_id}</h2>
+  <h2>Gate: {_esc(gate_id)} — {_esc(spec.name) if spec else _esc(gate_id)}</h2>
   <p>Status: {_status_badge(status)}</p>
-  <p class="meta">Phase: {spec.phase if spec else "?"} · Blocks live: {(spec.blocks_live if spec else "?")}</p>
+  <p class="meta">Phase: {_esc(spec.phase) if spec else "?"} · Blocks live: {_esc(spec.blocks_live) if spec else "?"}</p>
   <p><b>Pass condition:</b> {spec.pass_condition if spec else "N/A"}</p>
   {f'<p class="meta"><b>Failure reason:</b> {_esc(result.failure_reason)}</p>' if result and result.failure_reason else ""}
   {f'<p class="meta">Last run: {result.started_at.isoformat() if result else "never"}</p>'}
