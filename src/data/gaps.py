@@ -59,7 +59,15 @@ class GapReport:
 
 
 def find_gaps(store: SeriesStore, key: SeriesKey, start_ms: int, end_ms: int) -> GapReport:
-    grid = expected_grid(start_ms, end_ms, key.interval_ms)
+    """Missing candles for ``key`` over ``[start_ms, end_ms)``.
+
+    A contract listed AFTER the window start (e.g. SOL/ETH perps vs a 5-year BTC window) has no
+    data before its listing — that leading absence is NOT a gap we failed to download, so the
+    expected grid begins at the series' FIRST available candle (its effective listing point), and
+    only INTERIOR holes (after data begins) count as missing. A series with no data at all still
+    reports the full window missing (a genuine failure)."""
     present = store.timestamps(key, start_ms, end_ms)
+    grid_start = max(start_ms, min(present)) if present else start_ms
+    grid = expected_grid(grid_start, end_ms, key.interval_ms)
     missing = [ts for ts in grid if ts not in present]
     return GapReport(key=key, expected=len(grid), present=len(present), missing_ts=missing)

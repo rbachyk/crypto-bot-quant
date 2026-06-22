@@ -24,10 +24,36 @@ def test_coverage_reports_uncovered_series(tmp_path) -> None:
     store = fresh_store(tmp_path)
     populate(store, cfg)
     key = SeriesKey(cfg.exchange_id, OHLCV, cfg.symbols[0], "5m")
-    store.delete_range(key, cfg.window_start_ms, cfg.window_start_ms + key.interval_ms)
+    # An INTERIOR hole (not the leading edge, which is a listing boundary, not a gap).
+    store.delete_range(
+        key, cfg.window_start_ms + 10 * key.interval_ms, cfg.window_start_ms + 11 * key.interval_ms
+    )
     cov = compute_coverage(store, cfg)
     assert not cov.covered
     assert any(g.key.data_type == OHLCV for g in cov.uncovered)
+
+
+def test_leading_pre_listing_absence_is_not_a_gap(tmp_path) -> None:
+    """A contract listed AFTER the window start (ETH/SOL perps vs a multi-year BTC window) has no
+    data before its listing — that leading absence must NOT be counted as missing, while an
+    interior hole still is. Regression for full-history downloads failing validation."""
+    from src.data.gaps import find_gaps
+
+    cfg = small_cfg()
+    store = fresh_store(tmp_path)
+    populate(store, cfg)
+    key = SeriesKey(cfg.exchange_id, OHLCV, cfg.symbols[0], "5m")
+    # Simulate the contract listing 20 candles into the window (no data before that point).
+    store.delete_range(key, cfg.window_start_ms, cfg.window_start_ms + 20 * key.interval_ms)
+    gap = find_gaps(store, key, cfg.window_start_ms, cfg.window_end_ms)
+    assert gap.covered and not gap.missing_ts  # leading pre-listing absence ⇒ no gap
+
+    # ...but an INTERIOR hole after listing IS still reported.
+    store.delete_range(
+        key, cfg.window_start_ms + 30 * key.interval_ms, cfg.window_start_ms + 31 * key.interval_ms
+    )
+    gap2 = find_gaps(store, key, cfg.window_start_ms, cfg.window_end_ms)
+    assert not gap2.covered and gap2.missing_ts
 
 
 def test_insufficient_history_symbol_is_excluded(tmp_path) -> None:
@@ -67,7 +93,10 @@ def test_snapshot_records_missing_ranges_when_uncovered(tmp_path) -> None:
     store = fresh_store(tmp_path)
     populate(store, cfg)
     key = SeriesKey(cfg.exchange_id, OHLCV, cfg.symbols[0], "5m")
-    store.delete_range(key, cfg.window_start_ms, cfg.window_start_ms + 2 * key.interval_ms)
+    # An INTERIOR hole (a real gap), not the leading listing boundary.
+    store.delete_range(
+        key, cfg.window_start_ms + 10 * key.interval_ms, cfg.window_start_ms + 12 * key.interval_ms
+    )
     lake = _lake(tmp_path)
     lake.ensure_ready()
     cov = compute_coverage(store, cfg)
