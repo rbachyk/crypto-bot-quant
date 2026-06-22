@@ -120,6 +120,35 @@ def test_daily_loss_breaker_trips_from_accumulated_realized_losses() -> None:
     assert any("risk_block" in r.reason for r in session.rejected)  # blocked by a breaker
 
 
+def test_real_account_equity_drives_the_loss_breakers_in_live() -> None:
+    """When the venue reports real account equity (live/demo), the daily-loss breaker trips on a
+    falling account — the engine's simulated exit path is inert when exits are exchange-side, so
+    this is what makes the loss breakers actually work in production."""
+    from src.execution.venue import SimulatedVenue
+
+    class _EquityVenue(SimulatedVenue):
+        def __init__(self, meta, equities):
+            super().__init__(meta)
+            self._equities = list(equities)
+            self._i = 0
+
+        def fetch_account_equity(self):
+            v = self._equities[min(self._i, len(self._equities) - 1)]
+            self._i += 1
+            return v
+
+    meta = load_metadata_config()
+    # Batch 1 at 100k (sets the session-start equity), batch 2 at 96k = −4% > 3% daily limit.
+    venue = _EquityVenue(meta, [100_000.0, 96_000.0])
+    eng = PaperTradingEngine(meta=meta, settings=Settings(_env_file=None), venue=venue)
+    session = eng.new_session()
+    eng.process_candidates([_held(BTC)], session)  # batch 1: equity flat → trades
+    before = session.executed_count
+    eng.process_candidates([_held(ETH, side=-1)], session)  # batch 2: −4% account → breaker
+    assert session.executed_count == before  # nothing new executed
+    assert session.rejected and session.rejected[-1].reason.startswith("risk_")
+
+
 def test_closed_position_frees_the_concurrency_slot() -> None:
     """A BTC trade that round-trips (hits TP) releases its slot, so the next BTC entry is
     allowed — the cap binds on *currently* open positions, not historical ones."""

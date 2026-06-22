@@ -233,12 +233,12 @@ def test_order_blocked_when_metadata_unverified() -> None:
     assert not fake.orders
 
 
-def test_place_bracket_downgrades_when_exchange_confirms_no_stop() -> None:
-    """If the exchange reports the just-opened position WITHOUT a stop (the stopLoss param was
-    silently rejected), the venue downgrades the position to UNPROTECTED rather than trusting the
-    self-minted marker — so the engine never treats a bare position as protected (Section 2.2)."""
+def test_place_bracket_keeps_marker_when_stop_not_yet_visible() -> None:
+    """A market fill's attached stop commonly hasn't propagated to the position read yet, so the
+    place-time check is ADVISORY: it keeps the optimistic stop marker (no false downgrade / false
+    CRITICAL) and the per-tick reconciliation makes the authoritative unprotected call later."""
     fake = FakeCcxt()
-    # The post-placement position read shows the position but no stop (stopLoss == 0).
+    # The immediate post-placement read shows the position but no stop yet (propagation lag).
     fake._positions = [
         {
             "symbol": "BTC/USDT:USDT", "side": "long", "contracts": 0.01, "entryPrice": 50_000.0,
@@ -248,7 +248,7 @@ def test_place_bracket_downgrades_when_exchange_confirms_no_stop() -> None:
     res = _venue(fake).place_bracket(
         _plan(), ref_price=50_000.0, realized_slippage_frac=0.001, latency_ms=5.0
     )
-    assert res.position.has_exchange_side_stop() is False  # confirmed unprotected → downgraded
+    assert res.position.has_exchange_side_stop() is True  # optimistic marker kept (not downgraded)
 
 
 def test_requires_credentials_without_injected_client() -> None:

@@ -25,11 +25,14 @@ from __future__ import annotations
 import contextlib
 from typing import Any, Protocol
 
+import structlog
+
 from src.config import Settings, get_settings
 from src.exchange.metadata import MetadataConfig
 from src.execution.order import BUY, Order, OrderPlan, OrderType
 from src.execution.venue import BracketResult, Fill, Venue, VenuePosition
-from src.monitoring import Alert, AlertSeverity, get_alert_sink
+
+_log = structlog.get_logger("execution.live_venue")
 
 # Order types that rest as maker (no taker slippage).
 _MAKER_TYPES = (OrderType.POST_ONLY, OrderType.LIMIT)
@@ -188,28 +191,17 @@ class CcxtLiveVenue:
         )
         self.fills.append(fill)
 
-        # CONFIRM the exchange accepted the stop (Section 2.2) instead of trusting that we sent the
-        # param. Re-read the position: True = a real stop is present, False = position present but
-        # UNPROTECTED (the param was silently rejected — downgrade + alert so the engine doesn't
-        # treat it as protected), None = not visible yet (fill latency) → keep the optimistic
-        # marker; the per-tick reconciliation re-verifies next tick. A zero-fill carries no marker.
+        # ADVISORY post-fill stop check (Section 2.2). A market fill's attached SL commonly hasn't
+        # propagated to the position read yet, so an immediate "no stop" is NOT proof of rejection
+        # — downgrading here would false-alarm and refuse healthy orders. So we keep the optimistic
+        # marker and only LOG when not positively confirmed; the per-tick reconciliation (which
+        # re-reads with time elapsed) makes the authoritative unprotected determination + alert. A
+        # zero-fill carries no marker.
         protected = self._confirm_exchange_stop(plan.symbol) if (filled_qty > 0) else None
-        has_stop = filled_qty > 0 and plan.stop is not None and protected is not False
-        has_tp = filled_qty > 0 and plan.take_profit is not None and protected is not False
+        has_stop = filled_qty > 0 and plan.stop is not None
+        has_tp = filled_qty > 0 and plan.take_profit is not None
         if filled_qty > 0 and plan.stop is not None and protected is False:
-            get_alert_sink().send(
-                Alert(
-                    title="order placed but exchange-side stop NOT confirmed",
-                    severity=AlertSeverity.CRITICAL,
-                    component="execution",
-                    environment=self.exchange_env,
-                    recommended_action=(
-                        f"Position {plan.symbol} opened but the exchange shows no stop — the "
-                        "stopLoss param was rejected. Re-arm protection or emergency-close "
-                        "immediately (Section 2.2)."
-                    ),
-                )
-            )
+            _log.warning("stop_not_yet_confirmed_at_placement", symbol=plan.symbol)
         position = VenuePosition(
             symbol=plan.symbol,
             side=plan.side,
@@ -337,18 +329,34 @@ class CcxtLiveVenue:
             )
         return out
 
+    def _fetch_balance(self) -> dict:
+        try:
+            return self._ex.fetch_balance() or {}
+        except Exception:  # noqa: BLE001 - a balance hiccup must not crash the loop
+            return {}
+
     def fetch_free_margin(self) -> float | None:
         """Free (available) margin in the quote currency, for the pre-trade free-margin blocker
         (Section 17). Returns None if the balance can't be read (the blocker then skips)."""
-        try:
-            bal = self._ex.fetch_balance() or {}
-        except Exception:  # noqa: BLE001 - a balance hiccup must not crash the loop
-            return None
+        bal = self._fetch_balance()
         quote = "USDT"
         free = (bal.get("free") or {}).get(quote)
         if free is None:
             free = ((bal.get(quote) or {}) if isinstance(bal.get(quote), dict) else {}).get("free")
         return _num(free)
+
+    def fetch_account_equity(self) -> float | None:
+        """Total account equity in the quote currency (the REAL account value). Fed to the circuit
+        breakers in live/demo so the daily-loss + max-drawdown breakers reason over real equity —
+        the engine's simulated exit path is inert when exits happen exchange-side, so without this
+        a losing live session would never trip them. None if unreadable (breakers fall back)."""
+        bal = self._fetch_balance()
+        quote = "USDT"
+        total = (bal.get("total") or {}).get(quote)
+        if total is None:
+            raw = bal.get(quote)
+            total = raw.get("total") if isinstance(raw, dict) else None
+        return _num(total)
 
     def fetch_exchange_positions(self) -> dict[str, VenuePosition]:
         """Live exchange positions (for reconciliation vs the bot's mirror, Section 7).

@@ -269,11 +269,20 @@ def test_per_tick_reconciliation_debounce_drops_closed_position(tmp_path) -> Non
         symbol="BTC/USDT:USDT", side=1, qty=0.01, entry_price=50_000.0, owned=True
     )
     loop = LiveLoop(mode="testnet", venue=venue, settings=settings)
+    # Seed the ENGINE risk mirror too — it must be pruned in lock-step so the Section-17 caps
+    # release the slot (not just the bounded-live guard).
+    from src.risk.portfolio import Position
+
+    loop.engine._open_positions["BTC/USDT:USDT"] = Position(
+        symbol="BTC/USDT:USDT", side=1, qty=0.01, entry_price=50_000.0,
+        risk_amount=10.0, beta_to_btc=1.0, regime="low_vol_up",
+    )
     session = loop.engine.new_session("t")
     loop._reconcile_live(session)
     assert "BTC/USDT:USDT" in venue.positions  # 1st absent tick → kept (debounce)
     loop._reconcile_live(session)
     assert "BTC/USDT:USDT" not in venue.positions  # 2nd absent tick → dropped (slot freed)
+    assert "BTC/USDT:USDT" not in loop.engine._open_positions  # engine risk mirror pruned too
 
 
 def test_startup_reconciliation_clean_paper_is_noop(tmp_path) -> None:

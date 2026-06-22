@@ -230,10 +230,16 @@ class LiveLoop:
             self._absent_ticks[sym] = self._absent_ticks.get(sym, 0) + 1
             if self._absent_ticks[sym] >= _ABSENT_DROP_TICKS:
                 venue.positions.pop(sym, None)
+                # Also drop it from the ENGINE's risk mirror so the Section-17 concurrency / heat /
+                # net-beta caps release the slot — otherwise they over-count forever in a real run
+                # (the engine's simulated exit path never fires when exits are exchange-side).
+                self.engine._open_positions.pop(sym, None)
                 self._absent_ticks.pop(sym, None)
-        for oid, v in exch_orders.items():
-            if own.is_own(v.client_id):
-                venue.open_orders[oid] = v
+        # Sync owned resting orders to the real book (drop our filled/cancelled orders the exchange
+        # no longer lists, so the mirror doesn't grow unbounded over a multi-day run).
+        venue.open_orders = {
+            oid: v for oid, v in exch_orders.items() if own.is_own(v.client_id)
+        }
         if foreign_orders or foreign_positions:
             _alert_reconcile(
                 self.env_label,

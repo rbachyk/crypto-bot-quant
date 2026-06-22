@@ -133,6 +133,13 @@ class PaperTradingEngine:
         # breakers so they can actually trip (Section 17). Per-symbol for the per-symbol breaker.
         self._realized_pnl: float = 0.0
         self._per_symbol_pnl: dict[str, float] = {}
+        # Real account state (a live/demo venue only): when present, the breakers reason over REAL
+        # equity (daily-loss + drawdown) — the engine's simulated exit path is inert when exits
+        # happen exchange-side, so this is what makes the loss breakers live in production.
+        self._free_margin: float | None = None
+        self._account_equity: float | None = None
+        self._session_start_equity: float | None = None
+        self._peak_equity: float = 0.0
 
     # ------------------------------------------------------------------ #
     # Public API                                                            #
@@ -151,16 +158,28 @@ class PaperTradingEngine:
         Each input is processed in sequence (as one decision bar). The kill
         switch and reconciliation are respected on every call.
         """
-        # Snapshot the account's free margin ONCE per batch (a real venue only) so the risk
-        # manager's pre-trade free-margin blocker (Section 17) reasons over real account state;
-        # SimulatedVenue has no such method, so it stays None and the check is skipped.
+        # Snapshot real account state ONCE per batch (a real venue only) so the risk manager's
+        # pre-trade free-margin blocker AND the loss/drawdown breakers reason over REAL account
+        # state; SimulatedVenue has no such methods, so these stay None and paper falls back to
+        # the simulated equity / accumulated realized PnL.
         self._free_margin = None
-        fetch = getattr(self._venue, "fetch_free_margin", None)
-        if callable(fetch):
+        fetch_fm = getattr(self._venue, "fetch_free_margin", None)
+        if callable(fetch_fm):
             try:
-                self._free_margin = fetch()
+                self._free_margin = fetch_fm()
             except Exception:  # noqa: BLE001 - a balance hiccup must not stop processing
                 self._free_margin = None
+        fetch_eq = getattr(self._venue, "fetch_account_equity", None)
+        if callable(fetch_eq):
+            try:
+                eq = fetch_eq()
+            except Exception:  # noqa: BLE001
+                eq = None
+            if eq is not None:
+                self._account_equity = eq
+                if self._session_start_equity is None:
+                    self._session_start_equity = eq
+                self._peak_equity = max(self._peak_equity, eq)
         for inp in inputs:
             self._process_one(inp, session)
         session.ended_at = datetime.now(UTC)
@@ -262,22 +281,36 @@ class PaperTradingEngine:
         # (not an empty tuple): this is what makes the Section-17 portfolio caps —
         # max-concurrent-per-symbol/total/regime, portfolio heat, net-beta — actually
         # enforce against existing exposure.
+        # When a real venue reports account equity (live/demo), the breakers reason over REAL
+        # equity — daily-loss and max-drawdown then catch a losing session regardless of how the
+        # exit happened (exchange-side SL/TP). In paper, fall back to the configured equity and the
+        # simulated realized-PnL accumulator.
+        if self._account_equity is not None:
+            bk_equity = self._account_equity
+            bk_peak = max(self._peak_equity, bk_equity, inp.peak_equity)
+            start = (
+                self._session_start_equity
+                if self._session_start_equity is not None
+                else bk_equity
+            )
+            bk_daily = bk_equity - start
+            bk_weekly = bk_daily
+        else:
+            bk_equity = inp.equity
+            bk_peak = max(inp.peak_equity, inp.equity)
+            bk_daily = inp.daily_pnl + self._realized_pnl
+            bk_weekly = self._realized_pnl
         portfolio = PortfolioState(
-            equity=inp.equity, positions=tuple(self._open_positions.values())
+            equity=bk_equity, positions=tuple(self._open_positions.values())
         )
         breakers = BreakerInputs(
-            equity=inp.equity,
-            # peak_equity is at least the current equity; a higher session peak lets the
-            # drawdown breaker trip. consecutive_losses drives the loss-streak breaker.
-            peak_equity=max(inp.peak_equity, inp.equity),
-            # Realized session PnL is accumulated from CLOSED trades and folded in, so the
-            # daily / weekly / per-symbol loss breakers actually trip in a real run (they were
-            # hardcoded to 0 → dead). inp.* stay as an externally-provided baseline.
-            daily_pnl=inp.daily_pnl + self._realized_pnl,
+            equity=bk_equity,
+            peak_equity=bk_peak,
+            daily_pnl=bk_daily,
             consecutive_losses=inp.consecutive_losses,
             abnormal_slippage_active=False,
             reconciled=not inp.inject_foreign_order,
-            weekly_pnl=self._realized_pnl,
+            weekly_pnl=bk_weekly,
             per_symbol_pnl=dict(self._per_symbol_pnl),
         )
         account = AccountState(
