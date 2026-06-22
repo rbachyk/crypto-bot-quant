@@ -843,7 +843,9 @@ def _run_live_session(ctx: JobContext, params: dict) -> dict:
         max_ticks=max_ticks,
         poll_sec=poll_sec,
         on_tick=_on_tick,
-        should_stop=ctx.is_cancelled,  # dashboard Stop → cancel flag → clean halt
+        # Stop on a dashboard Stop (cancel flag) OR if this run was superseded (a false-reap
+        # requeued the job and another worker now owns it) — so two live loops never run at once.
+        should_stop=lambda: ctx.is_cancelled() or not ctx.still_owns(),
     )
     session_id = persist_live_run(result, settings)
     net = sum(t.pnl for t in result.session.trades)

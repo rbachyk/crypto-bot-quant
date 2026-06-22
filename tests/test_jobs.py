@@ -78,6 +78,38 @@ def test_atomic_claim_skips_already_claimed_job() -> None:
 
 
 @requires_redis
+def test_fencing_token_blocks_superseded_terminal_write() -> None:
+    """A run that was falsely reaped (its fencing token cleared/replaced) must NOT write a
+    terminal state over the re-run — prevents double-persist on heartbeat-starvation false reaps."""
+    queue, worker = JobQueue(), Worker()
+    job_id = queue.enqueue("selftest_echo", {}, requested_by="test")
+    with session_scope() as session:
+        j = session.get(Job, job_id)
+        j.status = JobStatus.RUNNING
+        j.run_token = "real_token"
+    # A stale run (different token) tries to finish → superseded, no-op.
+    worker._finish_succeeded(job_id, {}, run_token="stale_token")
+    assert _load(job_id).status is JobStatus.RUNNING  # NOT overwritten to SUCCEEDED
+    # The owning run finishes correctly.
+    worker._finish_succeeded(job_id, {}, run_token="real_token")
+    assert _load(job_id).status is JobStatus.SUCCEEDED
+
+
+@requires_redis
+def test_still_owns_reflects_run_token() -> None:
+    """ctx.still_owns() is True only while THIS run's fencing token matches the DB — a long
+    handler polls it to stop when reaped/superseded (no double live execution)."""
+    from src.jobs.context import JobContext
+
+    queue = JobQueue()
+    job_id = queue.enqueue("selftest_echo", {}, requested_by="test")
+    with session_scope() as session:
+        session.get(Job, job_id).run_token = "tok"
+    assert JobContext(job_id, {}, queue.redis, run_token="tok").still_owns() is True
+    assert JobContext(job_id, {}, queue.redis, run_token="other").still_owns() is False
+
+
+@requires_redis
 def test_retry_with_attempts_eventually_succeeds() -> None:
     queue, worker = JobQueue(), Worker()
     # max_attempts=2 means a transient failure would be retried once.

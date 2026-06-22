@@ -127,6 +127,10 @@ class Job(Base):
 
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, default=1)
+    # Fencing token stamped on each QUEUED→RUNNING claim. Terminal transitions only commit if it
+    # still matches, and the orphan-reaper clears it on requeue — so a worker that was falsely
+    # reaped while still running (heartbeat starvation) can't double-persist or double-run.
+    run_token: Mapped[str | None] = mapped_column(String(40))
 
     logs: Mapped[list[JobLog]] = relationship(
         back_populates="job", cascade="all, delete-orphan", order_by="JobLog.id"

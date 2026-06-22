@@ -26,10 +26,18 @@ def _cancel_key(job_id: str) -> str:
 class JobContext:
     """Per-execution context object passed to a job handler."""
 
-    def __init__(self, job_id: str, params: dict, redis_client: redis.Redis | None) -> None:
+    def __init__(
+        self,
+        job_id: str,
+        params: dict,
+        redis_client: redis.Redis | None,
+        *,
+        run_token: str | None = None,
+    ) -> None:
         self.job_id = job_id
         self.params = params
         self._redis = redis_client
+        self.run_token = run_token  # fencing token for THIS run (None outside the worker)
 
     # -- logging --------------------------------------------------------- #
     def log(self, message: str, level: str = "INFO") -> None:
@@ -77,3 +85,21 @@ class JobContext:
         """Raise :class:`JobCancelled` if a cancel request is pending."""
         if self.is_cancelled():
             raise JobCancelled(self.job_id)
+
+    # -- ownership (fencing) --------------------------------------------- #
+    def still_owns(self) -> bool:
+        """Whether THIS run still owns the job (its fencing token still matches the DB row).
+
+        A long handler should poll this and stop if it returns False — that means the job was
+        reaped/requeued (e.g. heartbeat starvation) and another worker is now running it, so this
+        run must not keep executing (no double live session / double side effects). Best-effort:
+        a DB hiccup returns True (fail-open to keep running) since the terminal write is fenced
+        anyway."""
+        if self.run_token is None:
+            return True
+        try:
+            with session_scope() as session:
+                job = session.get(Job, self.job_id)
+                return job is None or job.run_token == self.run_token
+        except Exception:  # noqa: BLE001 - don't kill a healthy run on a transient DB blip
+            return True

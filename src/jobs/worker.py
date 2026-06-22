@@ -66,6 +66,10 @@ def _recover_orphan(job_id: str, redis_client: redis.Redis) -> bool:
             return False
         job.status = JobStatus.QUEUED
         job.started_at = None
+        # Clear the fencing token: the worker we're reaping may still be alive (false reap from
+        # heartbeat starvation). With the token gone, its eventual terminal write is superseded
+        # (rowcount/guard fails) so it can't double-persist over the re-run.
+        job.run_token = None
         if job.max_attempts <= job.attempts:
             job.max_attempts = job.attempts + 1
         job_type = job.job_type
@@ -218,6 +222,7 @@ class Worker:
             params = dict(job.input_params or {})
             attempts = job.attempts + 1  # what the UPDATE sets attempts to
             max_attempts = job.max_attempts
+            run_token = uuid.uuid4().hex  # fencing token for THIS run
             claimed = session.execute(
                 update(Job)
                 .where(Job.job_id == job_id, Job.status == JobStatus.QUEUED)
@@ -225,6 +230,7 @@ class Worker:
                     status=JobStatus.RUNNING,
                     started_at=datetime.now(UTC),
                     attempts=Job.attempts + 1,
+                    run_token=run_token,
                 )
             ).rowcount  # type: ignore[attr-defined]  # CursorResult.rowcount
             if not claimed:
@@ -235,23 +241,23 @@ class Worker:
                 return job.status
         publish_job_event(self._redis, job_id, status="running")  # async dashboard push
 
-        ctx = JobContext(job_id, params, self._redis)
+        ctx = JobContext(job_id, params, self._redis, run_token=run_token)
 
         # Cancellation may have been requested before we started.
         if ctx.is_cancelled():
-            return self._finish_cancelled(job_id)
+            return self._finish_cancelled(job_id, run_token)
 
         try:
             handler = registry.get(job_type)
         except KeyError as exc:
             return self._finish_failed(
-                job_id, str(exc), "Register a handler for this job_type (Appendix B.7)."
+                job_id, str(exc), "Register a handler for this job_type (Appendix B.7).", run_token
             )
 
         try:
             result = handler(ctx, params) or {}
         except JobCancelled:
-            return self._finish_cancelled(job_id)
+            return self._finish_cancelled(job_id, run_token)
         except Exception as exc:  # noqa: BLE001
             _log.warning("job_failed", job_id=job_id, job_type=job_type, error=str(exc))
             if attempts < max_attempts:
@@ -260,18 +266,31 @@ class Worker:
                 job_id,
                 f"{type(exc).__name__}: {exc}",
                 "Inspect job logs; fix the handler or inputs, then retry the job.",
+                run_token,
             )
 
-        return self._finish_succeeded(job_id, result)
+        return self._finish_succeeded(job_id, result, run_token)
 
     # -- terminal transitions ------------------------------------------- #
-    def _finish_succeeded(self, job_id: str, result: dict) -> JobStatus:
+    def _superseded(self, job: Job, run_token: str | None) -> bool:
+        """True if a newer run owns the job (its fencing token changed) — this run must not write
+        a terminal state over it. A falsely-reaped-but-still-running worker lands here."""
+        if run_token is None:
+            return False
+        if job.run_token != run_token:
+            _log.info("job_terminal_superseded", job_id=job.job_id, status=job.status.value)
+            return True
+        return False
+
+    def _finish_succeeded(
+        self, job_id: str, result: dict, run_token: str | None = None
+    ) -> JobStatus:
         # Honor a cancel requested WHILE the handler ran: a handler that doesn't checkpoint via
         # ctx.check_cancelled() would otherwise report SUCCEEDED and the cancel would be silently
         # lost (the dashboard Cancel button would look like a no-op). Reflect it as CANCELLED.
         try:
             if self._redis.exists(_cancel_key(job_id)):
-                return self._finish_cancelled(job_id)
+                return self._finish_cancelled(job_id, run_token)
         except Exception:  # noqa: BLE001 - a redis hiccup must not block finishing the job
             pass
         with session_scope() as session:
@@ -279,6 +298,9 @@ class Worker:
             if job is None:
                 self._unwatch(job_id)
                 return JobStatus.EXPIRED
+            if self._superseded(job, run_token):
+                self._unwatch(job_id)
+                return job.status
             job.status = JobStatus.SUCCEEDED
             job.finished_at = datetime.now(UTC)
             if job.progress_total and job.progress_current < job.progress_total:
@@ -295,12 +317,17 @@ class Worker:
         )
         return JobStatus.SUCCEEDED
 
-    def _finish_failed(self, job_id: str, reason: str, hint: str) -> JobStatus:
+    def _finish_failed(
+        self, job_id: str, reason: str, hint: str, run_token: str | None = None
+    ) -> JobStatus:
         with session_scope() as session:
             job = session.get(Job, job_id)
             if job is None:
                 self._unwatch(job_id)
                 return JobStatus.EXPIRED
+            if self._superseded(job, run_token):
+                self._unwatch(job_id)
+                return job.status
             job.status = JobStatus.FAILED
             job.finished_at = datetime.now(UTC)
             job.failure_reason = reason
@@ -310,12 +337,15 @@ class Worker:
         publish_job_event(self._redis, job_id, status="failed", message=reason)
         return JobStatus.FAILED
 
-    def _finish_cancelled(self, job_id: str) -> JobStatus:
+    def _finish_cancelled(self, job_id: str, run_token: str | None = None) -> JobStatus:
         with session_scope() as session:
             job = session.get(Job, job_id)
             if job is None:
                 self._unwatch(job_id)
                 return JobStatus.EXPIRED
+            if self._superseded(job, run_token):
+                self._unwatch(job_id)
+                return job.status
             job.status = JobStatus.CANCELLED
             job.finished_at = datetime.now(UTC)
             job.failure_reason = "cancelled"

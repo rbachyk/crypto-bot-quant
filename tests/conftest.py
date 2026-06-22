@@ -73,34 +73,38 @@ def _redis_reachable() -> bool:
 DB_OK = _db_reachable()
 REDIS_OK = _redis_reachable()
 
-# Build the schema on the (fresh, isolated) test database from the ORM models. Tests don't
-# exercise migrations, so create_all matches the current models exactly. Idempotent.
+# Build the isolated test database via the REAL migrations (alembic upgrade head), so the test
+# schema is exactly a migrated production schema — including ALTERs (new columns) that a plain
+# create_all would skip on an already-existing table (the test DB persists across runs). Falls
+# back to create_all + a head stamp if alembic can't run, so a bare environment still works.
 if DB_OK:
     try:
         import src.db.models  # noqa: F401  (registers every table on Base.metadata)
-        from src.db.base import Base, get_engine
-
-        Base.metadata.create_all(get_engine())
-        # create_all doesn't manage the alembic_version table (alembic does), but the INFRA/DB
-        # gate checks it exists — stamp it with the current migration head so gate tests pass on
-        # the fresh test DB, matching a migrated production schema.
+        from alembic import command
         from alembic.config import Config as _AlembicConfig
-        from alembic.script import ScriptDirectory
 
-        _head = ScriptDirectory.from_config(_AlembicConfig("alembic.ini")).get_current_head()
-        with get_engine().begin() as _conn:
-            _conn.execute(
-                text(
-                    "CREATE TABLE IF NOT EXISTS alembic_version "
-                    "(version_num VARCHAR(32) NOT NULL)"
-                )
-            )
-            if not _conn.execute(text("SELECT 1 FROM alembic_version")).scalar() and _head:
+        command.upgrade(_AlembicConfig("alembic.ini"), "head")
+    except Exception:  # noqa: BLE001 - fall back to create_all so a bare env still runs
+        try:
+            from alembic.config import Config as _AlembicConfig2
+            from alembic.script import ScriptDirectory
+            from src.db.base import Base, get_engine
+
+            Base.metadata.create_all(get_engine())
+            _head = ScriptDirectory.from_config(_AlembicConfig2("alembic.ini")).get_current_head()
+            with get_engine().begin() as _conn:
                 _conn.execute(
-                    text("INSERT INTO alembic_version (version_num) VALUES (:v)"), {"v": _head}
+                    text(
+                        "CREATE TABLE IF NOT EXISTS alembic_version "
+                        "(version_num VARCHAR(32) NOT NULL)"
+                    )
                 )
-    except Exception:  # noqa: BLE001 - leave DB_OK; a schema error surfaces in the failing test
-        pass
+                if not _conn.execute(text("SELECT 1 FROM alembic_version")).scalar() and _head:
+                    _conn.execute(
+                        text("INSERT INTO alembic_version (version_num) VALUES (:v)"), {"v": _head}
+                    )
+        except Exception:  # noqa: BLE001 - leave DB_OK; a schema error surfaces in the test
+            pass
 
 requires_db = pytest.mark.skipif(not DB_OK, reason="database not reachable")
 requires_redis = pytest.mark.skipif(not (DB_OK and REDIS_OK), reason="redis (and db) not reachable")
