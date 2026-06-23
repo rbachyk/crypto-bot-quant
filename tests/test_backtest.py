@@ -357,6 +357,28 @@ def test_walk_forward_fails_clearly_when_folds_are_too_thin(cfg, meta, ref_input
     assert any("insufficient trades" in r for r in wf.reasons), wf.reasons
 
 
+def test_walk_forward_anchors_to_data_listed_mid_window(cfg, meta, ref_inputs):
+    """Regression: a contract listed mid-window has its first bar at a large ts offset (not 0).
+    Walk-forward must anchor its folds + locked hold-out to the ACTUAL data ts-range, not a bar
+    count from ts=0 — otherwise the folds shift off the real data and the edge is judged on empty
+    pre-listing time. Shifting the reference inputs forward by a big offset must NOT change the
+    verdict (the same edge, merely listed later)."""
+    from src.backtest.service import rebase_window
+
+    iv = int(ref_inputs[0].bars[1]["ts"] - ref_inputs[0].bars[0]["ts"])
+    last_ts = max(s.bars[-1]["ts"] for s in ref_inputs)
+    offset = 500 * iv
+    # rebase by a NEGATIVE lo shifts every ts forward by `offset` (data now "lists" at +offset).
+    shifted = rebase_window(ref_inputs, -offset, last_ts + iv)
+    assert min(s.bars[0]["ts"] for s in shifted) == offset  # data starts mid-window, not at 0
+
+    wf = run_walk_forward(cfg, meta, shifted)
+    assert wf.folds[0].lo_ts == offset  # folds anchored to where the data actually begins
+    assert wf.folds_passed >= cfg.walk_forward.kill_criteria.min_folds_passed
+    assert wf.holdout is not None and wf.holdout.passed
+    assert wf.passed
+
+
 def test_walk_forward_folds_are_disjoint_and_ordered(cfg, meta, ref_inputs):
     wf = run_walk_forward(cfg, meta, ref_inputs)
     for prev, nxt in zip(wf.folds, wf.folds[1:], strict=False):

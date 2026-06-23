@@ -16,6 +16,10 @@ Requires a snapshot to be downloaded first (dashboard Data page → Download, or
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
+import structlog
+
 from src.backtest.config import BacktestConfig, load_backtest_config
 from src.backtest.service import build_lake_inputs, run_engine
 from src.backtest.stress import fee_stress, slippage_stress
@@ -28,8 +32,19 @@ from src.strategies.candidates import build_strategy
 from src.strategies.config import CandidateConfig, StrategiesConfig, load_strategies_config
 from src.strategies.research import CandidateValidation, SideDecision, _decide_sides
 
+_log = structlog.get_logger("strategies.lake_research")
+
 # A real-data promotion needs enough executed trades to be more than noise (Section 13/16).
 _MIN_REAL_TRADES = 20
+
+# A progress sink: ``(message)`` for human log lines. Optional so library callers can ignore it,
+# while the long-running job wires it to ``ctx.log`` so the operator sees per-stage progress
+# instead of an 11-hour black box.
+Emit = Callable[[str], None]
+
+
+def _noop(_msg: str) -> None:
+    pass
 
 
 def _shelved(cand: CandidateConfig, version: str, reason: str) -> CandidateValidation:
@@ -48,13 +63,22 @@ def validate_candidate_on_lake(
     cfg: BacktestConfig,
     meta: MetadataConfig,
     lake_inputs: list,
+    *,
+    emit: Emit = _noop,
 ) -> CandidateValidation:
     """Validate ONE candidate over real lake inputs (same gates as the fixture harness,
-    minus the synthetic noise control)."""
+    minus the synthetic noise control).
+
+    ``emit`` receives a human line at each expensive stage (both-sides backtest, promoted
+    backtest, walk-forward, fee/slippage stress) so a long run is observable rather than opaque.
+    """
+    emit(f"{cand.id}: both-sides backtest")
+    _log.info("lake_validate_stage", candidate=cand.id, stage="backtest_both")
     both = build_strategy(cand, strat_cfg.strategy_version, cand.params)
     full_both = run_engine(
         cfg, meta, lake_inputs, strategy=both, label=f"{cand.id}_lake_both"
     ).report
+
     side_decision = _decide_sides(full_both, strat_cfg.min_side_expectancy_r)
 
     shelved: list[str] = []
@@ -65,6 +89,11 @@ def validate_candidate_on_lake(
         allow_long=side_decision.allow_long, allow_short=side_decision.allow_short
     )
     strategy = build_strategy(cand, strat_cfg.strategy_version, promoted_params)
+    emit(f"{cand.id}: promoted-side backtest ({full_both.trade_count} both-side trades)")
+    _log.info(
+        "lake_validate_stage", candidate=cand.id, stage="backtest_promoted",
+        both_trades=full_both.trade_count,
+    )
     promoted_report = run_engine(
         cfg, meta, lake_inputs, strategy=strategy, label=f"{cand.id}_lake"
     ).report
@@ -74,8 +103,15 @@ def validate_candidate_on_lake(
             f"insufficient trades on real data ({promoted_report.trade_count} < {_MIN_REAL_TRADES})"
         )
 
+    emit(f"{cand.id}: walk-forward ({promoted_report.trade_count} trades)")
+    _log.info(
+        "lake_validate_stage", candidate=cand.id, stage="walk_forward",
+        trades=promoted_report.trade_count,
+    )
     wf = run_walk_forward(cfg, meta, lake_inputs, strategy=strategy)
     base_e = promoted_report.expectancy_r
+    emit(f"{cand.id}: fee/slippage stress")
+    _log.info("lake_validate_stage", candidate=cand.id, stage="stress")
     fee = fee_stress(cfg, meta, lake_inputs, baseline_expectancy_r=base_e, strategy=strategy)
     slip = slippage_stress(cfg, meta, lake_inputs, baseline_expectancy_r=base_e, strategy=strategy)
     if not wf.passed:
@@ -110,9 +146,15 @@ def validate_all_on_lake(
     symbols: list[str] | None = None,
     store: SeriesStore | None = None,
     settings: Settings | None = None,
+    emit: Emit = _noop,
+    progress: Callable[[int, int, str], None] | None = None,
 ) -> list[CandidateValidation]:
     """Validate every enabled candidate over a downloaded snapshot. One candidate failing
-    (e.g. a cross-asset family needing a shape this path can't build) shelves only that one."""
+    (e.g. a cross-asset family needing a shape this path can't build) shelves only that one.
+
+    ``emit`` gets a human line at each stage and ``progress(done, total, msg)`` is called as each
+    candidate completes, so the long-running job is observable instead of an opaque CPU spin.
+    """
     settings = settings or get_settings()
     strat_cfg = load_strategies_config()
     cfg = load_backtest_config()
@@ -124,6 +166,7 @@ def validate_all_on_lake(
     syms = symbols or data_cfg.active_symbols()
     store = store if store is not None else SeriesStore(settings.data_lake_path)
 
+    emit(f"building inputs for {len(syms)} symbol(s) on {tf} (this can take a few minutes)")
     lake_inputs = build_lake_inputs(
         store,
         exchange_id=data_cfg.exchange_id,
@@ -140,13 +183,33 @@ def validate_all_on_lake(
             "no real data in the lake for this window — download a snapshot first "
             "(Data page → Download real history)"
         )
+    # Report the actual loaded shape — a thin window or a symbol with few bars is the usual
+    # reason a candidate later shelves on "insufficient trades".
+    shape = ", ".join(f"{s.symbol}={len(s.bars)}b" for s in lake_inputs)
+    emit(f"inputs ready: {len(lake_inputs)} symbol(s) [{shape}]")
+    _log.info(
+        "lake_validate_inputs",
+        symbols=len(lake_inputs),
+        bars={s.symbol: len(s.bars) for s in lake_inputs},
+        timeframe=tf,
+    )
 
+    candidates = list(strat_cfg.enabled_candidates())
+    total = len(candidates)
     out: list[CandidateValidation] = []
-    for cand in strat_cfg.enabled_candidates():
+    for i, cand in enumerate(candidates):
+        if progress is not None:
+            progress(i, total, f"validating {cand.id} ({i + 1}/{total})")
+        emit(f"[{i + 1}/{total}] validating {cand.id} ({cand.family})")
         try:
-            out.append(validate_candidate_on_lake(cand, strat_cfg, cfg, meta, lake_inputs))
+            out.append(
+                validate_candidate_on_lake(cand, strat_cfg, cfg, meta, lake_inputs, emit=emit)
+            )
         except Exception as exc:  # noqa: BLE001 - one bad candidate must not abort the batch
+            emit(f"[{i + 1}/{total}] {cand.id} ERRORED: {exc}")
             out.append(
                 _shelved(cand, strat_cfg.strategy_version, f"real-data validation error: {exc}")
             )
+    if progress is not None:
+        progress(total, total, "all candidates validated")
     return out

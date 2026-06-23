@@ -187,6 +187,9 @@ class BacktestEngine:
         self.slippage = SlippageModel(cfg.costs)
         self.funding = FundingModel(cfg.costs)
         self.risk = RiskSimulator(cfg.account, meta)
+        # Shared-grid state, (re)built per run() call (see the grid indexing note there).
+        self._grid_iv: int = 1
+        self._grid_bars: dict[str, dict[int, dict]] = {}
 
     def run(self, inputs: list[SymbolInput]) -> BacktestResult:
         result = BacktestResult(
@@ -196,8 +199,20 @@ class BacktestEngine:
         if not inputs:
             return result
 
-        n_bars = max(len(s.bars) for s in inputs)
-        # Per-symbol: signals indexed by entry bar (decision made on bar-1's close).
+        # Index every symbol on a SHARED grid keyed by ``ts // iv`` rather than by raw array
+        # position. Symbols listed mid-window (e.g. SOL/ETH perps vs a multi-year BTC window)
+        # have their first bar at a large grid slot, not array index 0 — array indexing would
+        # misalign their signals from their bars and silently produce zero trades. The grid map
+        # gives each symbol a slot→bar lookup so a signal at slot ``decision_ts//iv`` always
+        # meets the bar at that same slot (or None before listing / inside a gap).
+        self._grid_iv = self._grid_interval(inputs)
+        self._grid_bars = {
+            s.symbol: {b["ts"] // self._grid_iv: b for b in s.bars} for s in inputs
+        }
+        n_grid = 1 + max(
+            (s.bars[-1]["ts"] // self._grid_iv for s in inputs if s.bars), default=-1
+        )
+        # Per-symbol: signals indexed by entry grid slot (decision made on slot-1's close).
         # Each entry carries the originating feature row so entry never re-scans.
         if self.is_portfolio:
             signals_by_bar = self._portfolio_signals(inputs)
@@ -208,7 +223,7 @@ class BacktestEngine:
         equity = self.cfg.account.initial_equity
         open_positions: list[_Open] = []
 
-        for j in range(n_bars):
+        for j in range(n_grid):
             ts_j = self._bar_ts(inputs, j)
 
             # 1) Funding on open positions crossing a funding timestamp.
@@ -223,7 +238,7 @@ class BacktestEngine:
                 if bar is None:
                     still_open.append(pos)
                     continue
-                trade = self._maybe_exit(pos, bar, j, final=(j == n_bars - 1))
+                trade = self._maybe_exit(pos, bar, j, final=(j == n_grid - 1))
                 if trade is not None:
                     equity += trade.pnl
                     result.trades.append(trade)
@@ -247,7 +262,7 @@ class BacktestEngine:
                 if new_pos is not None:
                     open_positions.append(new_pos)
                     # Intrabar stop/tp can trigger on the entry bar itself.
-                    trade = self._maybe_exit(new_pos, bar, j, final=(j == n_bars - 1))
+                    trade = self._maybe_exit(new_pos, bar, j, final=(j == n_grid - 1))
                     if trade is not None:
                         equity += trade.pnl
                         result.trades.append(trade)
@@ -264,7 +279,8 @@ class BacktestEngine:
         for pos in open_positions:
             sym_in = inputs_by_symbol[pos.symbol]
             last_bar = sym_in.bars[-1]
-            trade = self._close(pos, last_bar, len(sym_in.bars) - 1, "end_of_data")
+            last_slot = last_bar["ts"] // self._grid_iv
+            trade = self._close(pos, last_bar, last_slot, "end_of_data")
             equity += trade.pnl
             result.trades.append(trade)
         if open_positions:
@@ -276,15 +292,21 @@ class BacktestEngine:
 
     # -- signal precomputation ------------------------------------------- #
     def _signals(self, sym_in: SymbolInput) -> dict[int, tuple[Signal, dict]]:
-        """Map entry-bar index -> (Signal, originating row). decision_ts == entry ts."""
-        iv = self._iv(sym_in)
+        """Map entry grid slot -> (Signal, originating row). decision_ts == entry ts.
+
+        The slot is ``decision_ts // iv`` on the SAME shared grid the run loop walks, so a
+        signal only survives if a real bar exists at that slot (skipped before listing / inside
+        a gap). Keying by grid slot — not array position — is what lets a symbol listed
+        mid-window still trade."""
+        iv = self._grid_iv
+        grid = self._grid_bars[sym_in.symbol]
         out: dict[int, tuple[Signal, dict]] = {}
         for row in sym_in.frame.rows:
             if row["decision_ts"] < sym_in.activation_ts:
                 continue  # symbol not yet in-universe (future-universe guard)
             entry_bar = row["decision_ts"] // iv
-            if entry_bar >= len(sym_in.bars):
-                continue
+            if entry_bar not in grid:
+                continue  # no tradable bar at this slot (pre-listing or interior gap)
             # Per-symbol path runs only when is_portfolio is False (see run()), so the
             # strategy implements the plain Strategy protocol.
             sig = cast(Strategy, self.strategy).evaluate(row)
@@ -314,8 +336,8 @@ class BacktestEngine:
         rows_by_dts: dict[str, dict[int, dict]] = {
             s.symbol: {int(r["decision_ts"]): r for r in s.frame.rows} for s in inputs
         }
-        n_bars_by_symbol = {s.symbol: len(s.bars) for s in inputs}
-        iv_by_symbol = {s.symbol: self._iv(s) for s in inputs}
+        iv = self._grid_iv
+        grid_by_symbol = self._grid_bars
         activation_by_symbol = {s.symbol: s.activation_ts for s in inputs}
 
         all_dts = sorted({dts for m in rows_by_dts.values() for dts in m})
@@ -324,9 +346,9 @@ class BacktestEngine:
             for sym, row in peers.items():
                 if dts < activation_by_symbol[sym]:
                     continue  # symbol not yet in-universe (future-universe guard)
-                entry_bar = dts // iv_by_symbol[sym]
-                if entry_bar >= n_bars_by_symbol[sym]:
-                    continue
+                entry_bar = dts // iv
+                if entry_bar not in grid_by_symbol[sym]:
+                    continue  # no tradable bar at this slot (pre-listing or interior gap)
                 others = {k: v for k, v in peers.items() if k != sym}
                 # Reached only via the is_portfolio branch in run(), so the strategy
                 # implements the PortfolioStrategy protocol.
@@ -510,21 +532,30 @@ class BacktestEngine:
         return len(sym_in.funding_events)
 
     # -- helpers --------------------------------------------------------- #
-    def _iv(self, sym_in: SymbolInput) -> int:
-        if len(sym_in.bars) >= 2:
-            return int(sym_in.bars[1]["ts"] - sym_in.bars[0]["ts"])
-        return 1
+    def _grid_interval(self, inputs: list[SymbolInput]) -> int:
+        """The bar interval (ms) defining the shared grid: the SMALLEST positive gap between
+        consecutive bars across all symbols. Taking the minimum recovers the true timeframe even
+        when a series has interior holes (a single missing candle would inflate a naive
+        ``bars[1]-bars[0]``)."""
+        best: int | None = None
+        for s in inputs:
+            for a, b in zip(s.bars, s.bars[1:], strict=False):
+                d = int(b["ts"] - a["ts"])
+                if d > 0 and (best is None or d < best):
+                    best = d
+        return best or 1
 
     def _bar_ts(self, inputs: list[SymbolInput], j: int) -> int:
+        """Wall-clock ts of grid slot ``j``: a real bar at that slot if any symbol has one
+        (preserves exact timestamps for dense windows), else the canonical slot ts ``j·iv``."""
         for s in inputs:
-            if j < len(s.bars):
-                return int(s.bars[j]["ts"])
-        return j
+            bar = self._grid_bars[s.symbol].get(j)
+            if bar is not None:
+                return int(bar["ts"])
+        return j * self._grid_iv
 
     def _bar_at(self, sym_in: SymbolInput, j: int) -> dict | None:
-        if 0 <= j < len(sym_in.bars):
-            return sym_in.bars[j]
-        return None
+        return self._grid_bars[sym_in.symbol].get(j)
 
     def _unrealized(
         self, open_positions: list[_Open], inputs_by_symbol: dict[str, SymbolInput], j: int

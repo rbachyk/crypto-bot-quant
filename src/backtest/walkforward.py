@@ -112,17 +112,26 @@ def run_walk_forward(
     wf = cfg.walk_forward
     kc = wf.kill_criteria
     iv = _iv(inputs)
-    n_bars = max((len(s.bars) for s in inputs), default=0)
     out = WalkForwardResult()
-    span_ts = n_bars * iv
-    holdout_bars = int(n_bars * wf.holdout_frac)
-    test_end_ts = (n_bars - holdout_bars) * iv
-    fold_span = test_end_ts // wf.folds if wf.folds > 0 else test_end_ts
+
+    # Anchor folds to the ACTUAL data timestamp range, not a bar COUNT from ts=0. Real lake data
+    # is rebased to the window start, so a contract listed mid-window has its first bar at a large
+    # ts offset (not 0); laying folds over [0, n_bars*iv) would shift every fold off the real data
+    # and evaluate the edge on empty pre-listing time. With dense data starting at ts=0 this
+    # reduces exactly to the old bar-count arithmetic (data_lo=0, n_span=n_bars).
+    with_bars = [s for s in inputs if s.bars]
+    data_lo = min((s.bars[0]["ts"] for s in with_bars), default=0)
+    data_hi = max((s.bars[-1]["ts"] for s in with_bars), default=-iv) + iv
+    n_span = max(0, (data_hi - data_lo) // iv)  # grid slots the data actually spans
+    holdout_slots = int(n_span * wf.holdout_frac)
+    test_end_ts = data_lo + (n_span - holdout_slots) * iv
+    fold_region = test_end_ts - data_lo
+    fold_span = fold_region // wf.folds if wf.folds > 0 else fold_region
 
     # 1) Out-of-sample folds across the pre-holdout window.
     for i in range(wf.folds):
-        lo = i * fold_span
-        hi = (i + 1) * fold_span if i < wf.folds - 1 else test_end_ts
+        lo = data_lo + i * fold_span
+        hi = data_lo + (i + 1) * fold_span if i < wf.folds - 1 else test_end_ts
         windowed = rebase_window(inputs, lo, hi)
         report = run_engine(cfg, meta, windowed, strategy=strategy, label=f"wf_fold_{i}").report
         passed, failures = _evaluate_fold(report, kc)
@@ -145,8 +154,8 @@ def run_walk_forward(
 
     # 2) Locked hold-out — evaluated exactly once, here at the end (Section 16).
     holdout_report: BacktestReport | None = None
-    if holdout_bars > 0:
-        windowed = rebase_window(inputs, test_end_ts, span_ts)
+    if holdout_slots > 0:
+        windowed = rebase_window(inputs, test_end_ts, data_hi)
         holdout_report = run_engine(
             cfg, meta, windowed, strategy=strategy, label="wf_holdout"
         ).report
@@ -155,7 +164,7 @@ def run_walk_forward(
         # "expectancy>0 and net>0" that a single lucky trade could clear.
         holdout_passed, holdout_failures = _evaluate_fold(holdout_report, kc)
         out.holdout = FoldResult(
-            -1, test_end_ts, span_ts, holdout_passed, holdout_failures, holdout_report
+            -1, test_end_ts, data_hi, holdout_passed, holdout_failures, holdout_report
         )
 
     # 3) Verdict.

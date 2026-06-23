@@ -686,7 +686,14 @@ def _run_lake_strategy_validation(ctx: JobContext, params: dict) -> dict:
         f"on timeframe {tf}"
     )
     ctx.progress(0, 1, "running real-data validation (backtest + walk-forward + stress)")
-    validations = validate_all_on_lake(data_cfg, timeframe=timeframe)
+    # Stream per-stage/per-candidate progress into the job log + progress bar so an hours-long
+    # run is observable instead of a silent CPU spin (the operator asked for this explicitly).
+    validations = validate_all_on_lake(
+        data_cfg,
+        timeframe=timeframe,
+        emit=lambda msg: ctx.log(msg),
+        progress=lambda done, total, msg: ctx.progress(done, max(total, 1), msg),
+    )
     written = persist_validations(validations, data_source="lake")
     promoted = [v.candidate_id for v in validations if v.promoted]
     # Surface every verdict in the log — a shelve is a normal result, not a failure, and the

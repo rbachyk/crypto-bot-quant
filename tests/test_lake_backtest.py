@@ -116,6 +116,40 @@ def test_lake_inputs_rebased_to_zero_based_and_engine_trades(tmp_path) -> None:
     assert result.report.trade_count > 0
 
 
+def test_engine_trades_symbol_listed_mid_window(tmp_path) -> None:
+    """Regression: a contract listed AFTER the window start (e.g. SOL/ETH perps vs a multi-year
+    BTC window) has its first candle at a large grid slot, NOT array index 0, after rebasing to
+    the window start. The engine must index bars by grid slot (ts // iv), else every signal for
+    such a symbol maps past its short bars array and it produces ZERO trades — the bug that
+    shelved all candidates on the 5-year real-data run. Here data exists only over the SECOND
+    half of the requested window, so after rebase bars[0] sits ~300 slots in."""
+    store = SeriesStore(tmp_path)
+    iv = timeframe_ms(TF)
+    listing = 300 * iv  # the contract "lists" 300 slots into the window
+    window_start = 0
+    window_end = listing + 400 * iv  # 400 bars of real history after listing
+    _seed_lake(store, listing, window_end)  # NOTHING before the listing slot
+
+    inputs = build_lake_inputs(
+        store,
+        exchange_id=EX,
+        symbols=[SYM],
+        timeframe=TF,
+        base_timeframe=BASE,
+        funding_timeframe=FUND,
+        start_ms=window_start,
+        end_ms=window_end,
+        oi_timeframe=OI_TF,
+    )
+    si = inputs[0]
+    # The leading absence is preserved: bars start ~300 slots in, not at array-index-0 ts.
+    assert si.bars[0]["ts"] == listing  # rebased by window_start (0) ⇒ unchanged here
+    assert si.bars[0]["ts"] // iv >= 300
+    # Grid-indexed engine still matches the mid-window signals to their bars and trades.
+    result = run_engine(load_backtest_config(), load_metadata_config(), inputs, label="midwindow")
+    assert result.report.trade_count > 0
+
+
 def test_build_lake_inputs_skips_symbols_without_history(tmp_path) -> None:
     store = SeriesStore(tmp_path)
     start, end = 0, 50 * timeframe_ms(TF)
