@@ -18,7 +18,6 @@ from datetime import UTC, datetime
 from src.backtest.service import build_lake_inputs, lake_candidate_strategy, make_strategy
 from src.config import Settings, get_settings
 from src.data.config import DataConfig, load_data_config
-from src.data.schema import timeframe_ms
 from src.data.store import SeriesStore
 from src.paper.engine import PaperCandidateInput, PaperTradingEngine
 from src.paper.report import PaperReport, build_paper_report
@@ -124,10 +123,9 @@ def build_lake_paper_inputs(
         end_ms=data_cfg.window_end_ms,
         oi_timeframe=data_cfg.oi_grid,
     )
-    iv = timeframe_ms(timeframe)
     promoted = is_strategy_promoted(strat_id, strat_ver)
     out = _eval_strategy_over_lake(
-        strategy, strat_id, strat_ver, lake_inputs, iv=iv, hold_bars=hold_bars,
+        strategy, strat_id, strat_ver, lake_inputs, hold_bars=hold_bars,
         equity=equity, promoted=promoted,
     )
     return out, strat_id, strat_ver
@@ -139,7 +137,6 @@ def _eval_strategy_over_lake(
     strat_ver: str,
     lake_inputs,
     *,
-    iv: int,
     hold_bars: int,
     equity: float,
     promoted: bool,
@@ -151,15 +148,21 @@ def _eval_strategy_over_lake(
     out: list[PaperCandidateInput] = []
     for si in lake_inputs:
         n = len(si.bars)
+        # Locate the entry bar by its TIMESTAMP, not by ``decision_ts // iv`` array position:
+        # a contract listed after the window start has its first bar at a large ts (not index 0),
+        # so the slot index would point at the wrong bar (or past the end) and silently drop every
+        # signal. Time is the shared coordinate; the forward hold then walks N array bars from
+        # there (preserving the "hold N bars" semantics across any interior gaps).
+        pos_by_ts = {int(b["ts"]): i for i, b in enumerate(si.bars)}
         for row in si.frame.rows:
             if row["decision_ts"] < si.activation_ts:
                 continue
             sig = strategy.evaluate(row)
             if sig is None:
                 continue
-            entry_bar = row["decision_ts"] // iv
-            if entry_bar >= n:
-                continue
+            entry_bar = pos_by_ts.get(int(row["decision_ts"]))
+            if entry_bar is None:
+                continue  # no tradable bar at this timestamp (pre-listing or interior gap)
             entry_price = float(si.bars[entry_bar]["open"])
             exit_bar = min(entry_bar + hold_bars, n - 1)
             exit_price = float(si.bars[exit_bar]["close"])
@@ -253,12 +256,11 @@ def build_active_lake_inputs(
         end_ms=data_cfg.window_end_ms,
         oi_timeframe=data_cfg.oi_grid,
     )
-    iv = timeframe_ms(timeframe)
     out: list[PaperCandidateInput] = []
     for strategy, sid, ver in active:
         out.extend(
             _eval_strategy_over_lake(
-                strategy, sid, ver, lake_inputs, iv=iv, hold_bars=hold_bars,
+                strategy, sid, ver, lake_inputs, hold_bars=hold_bars,
                 equity=equity, promoted=True,
             )
         )

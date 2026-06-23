@@ -107,6 +107,26 @@ def test_lake_paper_inputs_run_through_paper_pipeline(tmp_path) -> None:
         assert t.spread_bps_at_entry > 0
 
 
+def test_lake_paper_inputs_for_symbol_listed_mid_window(tmp_path) -> None:
+    """Regression: the replay builder must locate the entry bar by TIMESTAMP, not by
+    ``decision_ts // iv`` array position. A contract whose data starts mid-window (listed after
+    the window start) has its first bar at a large ts, so the slot index would point past the
+    short bars array and silently drop every candidate. Seed only the second half of the window."""
+    store = SeriesStore(tmp_path)
+    iv = timeframe_ms(TF)
+    listing = 300 * iv
+    window_start, window_end = 0, listing + 400 * iv
+    _seed(store, listing, window_end)  # nothing before the listing slot
+    cfg = _data_cfg(window_start, window_end)
+
+    inputs, strat_id, _ = build_lake_paper_inputs(cfg, timeframe=TF, symbols=[SYM], store=store)
+    assert strat_id == "reference_momentum"
+    assert inputs, "a mid-window-listed symbol must still produce candidates"
+    for pin in inputs:
+        assert pin.candidate.entry_price > 0
+        assert math.isfinite(pin.exit_move_frac)
+
+
 def test_lake_paper_rejects_portfolio_strategy(tmp_path) -> None:
     store = SeriesStore(tmp_path)
     start, end = 0, 50 * timeframe_ms(TF)

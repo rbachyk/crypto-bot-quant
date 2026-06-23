@@ -190,9 +190,11 @@ def build_lake_inputs(
         )
     if not inputs:
         return inputs
-    # The engine indexes bars 0-based (entry_bar = decision_ts // iv), as the reference
-    # series is. Real lake data carries absolute epoch timestamps, so rebase the whole
-    # window to a 0-based grid (offset aligned to the decision interval, ≤ every sample).
+    # The engine indexes bars by EPOCH TIME, so rebasing is not required for correctness; we
+    # still shift the window to a 0-based origin (aligned to the decision interval) so timestamps
+    # are small and deterministic across snapshots and match the reference series' convention.
+    # A symbol listed mid-window keeps its true offset from this origin (its first bar is NOT at
+    # ts 0) — the engine handles that natively.
     iv = timeframe_ms(timeframe)
     lo = (start_ms // iv) * iv
     return rebase_window(inputs, lo, end_ms)

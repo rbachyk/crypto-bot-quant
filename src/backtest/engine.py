@@ -149,13 +149,12 @@ class _Open:
     side: int
     qty: float
     entry_ts: int
-    entry_bar: int
     entry_price: float
     notional: float
     risk_amount: float
     stop_price: float
     tp_price: float
-    hold_until_bar: int
+    hold_until_ts: int
     entry_fee: float
     funding: float
     slippage_cost: float
@@ -187,9 +186,9 @@ class BacktestEngine:
         self.slippage = SlippageModel(cfg.costs)
         self.funding = FundingModel(cfg.costs)
         self.risk = RiskSimulator(cfg.account, meta)
-        # Shared-grid state, (re)built per run() call (see the grid indexing note there).
-        self._grid_iv: int = 1
-        self._grid_bars: dict[str, dict[int, dict]] = {}
+        # Shared-timeline state, (re)built per run() call (see the epoch-time note there).
+        self._grid_iv: int = 1  # bar interval (ms), only for hold/bars-held duration math
+        self._bars_by_ts: dict[str, dict[int, dict]] = {}  # symbol -> {bar ts -> bar}
 
     def run(self, inputs: list[SymbolInput]) -> BacktestResult:
         result = BacktestResult(
@@ -199,46 +198,44 @@ class BacktestEngine:
         if not inputs:
             return result
 
-        # Index every symbol on a SHARED grid keyed by ``ts // iv`` rather than by raw array
-        # position. Symbols listed mid-window (e.g. SOL/ETH perps vs a multi-year BTC window)
-        # have their first bar at a large grid slot, not array index 0 — array indexing would
-        # misalign their signals from their bars and silently produce zero trades. The grid map
-        # gives each symbol a slot→bar lookup so a signal at slot ``decision_ts//iv`` always
-        # meets the bar at that same slot (or None before listing / inside a gap).
+        # Walk the shared timeline by EPOCH TIME, not by bar index. Time is the one coordinate
+        # every symbol shares: at each timestamp a symbol either has a bar or it does not, looked
+        # up directly by ``ts``. This is robust as the universe grows and symbols list/delist on
+        # different dates — there is no per-symbol index offset to compute (the array-index model
+        # silently produced zero trades for any contract listed after the window start, whose
+        # first bar is not at index 0). ``iv`` is kept only to express bar-count durations
+        # (hold period, bars-held), never as a position offset.
         self._grid_iv = self._grid_interval(inputs)
-        self._grid_bars = {
-            s.symbol: {b["ts"] // self._grid_iv: b for b in s.bars} for s in inputs
-        }
-        n_grid = 1 + max(
-            (s.bars[-1]["ts"] // self._grid_iv for s in inputs if s.bars), default=-1
-        )
-        # Per-symbol: signals indexed by entry grid slot (decision made on slot-1's close).
+        self._bars_by_ts = {s.symbol: {b["ts"]: b for b in s.bars} for s in inputs}
+        # The timeline is the ascending union of every symbol's real bar timestamps, so we visit
+        # only timestamps where some symbol actually trades (no empty pre-listing slots).
+        timeline = sorted({b["ts"] for s in inputs for b in s.bars})
+        # Per-symbol: signals keyed by entry timestamp (decision made on the prior bar's close).
         # Each entry carries the originating feature row so entry never re-scans.
         if self.is_portfolio:
-            signals_by_bar = self._portfolio_signals(inputs)
+            signals_by_ts = self._portfolio_signals(inputs)
         else:
-            signals_by_bar = {s.symbol: self._signals(s) for s in inputs}
+            signals_by_ts = {s.symbol: self._signals(s) for s in inputs}
         inputs_by_symbol = {s.symbol: s for s in inputs}
 
         equity = self.cfg.account.initial_equity
         open_positions: list[_Open] = []
+        last_ts = timeline[-1] if timeline else 0
 
-        for j in range(n_grid):
-            ts_j = self._bar_ts(inputs, j)
-
+        for ts in timeline:
             # 1) Funding on open positions crossing a funding timestamp.
             for pos in open_positions:
                 sym_in = inputs_by_symbol[pos.symbol]
-                pos.next_funding_idx = self._charge_funding(pos, sym_in, ts_j)
+                pos.next_funding_idx = self._charge_funding(pos, sym_in, ts)
 
-            # 2) Manage existing open positions against bar j's range.
+            # 2) Manage existing open positions against this timestamp's bar.
             still_open: list[_Open] = []
             for pos in open_positions:
-                bar = self._bar_at(inputs_by_symbol[pos.symbol], j)
+                bar = self._bars_by_ts[pos.symbol].get(ts)
                 if bar is None:
                     still_open.append(pos)
                     continue
-                trade = self._maybe_exit(pos, bar, j, final=(j == n_grid - 1))
+                trade = self._maybe_exit(pos, bar, ts, final=(ts == last_ts))
                 if trade is not None:
                     equity += trade.pnl
                     result.trades.append(trade)
@@ -246,41 +243,40 @@ class BacktestEngine:
                     still_open.append(pos)
             open_positions = still_open
 
-            # 3) New entries: signals whose entry bar == j fill at bar j's open.
-            for sym, by_bar in signals_by_bar.items():
-                entry = by_bar.get(j)
+            # 3) New entries: signals whose entry timestamp == ts fill at this bar's open.
+            for sym, by_ts in signals_by_ts.items():
+                entry = by_ts.get(ts)
                 if entry is None:
                     continue
                 sig, row = entry
                 sym_in = inputs_by_symbol[sym]
-                bar = self._bar_at(sym_in, j)
+                bar = self._bars_by_ts[sym].get(ts)
                 if bar is None:
                     continue
                 new_pos = self._maybe_enter(
-                    sym_in, sig, row, bar, j, equity, open_positions, result
+                    sym_in, sig, row, bar, ts, equity, open_positions, result
                 )
                 if new_pos is not None:
                     open_positions.append(new_pos)
                     # Intrabar stop/tp can trigger on the entry bar itself.
-                    trade = self._maybe_exit(new_pos, bar, j, final=(j == n_grid - 1))
+                    trade = self._maybe_exit(new_pos, bar, ts, final=(ts == last_ts))
                     if trade is not None:
                         equity += trade.pnl
                         result.trades.append(trade)
                         open_positions.remove(new_pos)
 
             # Mark-to-market equity for an honest drawdown curve.
-            mtm = equity + self._unrealized(open_positions, inputs_by_symbol, j)
+            mtm = equity + self._unrealized(open_positions, inputs_by_symbol, ts)
             result.equity_curve.append(mtm)
-            result.equity_ts.append(ts_j)
+            result.equity_ts.append(ts)
 
-        # Force-close anything still open at the last bar (handled above when
-        # j == n_bars-1 via final=True), but guard against symbols with shorter
+        # Force-close anything still open at the last timestamp (handled above when
+        # ts == last_ts via final=True), but guard against symbols with shorter
         # series by closing at their own last bar.
         for pos in open_positions:
             sym_in = inputs_by_symbol[pos.symbol]
             last_bar = sym_in.bars[-1]
-            last_slot = last_bar["ts"] // self._grid_iv
-            trade = self._close(pos, last_bar, last_slot, "end_of_data")
+            trade = self._close(pos, last_bar, int(last_bar["ts"]), "end_of_data")
             equity += trade.pnl
             result.trades.append(trade)
         if open_positions:
@@ -294,31 +290,31 @@ class BacktestEngine:
     def _signals(self, sym_in: SymbolInput) -> dict[int, tuple[Signal, dict]]:
         """Map entry grid slot -> (Signal, originating row). decision_ts == entry ts.
 
-        The slot is ``decision_ts // iv`` on the SAME shared grid the run loop walks, so a
-        signal only survives if a real bar exists at that slot (skipped before listing / inside
-        a gap). Keying by grid slot — not array position — is what lets a symbol listed
-        mid-window still trade."""
-        iv = self._grid_iv
-        grid = self._grid_bars[sym_in.symbol]
+        Keyed by the entry timestamp (``decision_ts`` == the entry bar's ts), so a signal only
+        survives if a real bar exists at that timestamp (skipped before listing / inside a gap).
+        Keying by epoch time — not array position — is what lets a symbol listed mid-window
+        still trade."""
+        bars = self._bars_by_ts[sym_in.symbol]
         out: dict[int, tuple[Signal, dict]] = {}
         for row in sym_in.frame.rows:
             if row["decision_ts"] < sym_in.activation_ts:
                 continue  # symbol not yet in-universe (future-universe guard)
-            entry_bar = row["decision_ts"] // iv
-            if entry_bar not in grid:
-                continue  # no tradable bar at this slot (pre-listing or interior gap)
+            entry_ts = int(row["decision_ts"])
+            if entry_ts not in bars:
+                continue  # no tradable bar at this timestamp (pre-listing or interior gap)
             # Per-symbol path runs only when is_portfolio is False (see run()), so the
             # strategy implements the plain Strategy protocol.
             sig = cast(Strategy, self.strategy).evaluate(row)
             if sig is not None:
-                bar = int(entry_bar)
-                # Deterministic on a collision: if two feature rows map to the same entry bar
+                # Deterministic on a collision: if two feature rows share an entry timestamp
                 # (mixed-grid data where decision_ts spacing != the OHLCV interval), KEEP THE
                 # FIRST (earliest decision_ts) and log the drop — never a silent last-writer-wins.
-                if bar in out:
-                    _log.warning("backtest_signal_bar_collision", symbol=sym_in.symbol, bar=bar)
+                if entry_ts in out:
+                    _log.warning(
+                        "backtest_signal_bar_collision", symbol=sym_in.symbol, ts=entry_ts
+                    )
                 else:
-                    out[bar] = (sig, row)
+                    out[entry_ts] = (sig, row)
         return out
 
     def _portfolio_signals(
@@ -330,14 +326,13 @@ class BacktestEngine:
         snapshot (each symbol's feature row for that exact ``decision_ts`` — the
         close of the previous bar, so strictly causal) and let the portfolio
         strategy decide per symbol. Timing matches the per-symbol path: a signal
-        for ``decision_ts`` fills at entry bar ``decision_ts // iv``.
+        for ``decision_ts`` fills at the bar whose ts == ``decision_ts``.
         """
         out: dict[str, dict[int, tuple[Signal, dict]]] = {s.symbol: {} for s in inputs}
         rows_by_dts: dict[str, dict[int, dict]] = {
             s.symbol: {int(r["decision_ts"]): r for r in s.frame.rows} for s in inputs
         }
-        iv = self._grid_iv
-        grid_by_symbol = self._grid_bars
+        bars_by_symbol = self._bars_by_ts
         activation_by_symbol = {s.symbol: s.activation_ts for s in inputs}
 
         all_dts = sorted({dts for m in rows_by_dts.values() for dts in m})
@@ -346,19 +341,17 @@ class BacktestEngine:
             for sym, row in peers.items():
                 if dts < activation_by_symbol[sym]:
                     continue  # symbol not yet in-universe (future-universe guard)
-                entry_bar = dts // iv
-                if entry_bar not in grid_by_symbol[sym]:
-                    continue  # no tradable bar at this slot (pre-listing or interior gap)
+                if dts not in bars_by_symbol[sym]:
+                    continue  # no tradable bar at this timestamp (pre-listing or interior gap)
                 others = {k: v for k, v in peers.items() if k != sym}
                 # Reached only via the is_portfolio branch in run(), so the strategy
                 # implements the PortfolioStrategy protocol.
                 sig = cast(PortfolioStrategy, self.strategy).evaluate_portfolio(sym, row, others)
                 if sig is not None:
-                    bar = int(entry_bar)
-                    if bar in out[sym]:  # collision → keep first (earliest dts), log the drop
-                        _log.warning("backtest_signal_bar_collision", symbol=sym, bar=bar)
+                    if dts in out[sym]:  # collision → keep first (earliest dts), log the drop
+                        _log.warning("backtest_signal_bar_collision", symbol=sym, ts=dts)
                     else:
-                        out[sym][bar] = (sig, row)
+                        out[sym][dts] = (sig, row)
         return out
 
     # -- entry ----------------------------------------------------------- #
@@ -368,7 +361,7 @@ class BacktestEngine:
         sig: Signal,
         row: dict,
         bar: dict,
-        bar_idx: int,
+        ts: int,
         equity: float,
         open_positions: list[_Open],
         result: BacktestResult,
@@ -426,18 +419,20 @@ class BacktestEngine:
             side=sig.side,
             qty=sizing.qty,
             entry_ts=decision_ts,
-            entry_bar=bar_idx,
             entry_price=entry_price,
             notional=notional,
             risk_amount=sizing.qty * entry_price * sig.stop_frac,
             stop_price=stop_price,
             tp_price=tp_price,
-            hold_until_bar=bar_idx
+            # Hold duration is expressed in BARS; convert to a time horizon (entry ts + N·iv) so
+            # the exit fires at the right wall-clock moment regardless of array position.
+            hold_until_ts=ts
             + (
                 sig.hold_bars
                 if sig.hold_bars is not None
                 else self.cfg.reference_strategy.hold_bars
-            ),
+            )
+            * self._grid_iv,
             entry_fee=entry_fee,
             funding=0.0,
             slippage_cost=entry_slip_cost,
@@ -447,27 +442,27 @@ class BacktestEngine:
         )
 
     # -- exit ------------------------------------------------------------ #
-    def _maybe_exit(self, pos: _Open, bar: dict, bar_idx: int, *, final: bool) -> Trade | None:
+    def _maybe_exit(self, pos: _Open, bar: dict, ts: int, *, final: bool) -> Trade | None:
         high, low = float(bar["high"]), float(bar["low"])
         # Stop checked before TP (conservative: assume the adverse level first).
         if pos.side > 0:
             if low <= pos.stop_price:
-                return self._close(pos, bar, bar_idx, "stop", price=pos.stop_price)
+                return self._close(pos, bar, "stop", price=pos.stop_price)
             if high >= pos.tp_price:
-                return self._close(pos, bar, bar_idx, "take_profit", price=pos.tp_price)
+                return self._close(pos, bar, "take_profit", price=pos.tp_price)
         else:
             if high >= pos.stop_price:
-                return self._close(pos, bar, bar_idx, "stop", price=pos.stop_price)
+                return self._close(pos, bar, "stop", price=pos.stop_price)
             if low <= pos.tp_price:
-                return self._close(pos, bar, bar_idx, "take_profit", price=pos.tp_price)
-        if bar_idx >= pos.hold_until_bar:
-            return self._close(pos, bar, bar_idx, "time_stop", price=float(bar["close"]))
+                return self._close(pos, bar, "take_profit", price=pos.tp_price)
+        if ts >= pos.hold_until_ts:
+            return self._close(pos, bar, "time_stop", price=float(bar["close"]))
         if final:
-            return self._close(pos, bar, bar_idx, "end_of_data", price=float(bar["close"]))
+            return self._close(pos, bar, "end_of_data", price=float(bar["close"]))
         return None
 
     def _close(
-        self, pos: _Open, bar: dict, bar_idx: int, reason: str, price: float | None = None
+        self, pos: _Open, bar: dict, reason: str, price: float | None = None
     ) -> Trade:
         ref_price = float(bar["close"]) if price is None else price
         exit_ts = int(bar["ts"])
@@ -509,7 +504,8 @@ class BacktestEngine:
             pnl_r=pnl_r,
             regime=pos.regime,
             session=pos.session,
-            bars_held=bar_idx - pos.entry_bar,
+            # Bars held in grid terms: elapsed time / bar interval (was an index delta).
+            bars_held=int((exit_ts - pos.entry_ts) // self._grid_iv),
         )
 
     # -- funding --------------------------------------------------------- #
@@ -545,24 +541,12 @@ class BacktestEngine:
                     best = d
         return best or 1
 
-    def _bar_ts(self, inputs: list[SymbolInput], j: int) -> int:
-        """Wall-clock ts of grid slot ``j``: a real bar at that slot if any symbol has one
-        (preserves exact timestamps for dense windows), else the canonical slot ts ``j·iv``."""
-        for s in inputs:
-            bar = self._grid_bars[s.symbol].get(j)
-            if bar is not None:
-                return int(bar["ts"])
-        return j * self._grid_iv
-
-    def _bar_at(self, sym_in: SymbolInput, j: int) -> dict | None:
-        return self._grid_bars[sym_in.symbol].get(j)
-
     def _unrealized(
-        self, open_positions: list[_Open], inputs_by_symbol: dict[str, SymbolInput], j: int
+        self, open_positions: list[_Open], inputs_by_symbol: dict[str, SymbolInput], ts: int
     ) -> float:
         total = 0.0
         for pos in open_positions:
-            bar = self._bar_at(inputs_by_symbol[pos.symbol], j)
+            bar = self._bars_by_ts[pos.symbol].get(ts)
             if bar is None:
                 continue
             mark = float(bar["close"])
