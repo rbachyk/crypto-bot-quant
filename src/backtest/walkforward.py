@@ -182,7 +182,13 @@ def run_walk_forward(
 
 
 def _iv(inputs: list[SymbolInput]) -> int:
+    """Bar interval (ms): the SMALLEST positive gap between consecutive bars across all symbols.
+    Taking the minimum recovers the true timeframe even if a series happens to start with an
+    interior hole (a naive ``bars[1]-bars[0]`` would then mis-size every fold)."""
+    best: int | None = None
     for s in inputs:
-        if len(s.bars) >= 2:
-            return int(s.bars[1]["ts"] - s.bars[0]["ts"])
-    return 1
+        for a, b in zip(s.bars, s.bars[1:], strict=False):
+            d = int(b["ts"] - a["ts"])
+            if d > 0 and (best is None or d < best):
+                best = d
+    return best or 1

@@ -276,7 +276,7 @@ class BacktestEngine:
         for pos in open_positions:
             sym_in = inputs_by_symbol[pos.symbol]
             last_bar = sym_in.bars[-1]
-            trade = self._close(pos, last_bar, int(last_bar["ts"]), "end_of_data")
+            trade = self._close(pos, last_bar, "end_of_data")
             equity += trade.pnl
             result.trades.append(trade)
         if open_positions:
@@ -288,7 +288,7 @@ class BacktestEngine:
 
     # -- signal precomputation ------------------------------------------- #
     def _signals(self, sym_in: SymbolInput) -> dict[int, tuple[Signal, dict]]:
-        """Map entry grid slot -> (Signal, originating row). decision_ts == entry ts.
+        """Map entry timestamp -> (Signal, originating row). decision_ts == entry ts.
 
         Keyed by the entry timestamp (``decision_ts`` == the entry bar's ts), so a signal only
         survives if a real bar exists at that timestamp (skipped before listing / inside a gap).

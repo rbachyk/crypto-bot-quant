@@ -235,6 +235,52 @@ def test_engine_fills_signal_at_next_bar_open_not_own_close(cfg, meta):
     assert t.entry_ts == iv  # decision_ts of the firing row == bar 1's ts
 
 
+def test_engine_force_closes_position_on_symbol_that_ends_early(cfg, meta):
+    """A position still open on a symbol whose history ends BEFORE the global last timestamp
+    (a shorter-listed / delisted contract in a multi-symbol run) must be force-closed at that
+    symbol's own last bar — not left open and not crashing. Regression for the force-close call
+    site, which the single-symbol suite never exercises (there the symbol always has a bar at the
+    final timestamp, so positions close in-loop)."""
+    from src.features.pipeline import FeatureFrame
+
+    iv = 60_000
+
+    class FireShortStrategy:
+        name = "fire_short"
+        strategy_version = "t1"
+
+        def evaluate(self, row: dict):
+            # Fire once, only on the short-history symbol's bar-0 row; hold long with wide
+            # stop/tp so the position stays open until that symbol's data simply runs out.
+            if row["decision_ts"] == iv and row.get("fire"):
+                return Signal(side=1, stop_frac=0.5, tp_frac=10.0, hold_bars=1000)
+            return None
+
+    def _inputs(symbol, n, fire):
+        bars = _grid_bars([100.0] * n, iv=iv)  # flat price → no stop/tp trigger
+        rows = [
+            {"ts": k * iv, "decision_ts": (k + 1) * iv, "ret_short": 0.0, "fire": fire}
+            for k in range(n)
+        ]
+        frame = FeatureFrame(symbol=symbol, timeframe="1m", feature_names=["ret_short"], rows=rows)
+        spread = [{"ts": b["ts"], "spread_bps": 2.0} for b in bars]
+        return SymbolInput(
+            symbol=symbol, bars=bars, frame=frame, spread_samples=spread, funding_events=[]
+        )
+
+    short_sym = _inputs("SHORT/USDT:USDT", n=5, fire=1)  # ends at ts=4·iv
+    long_sym = _inputs("LONG/USDT:USDT", n=10, fire=0)  # extends the timeline to ts=9·iv
+
+    engine = BacktestEngine(cfg, meta, FireShortStrategy())
+    result = engine.run([long_sym, short_sym])  # must not raise
+
+    assert len(result.trades) == 1
+    t = result.trades[0]
+    assert t.symbol == "SHORT/USDT:USDT"
+    assert t.exit_reason == "end_of_data"
+    assert t.exit_ts == 4 * iv  # closed at the short symbol's OWN last bar, not the global last
+
+
 def test_engine_charges_costs_on_every_trade(cfg, meta, ref_inputs):
     run = run_engine(cfg, meta, ref_inputs, label="costs")
     assert run.report.trade_count > 0
