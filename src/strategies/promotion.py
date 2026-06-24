@@ -8,6 +8,7 @@ to a report and read by nothing.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -18,6 +19,23 @@ from src.config import get_settings
 from src.db.base import session_scope
 from src.db.models import StrategyPromotion
 from src.strategies.research import CandidateValidation
+
+
+def _json_safe(obj):  # type: ignore[no-untyped-def]
+    """Recursively replace non-finite floats so a value can NEVER break JSON serialization to the
+    Postgres summary column. A multi-hour validation must not be lost at the persist step because
+    one nested profit_factor is inf/nan. inf → ±1e9 (the codebase cap), nan → None."""
+    if isinstance(obj, float):
+        if math.isnan(obj):
+            return None
+        if math.isinf(obj):
+            return 1e9 if obj > 0 else -1e9
+        return obj
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
 
 
 def persist_validations(
@@ -56,18 +74,20 @@ def persist_validations(
             row.allow_long = bool(v.side_decision.allow_long)
             row.allow_short = bool(v.side_decision.allow_short)
             row.shelved_reasons = list(v.shelved_reasons)
-            row.summary = {
-                "side_decision": v.side_decision.to_dict(),
-                "data_source": data_source,
-                # Full per-run metrics bundle so a verdict is inspectable after the fact (equity &
-                # drawdown curves, gross P/L, avg win/loss R, planned vs realized RR, breakdowns by
-                # symbol/side/strategy/regime/session, cost split) plus the robustness evidence —
-                # all of this was previously computed during validation and then discarded.
-                "report": v.report if isinstance(v.report, dict) else {},
-                "walk_forward": v.walk_forward,
-                "fee_stress": v.fee_stress,
-                "slippage_stress": v.slippage_stress,
-            }
+            row.summary = _json_safe(
+                {
+                    "side_decision": v.side_decision.to_dict(),
+                    "data_source": data_source,
+                    # Full per-run metrics bundle so a verdict is inspectable after the fact (equity
+                    # & drawdown curves, gross P/L, avg win/loss R, planned vs realized RR,
+                    # breakdowns by symbol/side/strategy/regime/session, cost split) plus the
+                    # robustness evidence — previously computed during validation and then dropped.
+                    "report": v.report if isinstance(v.report, dict) else {},
+                    "walk_forward": v.walk_forward,
+                    "fee_stress": v.fee_stress,
+                    "slippage_stress": v.slippage_stress,
+                }
+            )
             row.validated_at = datetime.now(UTC)
             row.related_versions = versions
             written += 1

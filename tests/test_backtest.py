@@ -17,6 +17,7 @@ They prove the Section 19 contract directly:
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 import pytest
@@ -417,13 +418,17 @@ def test_report_carries_full_metrics_bundle(cfg, meta, ref_inputs):
     assert abs(payload["net_pnl"] - (payload["gross_profit"] + payload["gross_loss"])) < 1e-3
     # realized RR reconciles with avg win/loss R.
     if payload["avg_loss_r"]:
-        assert abs(payload["realized_rr"] - payload["avg_win_r"] / abs(payload["avg_loss_r"])) < 1e-3
+        expected_rr = payload["avg_win_r"] / abs(payload["avg_loss_r"])
+        assert abs(payload["realized_rr"] - expected_rr) < 1e-3
     # curves are downsampled [[ts, value], ...] within the cap, ascending in time.
     eq = payload["equity_curve"]
     assert 0 < len(eq) <= 501 and all(len(p) == 2 for p in eq)
     assert eq == sorted(eq, key=lambda p: p[0])
     assert len(payload["drawdown_curve"]) == len(eq)
     assert all(d[1] >= 0 for d in payload["drawdown_curve"])  # drawdown is a positive fraction
+    # The whole payload must be strict-JSON serializable (no inf/nan) so it can be persisted to a
+    # Postgres JSON column — profit_factor is capped at 1e9, never Infinity.
+    json.dumps(payload, allow_nan=False)
 
 
 def test_max_drawdown_is_a_positive_fraction():

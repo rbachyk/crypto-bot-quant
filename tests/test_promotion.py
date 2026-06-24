@@ -3,9 +3,12 @@ paper/live pipeline can query which strategies are promoted (previously a dangli
 
 from __future__ import annotations
 
+import json
+import math
 import uuid
 
 from src.strategies.promotion import (
+    _json_safe,
     active_strategy_ids,
     is_strategy_promoted,
     persist_validations,
@@ -15,6 +18,26 @@ from src.strategies.promotion import (
 from src.strategies.research import CandidateValidation, SideDecision
 
 from tests.conftest import requires_db
+
+
+def test_json_safe_sanitizes_non_finite_so_persist_never_breaks() -> None:
+    """A nested inf/nan (e.g. profit_factor of a group with zero losers) must not be able to sink
+    a completed multi-hour validation at the Postgres-JSON persist step. inf → ±1e9, nan → None,
+    and the result must be strict-JSON serializable (allow_nan=False)."""
+    raw = {
+        "report": {
+            "profit_factor": math.inf,
+            "side_breakdown": {"long": {"profit_factor": -math.inf, "expectancy_r": 0.1}},
+            "curve": [1.0, math.nan, 2.0],
+        },
+        "ok": "string",
+        "n": 5,
+    }
+    safe = _json_safe(raw)
+    assert safe["report"]["profit_factor"] == 1e9
+    assert safe["report"]["side_breakdown"]["long"]["profit_factor"] == -1e9
+    assert safe["report"]["curve"][1] is None
+    json.dumps(safe, allow_nan=False)  # must not raise → safe for the Postgres JSON column
 
 
 def _validation(candidate_id: str, version: str, *, promoted: bool) -> CandidateValidation:

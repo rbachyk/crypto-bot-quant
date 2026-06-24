@@ -24,7 +24,10 @@ def _pf(trades: Iterable[Trade]) -> float:
     gross_profit = sum(t.pnl for t in trades if t.pnl > 0)
     gross_loss = -sum(t.pnl for t in trades if t.pnl < 0)
     if gross_loss == 0:
-        return float("inf") if gross_profit > 0 else 0.0
+        # Capped (not inf): a group with zero losers must not put "Infinity" into a report that
+        # is JSON-serialized to disk / a Postgres JSON column. 1e9 is the codebase's cap convention
+        # (leaderboard / persist_backtest_run already min(.., 1e9)).
+        return 1e9 if gross_profit > 0 else 0.0
     return gross_profit / gross_loss
 
 
