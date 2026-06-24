@@ -75,6 +75,15 @@ class DataConfig:
     # on its own grid while mark/index/spread stay on ``base_timeframe``. ``None`` ⇒
     # OI shares the base grid (the offline skeleton default, unchanged).
     oi_timeframe: str | None = None
+    # Decision timeframes whose engine inputs are PRE-BUILT (and cached) at download time, so
+    # validation/backtests load them instantly instead of rebuilding (~hours on 4h, days on 5m).
+    # ``None`` ⇒ pre-build every decision timeframe; set a subset to skip the slow ones till needed.
+    prebuild_input_timeframes: list[str] | None = None
+
+    @property
+    def prebuild_timeframes(self) -> list[str]:
+        """Decision timeframes to pre-build inputs for at download time (defaults to every one)."""
+        return list(self.prebuild_input_timeframes or self.timeframes)
 
     @property
     def funding_timeframe(self) -> str:
@@ -151,4 +160,9 @@ def load_data_config(path: str | None = None, *, as_of_ms: int | None = None) ->
         insufficient_history=list(data.get("insufficient_history", [])),
         thresholds=thresholds,
         oi_timeframe=(str(data["oi_timeframe"]) if data.get("oi_timeframe") else None),
+        prebuild_input_timeframes=(
+            list(data["prebuild_input_timeframes"])
+            if data.get("prebuild_input_timeframes")
+            else None
+        ),
     )

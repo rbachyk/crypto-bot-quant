@@ -246,6 +246,43 @@ def _cfg(oi_timeframe: str | None) -> DataConfig:
     )
 
 
+def test_prebuild_timeframes_default_and_override() -> None:
+    base = {
+        "exchange_id": EX, "data_version": "t", "symbols": [SYM], "timeframes": ["5m", "1h", "4h"],
+        "base_timeframe": BASE, "funding_interval_hours": 8, "required_series": [OHLCV],
+        "window_start_ms": 0, "window_end_ms": timeframe_ms(TF),
+        "thresholds": ValidationThresholds(),
+    }
+    assert DataConfig(**base).prebuild_timeframes == ["5m", "1h", "4h"]  # default = all
+    assert DataConfig(**base, prebuild_input_timeframes=["4h"]).prebuild_timeframes == ["4h"]
+
+
+def test_bybit_config_prebuilds_4h_only() -> None:
+    cfg = load_data_config(str(REPO_ROOT / "configs" / "data.bybit.yaml"))
+    assert cfg.prebuild_timeframes == ["4h"]  # 1h/5m are opt-in (slow on 20 symbols)
+
+
+def test_prewarm_input_cache_builds_and_persists(tmp_path) -> None:
+    """Pre-building at download time populates the cache (per-symbol progress) so a later
+    validation/backtest is an instant load instead of an ~hours rebuild."""
+    from src.backtest.service import prewarm_input_cache
+
+    store = SeriesStore(tmp_path)
+    start, end = 0, 200 * timeframe_ms(TF)
+    _seed_lake(store, start, end)
+    cfg = DataConfig(
+        exchange_id=EX, data_version="t", symbols=[SYM], timeframes=["5m", "1h", "4h"],
+        base_timeframe=BASE, funding_interval_hours=8,
+        required_series=[OHLCV, MARK, INDEX, FUNDING], window_start_ms=start, window_end_ms=end,
+        thresholds=ValidationThresholds(), oi_timeframe=OI_TF, prebuild_input_timeframes=["5m"],
+    )
+    seen: list = []
+    shapes = prewarm_input_cache(cfg, store, progress=lambda tf, d, t, s: seen.append((tf, d, t)))
+    assert shapes == {"5m": 1}  # only the prebuild timeframe was built, one symbol with data
+    assert list((tmp_path / "input_cache").glob("*.pkl"))  # cache persisted
+    assert seen and seen[-1] == ("5m", 1, 1)  # per-symbol progress reached completion
+
+
 def test_oi_grid_defaults_to_base() -> None:
     cfg = _cfg(None)
     assert cfg.oi_grid == BASE

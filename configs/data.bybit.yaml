@@ -54,6 +54,12 @@ data:
   # OHLCV decision timeframes collected for every symbol.
   timeframes: ["5m", "1h", "4h"]
 
+  # Decision timeframes whose engine inputs are PRE-BUILT (and cached) at download time, so
+  # validation loads them instantly. Just 4h for now — building 1h is ~hours and 5m is days for a
+  # 20-symbol universe; add "1h"/"5m" here when you want to validate on them (the first build then
+  # runs once during download, cached forever after). Omit this key to pre-build every timeframe.
+  prebuild_input_timeframes: ["4h"]
+
   # Mark / index / spread are sampled on this base grid.
   base_timeframe: "5m"
 

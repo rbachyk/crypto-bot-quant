@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import pickle
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -242,6 +243,7 @@ def build_lake_inputs(
     end_ms: int,
     oi_timeframe: str | None = None,
     feat_cfg: FeatureConfig | None = None,
+    on_progress: Callable[[int, int, str], None] | None = None,
 ) -> list[SymbolInput]:
     """Build per-symbol engine inputs from REAL downloaded lake series.
 
@@ -275,7 +277,8 @@ def build_lake_inputs(
             _log.info("lake_inputs_cache_hit", key=cache_key, symbols=len(cached))
             return cached
     inputs: list[SymbolInput] = []
-    for symbol in symbols:
+    n = len(symbols)
+    for i, symbol in enumerate(symbols):
         reader = StoreReader(
             store,
             exchange_id,
@@ -287,27 +290,30 @@ def build_lake_inputs(
             oi_timeframe=oi_tf,
         )
         bars = reader.ohlcv(symbol)
-        if not bars:
-            continue  # no history in window — excluded from the run
-        frame = compute_features(symbol, reader, feat_cfg)
-        spread = store.read(
-            SeriesKey(exchange_id, SPREAD, symbol, base_timeframe), start_ms, end_ms
-        )
-        funding = store.read(
-            SeriesKey(exchange_id, FUNDING, symbol, funding_timeframe), start_ms, end_ms
-        )
-        inputs.append(
-            SymbolInput(
-                symbol=symbol,
-                bars=bars,
-                frame=frame,
-                spread_samples=[{"ts": s["ts"], "spread_bps": s["spread_bps"]} for s in spread],
-                funding_events=[
-                    {"ts": f["ts"], "funding_rate": f["funding_rate"]} for f in funding
-                ],
-                activation_ts=0,
+        if bars:  # no history in window ⇒ excluded from the run (but still advances progress)
+            frame = compute_features(symbol, reader, feat_cfg)
+            spread = store.read(
+                SeriesKey(exchange_id, SPREAD, symbol, base_timeframe), start_ms, end_ms
             )
-        )
+            funding = store.read(
+                SeriesKey(exchange_id, FUNDING, symbol, funding_timeframe), start_ms, end_ms
+            )
+            inputs.append(
+                SymbolInput(
+                    symbol=symbol,
+                    bars=bars,
+                    frame=frame,
+                    spread_samples=[
+                        {"ts": s["ts"], "spread_bps": s["spread_bps"]} for s in spread
+                    ],
+                    funding_events=[
+                        {"ts": f["ts"], "funding_rate": f["funding_rate"]} for f in funding
+                    ],
+                    activation_ts=0,
+                )
+            )
+        if on_progress is not None:
+            on_progress(i + 1, n, symbol)
     if not inputs:
         return inputs
     # The engine indexes bars by EPOCH TIME, so rebasing is not required for correctness; we
@@ -321,6 +327,41 @@ def build_lake_inputs(
     if cache_key:
         _save_input_cache(store, cache_key, result)
     return result
+
+
+def prewarm_input_cache(
+    data_cfg: DataConfig,
+    store: SeriesStore,
+    *,
+    log: Callable[[str], None] | None = None,
+    progress: Callable[[str, int, int, str], None] | None = None,
+) -> dict[str, int]:
+    """Pre-build (and persist) the engine inputs for each of the data config's prebuild timeframes,
+    so later validation/backtests load them instantly instead of rebuilding. Called at DOWNLOAD
+    time. Idempotent — an unchanged snapshot yields instant cache hits, so re-running after an
+    incremental download only rebuilds the timeframes whose data actually changed.
+
+    ``progress(timeframe, done, total, symbol)`` fires per symbol; ``log`` once per timeframe.
+    Returns ``{timeframe: symbols_with_data}``."""
+    syms = data_cfg.active_symbols()
+    out: dict[str, int] = {}
+    for tf in data_cfg.prebuild_timeframes:
+        if log:
+            log(f"building inputs for {len(syms)} symbol(s) on {tf}")
+        built = build_lake_inputs(
+            store,
+            exchange_id=data_cfg.exchange_id,
+            symbols=syms,
+            timeframe=tf,
+            base_timeframe=data_cfg.base_timeframe,
+            funding_timeframe=data_cfg.funding_timeframe,
+            start_ms=data_cfg.window_start_ms,
+            end_ms=data_cfg.window_end_ms,
+            oi_timeframe=data_cfg.oi_grid,
+            on_progress=(lambda d, t, sym, _tf=tf: progress(_tf, d, t, sym)) if progress else None,
+        )
+        out[tf] = len(built)
+    return out
 
 
 def lake_candidate_strategy(

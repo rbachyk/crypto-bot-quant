@@ -313,16 +313,23 @@ def _build_dataset_version(ctx: JobContext, params: dict) -> dict:
     # last download; an empty store fetches the full window. ``full=true`` forces a re-fetch). --- #
     full = bool(params.get("full"))
     keys = [k for k in cfg.all_required_keys() if k.symbol in available]
+    # ONE continuous progress bar across both stages: download (len(keys) steps) then input-build
+    # (one step per symbol per prebuild timeframe). The message names the current stage so the chip
+    # reads correctly throughout.
+    prebuild_tfs = cfg.prebuild_timeframes
+    n_syms = len(cfg.active_symbols())
+    total = len(keys) + len(prebuild_tfs) * n_syms
     written = 0
     mode = "full" if full else "incremental (new candles since last download)"
     ctx.log(f"downloading {len(keys)} series — {mode}")
     for i, key in enumerate(keys):
         ctx.check_cancelled()
         written += platform.download(key) if full else platform.update_incremental(key)
-        ctx.progress(i + 1, len(keys), f"{key.label()}: {written} new rows")
+        ctx.progress(i + 1, total, f"downloading {key.label()}: {written} new rows")
     ctx.log(f"downloaded {written} NEW rows across {len(keys)} series ({mode})")
 
     # --- validate + snapshot, with concrete diagnostics on failure -------------------------- #
+    ctx.progress(len(keys), total, "validating coverage + building snapshot")
     run = platform.run_full(repair=True, source_jobs=["job:build_dataset_version"])
     if not run.coverage.covered:
         gaps = [g.key.label() for g in run.coverage.uncovered][:8]
@@ -337,15 +344,42 @@ def _build_dataset_version(ctx: JobContext, params: dict) -> dict:
         ctx.log(f"validation FAILED — {len(run.validation.critical)} critical issue(s): {crit}",
                 level="WARNING")
     status = "VALID" if (run.coverage.covered and run.validation.passed) else "INVALID"
-    ctx.progress(len(keys), len(keys), f"snapshot {run.snapshot.snapshot_id}: {status}")
+    ctx.log(f"snapshot {run.snapshot.snapshot_id}: {status}")
+
+    # --- pre-build the engine inputs NOW (at download time), so validation/backtests load them
+    # instantly instead of rebuilding (~hours on 4h, days on 5m for a 20-symbol universe).
+    # Idempotent: an unchanged snapshot yields instant cache hits, so an incremental re-download
+    # only rebuilds the timeframes whose data actually changed. Cancellable mid-build. --- #
+    built_shapes: dict[str, int] = {}
+    if available and prebuild_tfs:
+        from src.backtest.service import prewarm_input_cache
+        from src.config import get_settings
+        from src.data.store import SeriesStore
+
+        store = SeriesStore(get_settings().data_lake_path)
+        tf_pos = {tf: j for j, tf in enumerate(prebuild_tfs)}
+
+        def _build_progress(tf: str, done: int, tot: int, sym: str) -> None:
+            ctx.check_cancelled()
+            base = len(keys) + tf_pos[tf] * n_syms
+            ctx.progress(base + done, total, f"building inputs ({tf}): {sym} ({done}/{tot})")
+
+        ctx.log(f"building inputs for {prebuild_tfs} so validation loads them instantly")
+        built_shapes = prewarm_input_cache(
+            cfg, store, log=lambda m: ctx.log(m), progress=_build_progress
+        )
+        ctx.log(f"inputs cached: {built_shapes}")
+    ctx.progress(total, total, f"ready — snapshot {run.snapshot.snapshot_id}: {status}")
     return {
         "message": f"dataset {run.snapshot.snapshot_id}: {status} "
-        f"(rows={written}, covered={run.coverage.covered}, validated={run.validation.passed})",
+        f"(rows={written}, covered={run.coverage.covered}, validated={run.validation.passed}; "
+        f"inputs cached for {sorted(built_shapes)})",
         "dataset_version": run.snapshot.snapshot_id,
         "rows_downloaded": written,
         "symbols_available": available,
         "covered": run.coverage.covered,
         "validation_passed": run.validation.passed,
+        "inputs_cached": built_shapes,
         "artifact_uri": run.report_path,
     }
 
