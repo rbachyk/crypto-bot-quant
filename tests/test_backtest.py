@@ -281,6 +281,51 @@ def test_engine_force_closes_position_on_symbol_that_ends_early(cfg, meta):
     assert t.exit_ts == 4 * iv  # closed at the short symbol's OWN last bar, not the global last
 
 
+def test_trailing_stop_lets_a_winner_run_and_exits_on_reversal(cfg, meta):
+    """A trailing stop must let a momentum winner RIDE the move (past the time-stop) and exit on
+    the reversal at peak−trail_dist — locking a profit — instead of being cut at a fixed
+    time-stop. Conservative timing: the stop is set from the peak BEFORE the current bar."""
+    from src.features.pipeline import FeatureFrame
+
+    iv = 60_000
+
+    class FireOnceTrail:
+        name = "fire_trail"
+        strategy_version = "t1"
+
+        def evaluate(self, row: dict):
+            if row["decision_ts"] == iv:
+                # wide initial stop (won't trigger), no TP, long hold backstop, 5% trailing stop
+                return Signal(side=1, stop_frac=0.5, tp_frac=10.0, hold_bars=100, trail_frac=0.05)
+            return None
+
+    def bar(ts, o, h, low, c):
+        return {"ts": ts, "open": o, "high": h, "low": low, "close": c, "volume": 10_000.0}
+
+    bars = [
+        bar(0, 100, 100, 100, 100),  # decision bar — signal fires here (decision_ts=iv)
+        bar(iv, 100, 105, 99, 104),  # entry at open=100; peak ratchets to 105
+        bar(2 * iv, 104, 115, 103, 114),  # peak→115
+        bar(3 * iv, 114, 130, 113, 128),  # peak→130 (trail now 130−5=125)
+        bar(4 * iv, 128, 129, 120, 122),  # low 120 ≤ 125 → trailing-stop exit at ~125
+        bar(5 * iv, 122, 123, 118, 120),
+    ]
+    rows = [{"ts": k * iv, "decision_ts": (k + 1) * iv, "atr_pct": 0.01} for k in range(len(bars))]
+    frame = FeatureFrame(symbol=REF_SYMBOL, timeframe="1m", feature_names=["atr_pct"], rows=rows)
+    spread = [{"ts": b["ts"], "spread_bps": 2.0} for b in bars]
+    sym = SymbolInput(
+        symbol=REF_SYMBOL, bars=bars, frame=frame, spread_samples=spread, funding_events=[]
+    )
+
+    result = BacktestEngine(cfg, meta, FireOnceTrail()).run([sym])
+    assert len(result.trades) == 1
+    t = result.trades[0]
+    assert t.exit_reason == "trailing_stop"  # not time_stop, not the initial stop
+    assert t.exit_price > t.entry_price  # the reversal locked a profit
+    assert 120.0 < t.exit_price < 130.0  # exited near peak(130) − trail_dist(~5)
+    assert t.pnl > 0
+
+
 def test_engine_charges_costs_on_every_trade(cfg, meta, ref_inputs):
     run = run_engine(cfg, meta, ref_inputs, label="costs")
     assert run.report.trade_count > 0

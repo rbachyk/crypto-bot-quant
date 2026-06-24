@@ -46,13 +46,16 @@ strategies:
       params:
         leader_ret_threshold: 0.0025  # leader's last-bar return must exceed this
         stop_frac: 0.012              # initial SL FLOOR (fraction of price) — anchors sizing
-        tp_frac: 0.50                 # ~no fixed TP (unreachable); time-stop exits
-        hold_bars: 3                  # short hold: capture the lagged response then exit
+        tp_frac: 0.50                 # ~no fixed TP (unreachable); the trailing stop is the exit
+        hold_bars: 24                 # generous time-stop BACKSTOP; the trail is the real exit
         # Volatility-scaled stop: effective SL = max(stop_frac, atr_stop_mult × atr_pct), so the
         # stop adapts to the decision timeframe (a fixed 1.2% is ~1 1h bar → noise stop-outs). On
         # the low-vol 5m fixtures atr×mult stays under the floor (unchanged); it widens on 1h/4h.
         atr_stop_mult: 2.5
-        atr_tp_mult: 0.0              # momentum: keep TP unreachable (time-stop is the exit)
+        atr_tp_mult: 0.0              # momentum: no fixed TP
+        # Trailing stop: let the lagged move RUN and exit on reversal, instead of cutting every
+        # winner at a fixed 3-bar time-stop (which made avgWin ≈ avgLoss → no momentum edge).
+        atr_trail_mult: 2.0
         allow_long: true
         allow_short: true
       fixture:
@@ -111,11 +114,12 @@ strategies:
       params:
         rs_threshold: 0.003           # |relative strength vs cross-sectional mean| to fire
         stop_frac: 0.014              # initial SL FLOOR
-        tp_frac: 0.50                 # ~no fixed TP (unreachable); time-stop exits
-        hold_bars: 4
+        tp_frac: 0.50                 # ~no fixed TP (unreachable); the trailing stop is the exit
+        hold_bars: 24                 # generous time-stop BACKSTOP; the trail is the real exit
         # Volatility-scaled stop (see lead_lag_xasset): SL = max(stop_frac, 2.5×atr_pct).
         atr_stop_mult: 2.5
-        atr_tp_mult: 0.0              # momentum: keep TP unreachable
+        atr_tp_mult: 0.0              # momentum: no fixed TP
+        atr_trail_mult: 2.0           # let relative-strength continuation RUN; exit on reversal
         allow_long: true
         allow_short: true
       fixture:

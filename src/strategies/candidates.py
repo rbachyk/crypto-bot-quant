@@ -67,11 +67,14 @@ class _BaseCandidate:
         if not self._regime_ok(row):
             return None  # entry condition fired but the regime is not one this candidate trades
         stop_frac, tp_frac = self._exit_geometry(row)
+        atr = float(row.get("atr_pct", 0.0) or 0.0)
+        trail_frac = self.params.atr_trail_mult * atr  # 0 when trailing is disabled
         return Signal(
             side=side,
             stop_frac=stop_frac,
             tp_frac=tp_frac,
             hold_bars=self.params.hold_bars,
+            trail_frac=trail_frac,
             reason=reason,
         )
 

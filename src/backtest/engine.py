@@ -163,6 +163,8 @@ class _Open:
     regime: str
     session: int
     next_funding_idx: int
+    trail_dist: float = 0.0  # price distance for the trailing stop (0 = no trailing)
+    peak: float = 0.0  # best favorable price since entry (high for longs, low for shorts)
 
 
 def _regime_of(row: dict, spread_bps: float = 0.0) -> str:
@@ -441,26 +443,42 @@ class BacktestEngine:
             regime=_regime_of(row, sym_in.spread_bps_at(decision_ts)),
             session=int(row.get("session_code", 0)),
             next_funding_idx=self._first_funding_after(sym_in, decision_ts),
+            trail_dist=sig.trail_frac * entry_price,
+            peak=entry_price,
         )
 
     # -- exit ------------------------------------------------------------ #
     def _maybe_exit(self, pos: _Open, bar: dict, ts: int, *, final: bool) -> Trade | None:
         high, low = float(bar["high"]), float(bar["low"])
-        # Stop checked before TP (conservative: assume the adverse level first).
+        # Effective stop: the initial stop, ratcheted by a trailing stop set from the best
+        # favorable excursion BEFORE this bar (so a fresh high on this bar can't raise the stop
+        # that this same bar's low then hits — conservative, no intrabar look-ahead). When
+        # trail_dist is 0 the effective stop is just the fixed initial stop.
         if pos.side > 0:
-            if low <= pos.stop_price:
-                return self._close(pos, bar, "stop", price=pos.stop_price)
+            stop_level = pos.stop_price
+            if pos.trail_dist > 0:
+                stop_level = max(stop_level, pos.peak - pos.trail_dist)
+            if low <= stop_level:
+                reason = "trailing_stop" if stop_level > pos.stop_price else "stop"
+                return self._close(pos, bar, reason, price=stop_level)
             if high >= pos.tp_price:
                 return self._close(pos, bar, "take_profit", price=pos.tp_price)
         else:
-            if high >= pos.stop_price:
-                return self._close(pos, bar, "stop", price=pos.stop_price)
+            stop_level = pos.stop_price
+            if pos.trail_dist > 0:
+                stop_level = min(stop_level, pos.peak + pos.trail_dist)
+            if high >= stop_level:
+                reason = "trailing_stop" if stop_level < pos.stop_price else "stop"
+                return self._close(pos, bar, reason, price=stop_level)
             if low <= pos.tp_price:
                 return self._close(pos, bar, "take_profit", price=pos.tp_price)
         if ts >= pos.hold_until_ts:
             return self._close(pos, bar, "time_stop", price=float(bar["close"]))
         if final:
             return self._close(pos, bar, "end_of_data", price=float(bar["close"]))
+        # Survived this bar — ratchet the favorable-excursion peak for the next bar's trail.
+        if pos.trail_dist > 0:
+            pos.peak = max(pos.peak, high) if pos.side > 0 else min(pos.peak, low)
         return None
 
     def _close(

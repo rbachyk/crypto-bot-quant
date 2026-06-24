@@ -37,6 +37,9 @@ class StrategyParams:
     # (a fixed 1.2% stop is several 5m bars but only ~1 1h bar → noise stop-outs on coarser grids).
     atr_stop_mult: float = 0.0
     atr_tp_mult: float = 0.0
+    # Trailing stop at atr_trail_mult × atr_pct behind the best favorable excursion (0 = off).
+    # Lets a momentum winner RUN and exit on reversal instead of being amputated at the time-stop.
+    atr_trail_mult: float = 0.0
     # Regime gating (Section 11). Empty + flag off → no gating (legacy behavior: trade every bar).
     # ``block_no_trade_regimes`` excludes the live safety regimes (R4 chop / R7 toxic / R8 unsafe)
     # — defensible, not edge-fitted. ``regimes`` is an explicit allow-list (trade ONLY these): the
@@ -95,7 +98,7 @@ class StrategiesConfig:
 # Reserved param keys that map to StrategyParams fields; everything else is "extra".
 _RESERVED = {
     "stop_frac", "tp_frac", "hold_bars", "allow_long", "allow_short",
-    "atr_stop_mult", "atr_tp_mult", "block_no_trade_regimes", "regimes",
+    "atr_stop_mult", "atr_tp_mult", "atr_trail_mult", "block_no_trade_regimes", "regimes",
 }
 
 
@@ -109,6 +112,7 @@ def _parse_params(raw: dict) -> StrategyParams:
         allow_short=bool(raw.get("allow_short", True)),
         atr_stop_mult=float(raw.get("atr_stop_mult", 0.0)),
         atr_tp_mult=float(raw.get("atr_tp_mult", 0.0)),
+        atr_trail_mult=float(raw.get("atr_trail_mult", 0.0)),
         block_no_trade_regimes=bool(raw.get("block_no_trade_regimes", False)),
         regimes=tuple(str(r) for r in raw.get("regimes", ())),
         extra=extra,

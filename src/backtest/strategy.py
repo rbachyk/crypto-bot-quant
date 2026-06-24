@@ -35,6 +35,11 @@ class Signal:
     the tail with no fixed TP; mean-reversion exits quickly). ``None`` falls back
     to the reference time-stop. A very large ``tp_frac`` encodes "no fixed TP"
     (momentum), where the time-stop / trailing logic is the real exit.
+
+    ``trail_frac`` (>0) enables a trailing stop at that fraction of price behind the
+    best favorable excursion — so a momentum winner RUNS while the move continues and
+    exits when it reverses, instead of being cut at a fixed time-stop (which made
+    avgWin ≈ avgLoss). 0 disables trailing (fixed-stop behavior).
     """
 
     side: int
@@ -42,6 +47,7 @@ class Signal:
     tp_frac: float
     reason: str = ""
     hold_bars: int | None = None
+    trail_frac: float = 0.0
 
 
 @runtime_checkable
