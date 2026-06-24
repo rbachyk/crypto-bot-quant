@@ -31,6 +31,12 @@ class StrategyParams:
     hold_bars: int
     allow_long: bool = True
     allow_short: bool = True
+    # Volatility-scaled exit geometry (0 = disabled → use the fixed fractions above). When set,
+    # the effective stop/TP is ``max(stop_frac, atr_stop_mult × atr_pct)`` etc., so the geometry
+    # adapts to realized volatility and the decision timeframe instead of being a fixed % of price
+    # (a fixed 1.2% stop is several 5m bars but only ~1 1h bar → noise stop-outs on coarser grids).
+    atr_stop_mult: float = 0.0
+    atr_tp_mult: float = 0.0
     extra: dict[str, float] = field(default_factory=dict)
 
     def with_sides(self, *, allow_long: bool, allow_short: bool) -> StrategyParams:
@@ -80,7 +86,10 @@ class StrategiesConfig:
 
 
 # Reserved param keys that map to StrategyParams fields; everything else is "extra".
-_RESERVED = {"stop_frac", "tp_frac", "hold_bars", "allow_long", "allow_short"}
+_RESERVED = {
+    "stop_frac", "tp_frac", "hold_bars", "allow_long", "allow_short",
+    "atr_stop_mult", "atr_tp_mult",
+}
 
 
 def _parse_params(raw: dict) -> StrategyParams:
@@ -91,6 +100,8 @@ def _parse_params(raw: dict) -> StrategyParams:
         hold_bars=int(raw["hold_bars"]),
         allow_long=bool(raw.get("allow_long", True)),
         allow_short=bool(raw.get("allow_short", True)),
+        atr_stop_mult=float(raw.get("atr_stop_mult", 0.0)),
+        atr_tp_mult=float(raw.get("atr_tp_mult", 0.0)),
         extra=extra,
     )
 

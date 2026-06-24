@@ -45,18 +45,31 @@ class _BaseCandidate:
         Declared here so a built candidate satisfies the engine's Strategy protocol."""
         raise NotImplementedError
 
-    def _sided(self, side: int, reason: str) -> Signal | None:
+    def _sided(self, side: int, reason: str, row: dict) -> Signal | None:
         if side > 0 and not self.params.allow_long:
             return None
         if side < 0 and not self.params.allow_short:
             return None
+        stop_frac, tp_frac = self._exit_geometry(row)
         return Signal(
             side=side,
-            stop_frac=self.params.stop_frac,
-            tp_frac=self.params.tp_frac,
+            stop_frac=stop_frac,
+            tp_frac=tp_frac,
             hold_bars=self.params.hold_bars,
             reason=reason,
         )
+
+    def _exit_geometry(self, row: dict) -> tuple[float, float]:
+        """Stop/TP fractions for this entry. ``stop_frac``/``tp_frac`` are FLOORS; when an ATR
+        multiplier is configured the geometry scales with realized volatility (``k × atr_pct``),
+        so the SAME config adapts across decision timeframes instead of being a fixed % of price.
+        A fixed 1.2% stop is several 5m bars but only ~1 1h bar, so coarse-timeframe runs stop out
+        on ordinary noise; ``max(floor, k × atr)`` widens only on volatile bars / coarser grids and
+        never yields a degenerate sub-floor stop (which would explode position sizing)."""
+        atr = float(row.get("atr_pct", 0.0) or 0.0)
+        stop_frac = max(self.params.stop_frac, self.params.atr_stop_mult * atr)
+        tp_frac = max(self.params.tp_frac, self.params.atr_tp_mult * atr)
+        return stop_frac, tp_frac
 
 
 # --------------------------------------------------------------------------- #
@@ -110,9 +123,9 @@ class BasisReversionStrategy(_BaseCandidate):
         premium = float(row.get("premium", 0.0))
         threshold = self.params.extra["premium_threshold"]
         if premium >= threshold:
-            return self._sided(-1, f"premium {premium:+.5f} >= {threshold} ⇒ fade short")
+            return self._sided(-1, f"premium {premium:+.5f} >= {threshold} ⇒ fade short", row)
         if premium <= -threshold:
-            return self._sided(+1, f"premium {premium:+.5f} <= -{threshold} ⇒ fade long")
+            return self._sided(+1, f"premium {premium:+.5f} <= -{threshold} ⇒ fade long", row)
         return None
 
 
@@ -175,7 +188,7 @@ class LeadLagStrategy(_BaseCandidate):
         if abs(leader_ret) < threshold:
             return None
         side = 1 if leader_ret > 0 else -1
-        return self._sided(side, f"leader {leader} ret_1={leader_ret:+.5f} ⇒ follow")
+        return self._sided(side, f"leader {leader} ret_1={leader_ret:+.5f} ⇒ follow", row)
 
 
 # --------------------------------------------------------------------------- #
@@ -235,9 +248,9 @@ class CrossSectionalRSStrategy(_BaseCandidate):
         rel = own - mean
         threshold = self.params.extra["rs_threshold"]
         if rel >= threshold:
-            return self._sided(+1, f"rel_strength {rel:+.5f} >= {threshold} ⇒ long leader")
+            return self._sided(+1, f"rel_strength {rel:+.5f} >= {threshold} ⇒ long leader", row)
         if rel <= -threshold:
-            return self._sided(-1, f"rel_strength {rel:+.5f} <= -{threshold} ⇒ short laggard")
+            return self._sided(-1, f"rel_strength {rel:+.5f} <= -{threshold} ⇒ short laggard", row)
         return None
 
 

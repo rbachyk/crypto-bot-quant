@@ -45,9 +45,14 @@ strategies:
       exit_profile: momentum
       params:
         leader_ret_threshold: 0.0025  # leader's last-bar return must exceed this
-        stop_frac: 0.012              # initial SL (fraction of price) — anchors sizing
+        stop_frac: 0.012              # initial SL FLOOR (fraction of price) — anchors sizing
         tp_frac: 0.50                 # ~no fixed TP (unreachable); time-stop exits
         hold_bars: 3                  # short hold: capture the lagged response then exit
+        # Volatility-scaled stop: effective SL = max(stop_frac, atr_stop_mult × atr_pct), so the
+        # stop adapts to the decision timeframe (a fixed 1.2% is ~1 1h bar → noise stop-outs). On
+        # the low-vol 5m fixtures atr×mult stays under the floor (unchanged); it widens on 1h/4h.
+        atr_stop_mult: 2.5
+        atr_tp_mult: 0.0              # momentum: keep TP unreachable (time-stop is the exit)
         allow_long: true
         allow_short: true
       fixture:
@@ -73,9 +78,14 @@ strategies:
       exit_profile: mean_reversion
       params:
         premium_threshold: 0.0015     # |premium| (mark-vs-index) must exceed this to fire
-        stop_frac: 0.018              # wider SL (mean-reversion can run before reverting)
-        tp_frac: 0.006                # near TP (capture the reversion)
+        stop_frac: 0.018              # SL FLOOR (mean-reversion can run before reverting)
+        tp_frac: 0.006                # near-TP FLOOR (capture the reversion)
         hold_bars: 6
+        # Volatility-scaled geometry: SL = max(stop_frac, 2.0×atr_pct), TP = max(tp_frac,
+        # 1.0×atr_pct). On 1h/4h the reversion target + stop scale with realized range instead of
+        # being a fixed % that noise trips; the 5m fixtures stay under the floors (unchanged).
+        atr_stop_mult: 2.0
+        atr_tp_mult: 1.0
         allow_long: true              # the harness disables the structurally-weak side
         allow_short: true
       fixture:
@@ -100,9 +110,12 @@ strategies:
       exit_profile: momentum
       params:
         rs_threshold: 0.003           # |relative strength vs cross-sectional mean| to fire
-        stop_frac: 0.014
-        tp_frac: 0.50
+        stop_frac: 0.014              # initial SL FLOOR
+        tp_frac: 0.50                 # ~no fixed TP (unreachable); time-stop exits
         hold_bars: 4
+        # Volatility-scaled stop (see lead_lag_xasset): SL = max(stop_frac, 2.5×atr_pct).
+        atr_stop_mult: 2.5
+        atr_tp_mult: 0.0              # momentum: keep TP unreachable
         allow_long: true
         allow_short: true
       fixture:
