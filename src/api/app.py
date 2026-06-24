@@ -2310,8 +2310,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     <tr><td>Created</td><td>{job.created_at.isoformat()}</td></tr>
     <tr><td>Progress</td><td><span data-job-prog="{job.job_id}">{job.progress_current}/{job.progress_total}</span> — <span data-job-msg="{job.job_id}">{_esc(job.progress_message)}</span></td></tr>
     <tr><td>Related Gate</td><td>{_esc(job.related_gate_id or "-")}</td></tr>
-    <tr><td>Failure Reason</td><td>{_esc(job.failure_reason) or "-"}</td></tr>
-    <tr><td>Next Action</td><td>{_esc(job.next_action_hint) or "-"}</td></tr>
+    <tr><td>Failure Reason</td><td><span data-job-fail="{jid}">{_esc(job.failure_reason) or "-"}</span></td></tr>
+    <tr><td>Next Action</td><td><span data-job-next="{jid}">{_esc(job.next_action_hint) or "-"}</span></td></tr>
   </table>
 </div>
 {actions_card}
@@ -2323,18 +2323,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
   </table>
 </div>
 <script>
-// Live log tail for THIS job: the SSE stream updates the status chip + progress, but logs are
-// rendered server-side once — so without this they only appear on a manual refresh. Poll the
-// job snapshot (status + logs) while running and re-render in place; stop once terminal (after a
-// final render so the last lines are never missed). Bounded to one job, so it is cheap.
+// Live updates for THIS job WITHOUT a refresh. The shared SSE stream only carries status +
+// progress + message (and not failure_reason / next_action_hint), and the logs are rendered
+// server-side once. So poll the full job snapshot (/api/jobs/{{id}}) and re-render EVERYTHING in
+// place — the whole info table AND the log tail — stopping once terminal (after a final render so
+// the last lines + final reason are never missed). Bounded to one job, so it stays cheap.
 (function(){{
   var jid = "{jid}";  // job ids are safe [a-z0-9_] tokens
+  if(typeof fetch === 'undefined') return;
   var tb = document.getElementById('job-log-rows');
-  if(!tb || typeof fetch === 'undefined') return;
   var TERMINAL = {{succeeded:1, failed:1, cancelled:1, expired:1}};
+  var CLS = {{passed:'pass',succeeded:'pass',failed:'fail',cancelled:'fail',expired:'fail',
+              blocked:'blocked',not_run:'not_run',queued:'not_run',running:'running'}};
   function esc(s){{var d=document.createElement('div'); d.textContent=(s==null?'':String(s)); return d.innerHTML;}}
-  function render(logs){{
-    if(!logs || !logs.length) return;  // keep the server-rendered "No logs." until some arrive
+  function setText(sel,val){{var e=document.querySelector(sel); if(e) e.textContent=(val==null||val==='')?'-':val;}}
+  function applyTable(j){{
+    var b=document.querySelector('[data-job="'+jid+'"]');  // status badge (same target SSE uses)
+    if(b && j.status){{ b.setAttribute('data-status',j.status); b.className='badge '+(CLS[j.status]||'not_run'); b.textContent=String(j.status).toUpperCase(); }}
+    setText('[data-job-prog="'+jid+'"]', j.progress_current+'/'+j.progress_total);
+    setText('[data-job-msg="'+jid+'"]', j.progress_message);
+    setText('[data-job-fail="'+jid+'"]', j.failure_reason);
+    setText('[data-job-next="'+jid+'"]', j.next_action_hint);
+  }}
+  function renderLogs(logs){{
+    if(!tb || !logs || !logs.length) return;  // keep the server-rendered "No logs." until some arrive
     tb.innerHTML = logs.map(function(l){{
       var t = (l.ts||'').slice(11,19);  // HH:MM:SS from the ISO timestamp
       return '<tr><td>'+esc(t)+'</td><td>'+esc(l.level)+'</td><td>'+esc(l.message)+'</td></tr>';
@@ -2345,7 +2357,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
       .then(function(r){{ return r.ok ? r.json() : null; }})
       .then(function(j){{
         if(!j) return;
-        render(j.logs);
+        applyTable(j); renderLogs(j.logs);
         if(!TERMINAL[j.status]) setTimeout(poll, 2500);  // keep tailing until the job ends
       }})
       .catch(function(){{ setTimeout(poll, 5000); }});

@@ -279,6 +279,10 @@ def test_job_detail_page_renders_with_live_log_tail(client: TestClient) -> None:
     assert f'var jid = "{jid}"' in html  # job id embedded into the poller
     assert "/api/jobs/" in html and "setTimeout(poll" in html  # poller wired
     assert "building inputs &lt;x&gt;" in html  # initial logs server-rendered + escaped
+    # The WHOLE info table updates live (not just the SSE-driven chip/progress): failure reason +
+    # next action have update targets, and the poller refreshes the table via applyTable().
+    assert f'data-job-fail="{jid}"' in html and f'data-job-next="{jid}"' in html
+    assert "function applyTable" in html
 
 
 # ---------------------------------------------------------------------------
