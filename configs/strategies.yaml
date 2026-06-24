@@ -56,6 +56,10 @@ strategies:
         # Trailing stop: let the lagged move RUN and exit on reversal, instead of cutting every
         # winner at a fixed 3-bar time-stop (which made avgWin ≈ avgLoss → no momentum edge).
         atr_trail_mult: 2.0
+        # Regime safety gate (matches live): skip the no-trade regimes (R4 chop / R7 toxic /
+        # R8 unsafe). Defensible, not edge-fitted — the edge-conditional `regimes` allow-list is
+        # set separately from a TRAIN-only breakdown (never the full sample we then validate on).
+        block_no_trade_regimes: true
         allow_long: true
         allow_short: true
       fixture:
@@ -89,6 +93,7 @@ strategies:
         # being a fixed % that noise trips; the 5m fixtures stay under the floors (unchanged).
         atr_stop_mult: 2.0
         atr_tp_mult: 1.0
+        block_no_trade_regimes: true  # exclude no-trade regimes (R4 chop / R7 toxic / R8 unsafe)
         allow_long: true              # the harness disables the structurally-weak side
         allow_short: true
       fixture:
@@ -120,6 +125,7 @@ strategies:
         atr_stop_mult: 2.5
         atr_tp_mult: 0.0              # momentum: no fixed TP
         atr_trail_mult: 2.0           # let relative-strength continuation RUN; exit on reversal
+        block_no_trade_regimes: true  # exclude no-trade regimes (R4 chop / R7 toxic / R8 unsafe)
         allow_long: true
         allow_short: true
       fixture:

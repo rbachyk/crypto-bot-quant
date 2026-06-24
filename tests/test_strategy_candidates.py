@@ -70,7 +70,9 @@ def test_regime_gate_off_by_default_blocks_no_trade_and_restricts_allowlist() ->
     rng = row(atr_pct_rank=0.1, dir_efficiency=0.1)  # → R1_LOW_VOL_RANGE
     trend = row(atr_pct_rank=0.1, dir_efficiency=0.5, trend_slope=0.001)  # → R2_TREND
 
-    base = build_strategy(cand, scfg.strategy_version)  # default: no gating
+    # Explicitly UNGATED (the shipped config now enables the safety gate, so override it here).
+    ungated = replace(cand.params, block_no_trade_regimes=False, regimes=())
+    base = build_strategy(cand, scfg.strategy_version, ungated)
     assert base.evaluate(chop) is not None and base.evaluate(rng) is not None
 
     blocked = build_strategy(
