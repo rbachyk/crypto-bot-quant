@@ -2318,10 +2318,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 <div class="card">
   <h2>Logs</h2>
   <table>
-    <tr><th>Time</th><th>Level</th><th>Message</th></tr>
-    {logs_html}
+    <thead><tr><th>Time</th><th>Level</th><th>Message</th></tr></thead>
+    <tbody id="job-log-rows">{logs_html}</tbody>
   </table>
-</div>"""
+</div>
+<script>
+// Live log tail for THIS job: the SSE stream updates the status chip + progress, but logs are
+// rendered server-side once — so without this they only appear on a manual refresh. Poll the
+// job snapshot (status + logs) while running and re-render in place; stop once terminal (after a
+// final render so the last lines are never missed). Bounded to one job, so it is cheap.
+(function(){{
+  var jid = "{jid}";  // job ids are safe [a-z0-9_] tokens
+  var tb = document.getElementById('job-log-rows');
+  if(!tb || typeof fetch === 'undefined') return;
+  var TERMINAL = {{succeeded:1, failed:1, cancelled:1, expired:1}};
+  function esc(s){{var d=document.createElement('div'); d.textContent=(s==null?'':String(s)); return d.innerHTML;}}
+  function render(logs){{
+    if(!logs || !logs.length) return;  // keep the server-rendered "No logs." until some arrive
+    tb.innerHTML = logs.map(function(l){{
+      var t = (l.ts||'').slice(11,19);  // HH:MM:SS from the ISO timestamp
+      return '<tr><td>'+esc(t)+'</td><td>'+esc(l.level)+'</td><td>'+esc(l.message)+'</td></tr>';
+    }}).join('');
+  }}
+  function poll(){{
+    fetch('/api/jobs/'+encodeURIComponent(jid), {{headers:{{'Accept':'application/json'}}}})
+      .then(function(r){{ return r.ok ? r.json() : null; }})
+      .then(function(j){{
+        if(!j) return;
+        render(j.logs);
+        if(!TERMINAL[j.status]) setTimeout(poll, 2500);  // keep tailing until the job ends
+      }})
+      .catch(function(){{ setTimeout(poll, 5000); }});
+  }}
+  poll();
+}})();
+</script>"""
         return _page(f"Job {job_id[:16]}", body)
 
     # ----- gates ----------------------------------------------------------- #

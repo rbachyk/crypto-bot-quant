@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 from src.api import create_app
 from src.config import Settings
 
-from tests.conftest import requires_redis
+from tests.conftest import requires_db, requires_redis
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -256,6 +256,29 @@ def test_job_detail_404(client: TestClient) -> None:
 def test_job_logs_404(client: TestClient) -> None:
     resp = client.get("/api/jobs/nonexistent-id-xyz/logs", auth=_AUTH)
     assert resp.status_code == 404
+
+
+@requires_db
+def test_job_detail_page_renders_with_live_log_tail(client: TestClient) -> None:
+    """The job detail page must render (no f-string brace error) and carry the live-log-tail
+    wiring: a #job-log-rows tbody and the poller that refreshes logs without a manual refresh."""
+    from src.db.base import session_scope
+    from src.db.models import Job, JobLog, JobStatus
+
+    jid = "job_detailrendertest"
+    with session_scope() as s:
+        if s.get(Job, jid) is None:
+            s.add(Job(job_id=jid, job_type="selftest_echo", status=JobStatus.RUNNING))
+            s.flush()
+            s.add(JobLog(job_id=jid, level="INFO", message="building inputs <x>"))
+
+    resp = client.get(f"/dashboard/jobs/{jid}", auth=_AUTH)
+    assert resp.status_code == 200  # f-string rendered (balanced braces)
+    html = resp.text
+    assert 'id="job-log-rows"' in html  # live-tail target present
+    assert f'var jid = "{jid}"' in html  # job id embedded into the poller
+    assert "/api/jobs/" in html and "setTimeout(poll" in html  # poller wired
+    assert "building inputs &lt;x&gt;" in html  # initial logs server-rendered + escaped
 
 
 # ---------------------------------------------------------------------------
