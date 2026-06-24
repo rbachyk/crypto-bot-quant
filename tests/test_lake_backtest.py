@@ -150,6 +150,52 @@ def test_engine_trades_symbol_listed_mid_window(tmp_path) -> None:
     assert result.report.trade_count > 0
 
 
+def _lake_kw(start, end):
+    return {
+        "exchange_id": EX, "symbols": [SYM], "timeframe": TF, "base_timeframe": BASE,
+        "funding_timeframe": FUND, "start_ms": start, "end_ms": end, "oi_timeframe": OI_TF,
+    }
+
+
+def test_build_lake_inputs_cache_hit_skips_feature_rebuild(tmp_path, monkeypatch) -> None:
+    """The build (parquet read + feature compute + rebase) is deterministic, so a repeat run over
+    the SAME lake snapshot must load the persisted inputs and NOT recompute features (the part that
+    costs hours). Proven by making compute_features explode on the second call."""
+    store = SeriesStore(tmp_path)
+    iv = timeframe_ms(TF)
+    start, end = 0, 200 * iv
+    _seed_lake(store, start, end)
+
+    first = build_lake_inputs(store, **_lake_kw(start, end))  # builds + persists
+    assert (tmp_path / "input_cache").exists() and list((tmp_path / "input_cache").glob("*.pkl"))
+
+    import src.backtest.service as svc
+
+    def _boom(*_a, **_k):
+        raise AssertionError("compute_features must NOT run on a cache hit")
+
+    monkeypatch.setattr(svc, "compute_features", _boom)
+    # Same data, and a LATER end_ms (mimicking the as_of:now window ticking) — still a hit, because
+    # the key omits end_ms and uses the data fingerprint.
+    second = build_lake_inputs(store, **{**_lake_kw(start, end + 10 * iv)})
+    assert len(first) == len(second) == 1
+    assert [b["ts"] for b in first[0].bars] == [b["ts"] for b in second[0].bars]
+    assert first[0].frame.feature_names == second[0].frame.feature_names
+
+
+def test_build_lake_inputs_cache_invalidates_when_data_changes(tmp_path) -> None:
+    """Appending real bars rewrites the parquet → the data fingerprint changes → the stale cache is
+    NOT served; the build picks up the new data."""
+    store = SeriesStore(tmp_path)
+    iv = timeframe_ms(TF)
+    _seed_lake(store, 0, 200 * iv)
+    n_first = len(build_lake_inputs(store, **_lake_kw(0, 200 * iv))[0].bars)
+
+    _seed_lake(store, 200 * iv, 260 * iv)  # 60 more real bars → fingerprint changes
+    rebuilt = build_lake_inputs(store, **_lake_kw(0, 260 * iv))
+    assert len(rebuilt[0].bars) > n_first  # rebuilt on the new data, not the stale 200-bar cache
+
+
 def test_build_lake_inputs_skips_symbols_without_history(tmp_path) -> None:
     store = SeriesStore(tmp_path)
     start, end = 0, 50 * timeframe_ms(TF)

@@ -16,9 +16,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import pickle
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
+
+import structlog
 
 from src.backtest.config import BacktestConfig, load_backtest_config
 from src.backtest.engine import BacktestEngine, BacktestResult, SymbolInput
@@ -27,7 +32,16 @@ from src.backtest.reference import ReferenceReader
 from src.backtest.strategy import PortfolioStrategy, ReferenceMomentumStrategy, Strategy
 from src.config import Settings, get_settings
 from src.data.config import DataConfig, load_data_config
-from src.data.schema import FUNDING, SPREAD, SeriesKey, timeframe_ms
+from src.data.schema import (
+    FUNDING,
+    INDEX,
+    MARK,
+    OHLCV,
+    OPEN_INTEREST,
+    SPREAD,
+    SeriesKey,
+    timeframe_ms,
+)
 from src.data.store import SeriesStore
 from src.exchange.metadata import MetadataConfig, load_metadata_config
 from src.features.config import FeatureConfig, load_feature_config
@@ -45,6 +59,93 @@ def make_strategy(cfg: BacktestConfig) -> Strategy:
 
 
 _INPUTS_CACHE: dict[tuple, list[SymbolInput]] = {}
+
+_log = structlog.get_logger("backtest.service")
+
+# Bump when SymbolInput/FeatureFrame schema or the build logic (features, rebase) changes, so old
+# on-disk caches are ignored rather than deserialized into a stale shape.
+_INPUT_CACHE_VERSION = 1
+
+
+def _input_cache_enabled() -> bool:
+    flag = os.environ.get("QBOT_DISABLE_INPUT_CACHE", "").strip().lower()
+    return flag not in {"1", "true", "yes"}
+
+
+def _input_cache_dir(store: SeriesStore) -> Path:
+    # store.root is <lake>/series; keep the cache a sibling so it lives in the same shared volume.
+    return store.root.parent / "input_cache"
+
+
+def _lake_inputs_cache_key(
+    store: SeriesStore,
+    *,
+    exchange_id: str,
+    symbols: list[str],
+    timeframe: str,
+    base_timeframe: str,
+    funding_timeframe: str,
+    oi_timeframe: str,
+    start_ms: int,
+    feat_cfg: FeatureConfig,
+) -> str | None:
+    """Content key for the built inputs. Includes a DATA FINGERPRINT (parquet file stats) so the
+    cache invalidates exactly when the lake data changes — and deliberately OMITS the requested
+    ``end_ms`` (the ``as_of: now`` window end ticks every run, but the output is bounded by the
+    data, which the fingerprint already captures). Returns None on any error → caller rebuilds."""
+    try:
+        syms = sorted(symbols)
+        # Every series the build reads (data_type, timeframe). If any of these parquet files
+        # change for any symbol, the fingerprint — and so the key — changes.
+        series = (
+            (OHLCV, timeframe), (MARK, base_timeframe), (INDEX, base_timeframe),
+            (FUNDING, funding_timeframe), (OPEN_INTEREST, oi_timeframe), (SPREAD, base_timeframe),
+        )
+        fp = {
+            sym: [store.fingerprint(SeriesKey(exchange_id, dt, sym, tf)) for dt, tf in series]
+            for sym in syms
+        }
+        sig = {
+            "v": _INPUT_CACHE_VERSION,
+            "ex": exchange_id, "syms": syms, "tf": timeframe, "base": base_timeframe,
+            "fund": funding_timeframe, "oi": oi_timeframe, "start": start_ms,
+            "feat": [
+                feat_cfg.timeframe, feat_cfg.feature_set_version,
+                feat_cfg.windows.short, feat_cfg.windows.long, feat_cfg.windows.rank,
+            ],
+            "fp": fp,
+        }
+        return hashlib.sha256(
+            json.dumps(sig, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:32]
+    except Exception:  # noqa: BLE001 - cache is best-effort; a key failure just forces a rebuild
+        return None
+
+
+def _load_input_cache(store: SeriesStore, key: str) -> list[SymbolInput] | None:
+    path = _input_cache_dir(store) / f"{key}.pkl"
+    if not path.exists():
+        return None
+    try:
+        with path.open("rb") as fh:
+            return pickle.load(fh)  # noqa: S301 - our own cache file in our own volume
+    except Exception:  # noqa: BLE001 - corrupt/incompatible cache → rebuild
+        _log.warning("lake_inputs_cache_load_failed", key=key)
+        return None
+
+
+def _save_input_cache(store: SeriesStore, key: str, inputs: list[SymbolInput]) -> None:
+    try:
+        cache_dir = _input_cache_dir(store)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        path = cache_dir / f"{key}.pkl"
+        tmp = path.with_suffix(".pkl.tmp")
+        with tmp.open("wb") as fh:
+            pickle.dump(inputs, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        tmp.replace(path)  # atomic publish
+        _log.info("lake_inputs_cache_saved", key=key, symbols=len(inputs))
+    except Exception:  # noqa: BLE001 - never let a cache-write error break a (valid) build
+        _log.warning("lake_inputs_cache_save_failed", key=key)
 
 
 def _reference_signature(cfg: BacktestConfig, feat_cfg: FeatureConfig) -> tuple:
@@ -154,6 +255,25 @@ def build_lake_inputs(
     """
     feat_cfg = feat_cfg or _lake_feature_config(timeframe)
     oi_tf = oi_timeframe or base_timeframe
+    # Deterministic-input cache. The build (parquet read + feature compute + rebase) is a pure
+    # function of the lake data + config, but costs ~1.5-2h on 4h and DAYS on 5m for a 20-symbol
+    # universe. Persist the built inputs keyed by a data fingerprint, so a repeat run over the SAME
+    # snapshot loads them in seconds instead of rebuilding. Best-effort: any cache miss/error just
+    # rebuilds (and re-saves). Disable with QBOT_DISABLE_INPUT_CACHE=1.
+    cache_key = (
+        _lake_inputs_cache_key(
+            store, exchange_id=exchange_id, symbols=symbols, timeframe=timeframe,
+            base_timeframe=base_timeframe, funding_timeframe=funding_timeframe,
+            oi_timeframe=oi_tf, start_ms=start_ms, feat_cfg=feat_cfg,
+        )
+        if _input_cache_enabled()
+        else None
+    )
+    if cache_key:
+        cached = _load_input_cache(store, cache_key)
+        if cached is not None:
+            _log.info("lake_inputs_cache_hit", key=cache_key, symbols=len(cached))
+            return cached
     inputs: list[SymbolInput] = []
     for symbol in symbols:
         reader = StoreReader(
@@ -197,7 +317,10 @@ def build_lake_inputs(
     # ts 0) — the engine handles that natively.
     iv = timeframe_ms(timeframe)
     lo = (start_ms // iv) * iv
-    return rebase_window(inputs, lo, end_ms)
+    result = rebase_window(inputs, lo, end_ms)
+    if cache_key:
+        _save_input_cache(store, cache_key, result)
+    return result
 
 
 def lake_candidate_strategy(

@@ -104,6 +104,20 @@ class SeriesStore:
     def count(self, key: SeriesKey, start_ms: int | None = None, end_ms: int | None = None) -> int:
         return len(self.read(key, start_ms, end_ms))
 
+    def fingerprint(self, key: SeriesKey) -> list[list]:
+        """Cheap content fingerprint for ``key``: ``[relpath, size, mtime_ns]`` for every
+        partition file, WITHOUT reading any parquet. It changes iff data is written/deleted for
+        this series, so it keys the deterministic input cache (a re-download that adds bars bumps
+        the newest month file's mtime/size → cache miss; an unchanged lake → cache hit)."""
+        sdir = self._series_dir(key)
+        if not sdir.exists():
+            return []
+        out: list[list] = []
+        for p in sorted(sdir.rglob("*.parquet")):
+            st = p.stat()
+            out.append([str(p.relative_to(sdir)), st.st_size, st.st_mtime_ns])
+        return out
+
     # -- write ----------------------------------------------------------- #
     def write(self, key: SeriesKey, rows: list[dict]) -> int:
         """Merge ``rows`` into the store (append-only, dedup by ts). Returns the
