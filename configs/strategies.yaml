@@ -60,6 +60,12 @@ strategies:
         # R8 unsafe). Defensible, not edge-fitted — the edge-conditional `regimes` allow-list is
         # set separately from a TRAIN-only breakdown (never the full sample we then validate on).
         block_no_trade_regimes: true
+        # Edge-conditional regime allow-list (B): trade ONLY the regimes where lead_lag's edge is
+        # reliably positive on the TRAIN window (first 70% of 4h) — low-vol range + impulse +
+        # liquidation — and DROP R2_TREND / R3_HIGH_VOL_EXPANSION, where it reliably loses (a
+        # lead-lag follower has no edge once a trend/expansion is already underway). Selected on
+        # train only; the walk-forward hold-out (untouched tail) is the honest OOS test.
+        regimes: ["R1_LOW_VOL_RANGE", "R5_MARKET_WIDE_IMPULSE", "R6_LIQUIDATION_EVENT"]
         allow_long: true
         allow_short: true
       fixture:
