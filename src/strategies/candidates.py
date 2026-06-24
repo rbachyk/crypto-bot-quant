@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from src.backtest.strategy import Signal
+from src.regime.detector import NO_TRADE_REGIMES, detect_regime
 from src.strategies.base import StrategyHypothesis
 from src.strategies.config import CandidateConfig, StrategyParams
 
@@ -45,11 +46,26 @@ class _BaseCandidate:
         Declared here so a built candidate satisfies the engine's Strategy protocol."""
         raise NotImplementedError
 
+    def _regime_ok(self, row: dict) -> bool:
+        """Regime gate (Section 11). Off by default (legacy: trade every bar). ``regimes`` is an
+        allow-list (trade ONLY those); ``block_no_trade_regimes`` excludes the live safety regimes.
+        Computed from decision-time features already in the row (spread/data handled separately by
+        the engine's execution blockers, so spread_bps defaults here)."""
+        p = self.params
+        if not p.regimes and not p.block_no_trade_regimes:
+            return True
+        regime = detect_regime(row)
+        if p.regimes and regime not in p.regimes:
+            return False
+        return not (p.block_no_trade_regimes and regime in NO_TRADE_REGIMES)
+
     def _sided(self, side: int, reason: str, row: dict) -> Signal | None:
         if side > 0 and not self.params.allow_long:
             return None
         if side < 0 and not self.params.allow_short:
             return None
+        if not self._regime_ok(row):
+            return None  # entry condition fired but the regime is not one this candidate trades
         stop_frac, tp_frac = self._exit_geometry(row)
         return Signal(
             side=side,

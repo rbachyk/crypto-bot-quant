@@ -9,6 +9,8 @@ synthetic fixtures are unchanged), and never yields a degenerate sub-floor stop.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from src.strategies.candidates import build_strategy
 from src.strategies.config import load_strategies_config
 
@@ -51,6 +53,37 @@ def test_missing_atr_falls_back_to_floor_never_sub_floor() -> None:
     sig = strat.evaluate({"premium": thr + 0.001})  # atr_pct absent
     assert sig is not None
     assert sig.stop_frac == cand.params.stop_frac
+
+
+def test_regime_gate_off_by_default_blocks_no_trade_and_restricts_allowlist() -> None:
+    """The regime gate is opt-in: with neither knob set the strategy fires every bar (legacy).
+    block_no_trade_regimes excludes the live safety regimes (R4 chop); a regimes allow-list trades
+    ONLY the listed regimes. Regime is computed from decision-time features in the row."""
+    scfg = load_strategies_config()
+    cand = scfg.candidate("basis_reversion")
+    thr = cand.params.extra["premium_threshold"]
+
+    def row(**kw):  # premium fires the short side; regime features set the regime
+        return {"premium": thr + 0.001, "atr_pct": 0.01, **kw}
+
+    chop = row(atr_pct_rank=0.9, dir_efficiency=0.1)  # high vol + low dir-eff → R4_HIGH_VOL_CHOP
+    rng = row(atr_pct_rank=0.1, dir_efficiency=0.1)  # → R1_LOW_VOL_RANGE
+    trend = row(atr_pct_rank=0.1, dir_efficiency=0.5, trend_slope=0.001)  # → R2_TREND
+
+    base = build_strategy(cand, scfg.strategy_version)  # default: no gating
+    assert base.evaluate(chop) is not None and base.evaluate(rng) is not None
+
+    blocked = build_strategy(
+        cand, scfg.strategy_version, replace(cand.params, block_no_trade_regimes=True)
+    )
+    assert blocked.evaluate(chop) is None  # R4 is a no-trade regime
+    assert blocked.evaluate(rng) is not None  # R1 is tradeable
+
+    only_trend = build_strategy(
+        cand, scfg.strategy_version, replace(cand.params, regimes=("R2_TREND",))
+    )
+    assert only_trend.evaluate(rng) is None  # R1 not in the allow-list
+    assert only_trend.evaluate(trend) is not None  # R2 is
 
 
 def test_momentum_tp_stays_unreachable_when_mult_zero() -> None:
