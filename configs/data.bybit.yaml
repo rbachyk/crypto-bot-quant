@@ -20,12 +20,36 @@ version: 1
 
 data:
   exchange_id: bybit
-  data_version: bybit_0001
+  data_version: bybit_0002
 
+  # Test universe: the 20 most-liquid Bybit USDT perps that listed BEFORE mid-2022 — a single
+  # liquidity filter that also guarantees multi-year history AND excludes the recent tokenized
+  # stock/commodity contracts (XAU/SOXL/SPCX…) and 2024 tokens that would wreck a crypto
+  # cross-sectional ranking. This is a static, survivorship-biased snapshot chosen to PROVE the
+  # edge exists with breadth; a point-in-time universe MANAGER (monthly rotation on liquidity +
+  # listing-age, survivorship-free) replaces it once the edge is confirmed. Selected from live
+  # Bybit 24h-turnover (see git history for the query).
   symbols:
     - "BTC/USDT:USDT"
     - "ETH/USDT:USDT"
     - "SOL/USDT:USDT"
+    - "XRP/USDT:USDT"
+    - "DOGE/USDT:USDT"
+    - "ZEC/USDT:USDT"
+    - "ADA/USDT:USDT"
+    - "NEAR/USDT:USDT"
+    - "AAVE/USDT:USDT"
+    - "AVAX/USDT:USDT"
+    - "BNB/USDT:USDT"
+    - "LINK/USDT:USDT"
+    - "XLM/USDT:USDT"
+    - "LTC/USDT:USDT"
+    - "XMR/USDT:USDT"
+    - "DYDX/USDT:USDT"
+    - "UNI/USDT:USDT"
+    - "DOT/USDT:USDT"
+    - "OP/USDT:USDT"
+    - "BCH/USDT:USDT"
 
   # OHLCV decision timeframes collected for every symbol.
   timeframes: ["5m", "1h", "4h"]
