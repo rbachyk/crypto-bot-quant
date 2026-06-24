@@ -72,6 +72,38 @@ def test_validate_all_on_lake_returns_wellformed_verdicts(tmp_path) -> None:
             assert v.shelved_reasons  # a shelve always explains why
 
 
+def test_no_edge_candidate_shelves_cleanly_without_misleading_cascade(tmp_path) -> None:
+    """When neither side clears the expectancy floor, the candidate is shelved with the SINGLE
+    meaningful reason (per-side expectancy) and the downstream gates are skipped — NOT buried
+    under derived 'insufficient trades (0 < 20) / 0 folds / stress 0.0' noise. Regression for the
+    confusing shelve cascade seen on the real 5-year run (both sides disabled → 0-trade promoted
+    strategy → a wall of consequential failures that hid the real cause)."""
+    store = SeriesStore(tmp_path)
+    iv = timeframe_ms(TF)
+    h1 = timeframe_ms("1h")
+    start = (1_700_000_000_000 // h1) * h1
+    end = start + 600 * iv
+    _seed_lake(store, start, end)
+
+    verdicts = validate_all_on_lake(_cfg(start, end), timeframe=TF, symbols=[SYM], store=store)
+    no_edge = [
+        v
+        for v in verdicts
+        if not v.promoted and any("no side has positive expectancy" in r for r in v.shelved_reasons)
+    ]
+    # Single-symbol data starves the cross-asset candidates (no peers) → no positive side.
+    assert no_edge, "expected at least one candidate with no tradable/positive side"
+    for v in no_edge:
+        joined = " ".join(v.shelved_reasons)
+        assert len(v.shelved_reasons) == 1  # the meaningful reason stands ALONE
+        assert "insufficient trades" not in joined  # no derived 0-trade pile-on
+        assert "walk-forward failed" not in joined
+        # downstream gates explicitly short-circuited; the both-sides report is retained.
+        assert v.walk_forward.get("skipped")
+        assert v.fee_stress.get("skipped")
+        assert v.slippage_stress.get("skipped")
+
+
 def test_validate_all_on_lake_errors_without_data(tmp_path) -> None:
     store = SeriesStore(tmp_path)  # empty store → no bars
     start, end = 0, 600 * timeframe_ms(TF)

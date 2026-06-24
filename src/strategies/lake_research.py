@@ -81,10 +81,43 @@ def validate_candidate_on_lake(
 
     side_decision = _decide_sides(full_both, strat_cfg.min_side_expectancy_r)
 
-    shelved: list[str] = []
+    # No side cleared the expectancy floor → the strategy has no edge here. Short-circuit with the
+    # ACTUAL per-side expectancy (the meaningful reason) and DO NOT run the promoted backtest /
+    # walk-forward / stress: with both sides disabled the "promoted" strategy trades nothing, so
+    # those gates would only pile on misleading "insufficient trades (0 < 20) / 0 folds / stress
+    # 0.0" noise that buries the real cause (and wastes minutes of compute per candidate). Keep the
+    # BOTH-sides report — it carries the real trade count + metrics the operator wants to see.
     if not (side_decision.allow_long or side_decision.allow_short):
-        shelved.append("both sides have non-positive expectancy on real data")
+        reason = (
+            "no side has positive expectancy net of costs on real data "
+            f"(long={side_decision.long_expectancy_r:+.3f}R over {side_decision.long_trades} "
+            f"trades, short={side_decision.short_expectancy_r:+.3f}R over "
+            f"{side_decision.short_trades} trades)"
+        )
+        emit(f"{cand.id}: SHELVED — {reason}")
+        _log.info(
+            "lake_validate_no_edge", candidate=cand.id,
+            long_expectancy_r=side_decision.long_expectancy_r,
+            short_expectancy_r=side_decision.short_expectancy_r,
+            both_trades=full_both.trade_count,
+        )
+        return CandidateValidation(
+            candidate_id=cand.id,
+            family=cand.family,
+            strategy_version=strat_cfg.strategy_version,
+            promoted=False,
+            status="shelved",
+            shelved_reasons=[reason],
+            side_decision=side_decision,
+            hypothesis=both.hypothesis.to_dict(),
+            report=full_both.payload,  # the both-sides report has the real trades + breakdown
+            walk_forward={"skipped": "no side enabled (no positive expectancy)"},
+            fee_stress={"skipped": "no side enabled (no positive expectancy)"},
+            slippage_stress={"skipped": "no side enabled (no positive expectancy)"},
+            noise_control={"skipped": "real-data validation (the live market is the control)"},
+        )
 
+    shelved: list[str] = []
     promoted_params = cand.params.with_sides(
         allow_long=side_decision.allow_long, allow_short=side_decision.allow_short
     )
