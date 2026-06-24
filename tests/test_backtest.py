@@ -359,6 +359,28 @@ def test_report_contains_all_required_outputs(cfg, meta, ref_inputs):
     assert payload["side_breakdown"]["short"]["trades"] >= 0
 
 
+def test_report_carries_full_metrics_bundle(cfg, meta, ref_inputs):
+    """The persisted metrics bundle: gross P/L, avg win/loss R, planned vs realized RR, per-trade
+    expectancy ($), and chartable equity + drawdown curves (downsampled)."""
+    payload = run_engine(cfg, meta, ref_inputs, label="bundle").report.payload
+    for key in (
+        "gross_profit", "gross_loss", "expectancy", "avg_win_r", "avg_loss_r",
+        "planned_rr", "realized_rr", "equity_curve", "drawdown_curve",
+    ):
+        assert key in payload, f"missing bundle field: {key}"
+    # net = gross_profit + gross_loss (gross_loss is signed negative).
+    assert abs(payload["net_pnl"] - (payload["gross_profit"] + payload["gross_loss"])) < 1e-3
+    # realized RR reconciles with avg win/loss R.
+    if payload["avg_loss_r"]:
+        assert abs(payload["realized_rr"] - payload["avg_win_r"] / abs(payload["avg_loss_r"])) < 1e-3
+    # curves are downsampled [[ts, value], ...] within the cap, ascending in time.
+    eq = payload["equity_curve"]
+    assert 0 < len(eq) <= 501 and all(len(p) == 2 for p in eq)
+    assert eq == sorted(eq, key=lambda p: p[0])
+    assert len(payload["drawdown_curve"]) == len(eq)
+    assert all(d[1] >= 0 for d in payload["drawdown_curve"])  # drawdown is a positive fraction
+
+
 def test_max_drawdown_is_a_positive_fraction():
     assert max_drawdown([]) == 0.0
     assert max_drawdown([100.0, 110.0, 99.0, 120.0]) == pytest.approx((110.0 - 99.0) / 110.0)

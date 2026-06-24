@@ -56,7 +56,18 @@ def persist_validations(
             row.allow_long = bool(v.side_decision.allow_long)
             row.allow_short = bool(v.side_decision.allow_short)
             row.shelved_reasons = list(v.shelved_reasons)
-            row.summary = {"side_decision": v.side_decision.to_dict(), "data_source": data_source}
+            row.summary = {
+                "side_decision": v.side_decision.to_dict(),
+                "data_source": data_source,
+                # Full per-run metrics bundle so a verdict is inspectable after the fact (equity &
+                # drawdown curves, gross P/L, avg win/loss R, planned vs realized RR, breakdowns by
+                # symbol/side/strategy/regime/session, cost split) plus the robustness evidence —
+                # all of this was previously computed during validation and then discarded.
+                "report": v.report if isinstance(v.report, dict) else {},
+                "walk_forward": v.walk_forward,
+                "fee_stress": v.fee_stress,
+                "slippage_stress": v.slippage_stress,
+            }
             row.validated_at = datetime.now(UTC)
             row.related_versions = versions
             written += 1

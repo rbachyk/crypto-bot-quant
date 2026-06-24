@@ -83,6 +83,7 @@ class Trade:
     regime: str
     session: int
     bars_held: int
+    planned_rr: float = 0.0  # |tp-entry|/|entry-stop| at entry (∞-ish when TP unreachable)
 
     def to_dict(self) -> dict:
         return {
@@ -105,6 +106,7 @@ class Trade:
             "regime": self.regime,
             "session": self.session,
             "bars_held": self.bars_held,
+            "planned_rr": self.planned_rr,
         }
 
 
@@ -485,6 +487,11 @@ class BacktestEngine:
         total_fee = pos.entry_fee + exit_fee
         pnl = gross - total_fee - pos.funding
         pnl_r = pnl / pos.risk_amount if pos.risk_amount > 0 else 0.0
+        # Planned reward:risk at entry (target distance / stop distance). For momentum candidates
+        # the TP is intentionally unreachable, so this is large — which is itself the signal that
+        # the edge depends on the time-stop, not a target (compare against realized RR).
+        stop_dist = abs(pos.entry_price - pos.stop_price)
+        planned_rr = abs(pos.tp_price - pos.entry_price) / stop_dist if stop_dist > 0 else 0.0
         return Trade(
             symbol=pos.symbol,
             strategy=pos.strategy,
@@ -506,6 +513,7 @@ class BacktestEngine:
             session=pos.session,
             # Bars held in grid terms: elapsed time / bar interval (was an index delta).
             bars_held=int((exit_ts - pos.entry_ts) // self._grid_iv),
+            planned_rr=round(planned_rr, 6),
         )
 
     # -- funding --------------------------------------------------------- #

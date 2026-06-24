@@ -32,6 +32,53 @@ def _expectancy_r(trades: list[Trade]) -> float:
     return sum(t.pnl_r for t in trades) / len(trades) if trades else 0.0
 
 
+def _win_loss_r(trades: list[Trade]) -> tuple[float, float, float]:
+    """(avg_win_r, avg_loss_r, realized_RR). avg_loss_r is negative; realized RR is the
+    payoff ratio avg_win_r / |avg_loss_r| — the empirical reward:risk actually achieved."""
+    wins = [t.pnl_r for t in trades if t.pnl > 0]
+    losses = [t.pnl_r for t in trades if t.pnl <= 0]
+    aw = sum(wins) / len(wins) if wins else 0.0
+    al = sum(losses) / len(losses) if losses else 0.0
+    payoff = aw / abs(al) if al else 0.0
+    return round(aw, 6), round(al, 6), round(payoff, 6)
+
+
+def _median_planned_rr(trades: list[Trade]) -> float:
+    """Median planned reward:risk (robust to the unreachable-TP outliers of momentum candidates)."""
+    vals = sorted(t.planned_rr for t in trades if t.planned_rr > 0)
+    return round(vals[len(vals) // 2], 6) if vals else 0.0
+
+
+def _downsample(ts: list[int], vals: list[float], n: int = 500) -> list[list[float]]:
+    """``[[ts, value], ...]`` thinned to at most ``n`` evenly-spaced points (curves stay chartable
+    without bloating the report — a 5m/5y run has ~575k points)."""
+    m = len(vals)
+    if m == 0:
+        return []
+    if m <= n:
+        return [[int(t), round(float(v), 6)] for t, v in zip(ts, vals, strict=False)]
+    step = m / n
+    out: list[list[float]] = []
+    i = 0.0
+    while int(i) < m:
+        k = int(i)
+        out.append([int(ts[k]), round(float(vals[k]), 6)])
+        i += step
+    if out[-1][0] != int(ts[-1]):  # always include the final point
+        out.append([int(ts[-1]), round(float(vals[-1]), 6)])
+    return out
+
+
+def _drawdown_series(equity: list[float]) -> list[float]:
+    """Per-point drawdown as a positive fraction of the running peak."""
+    out: list[float] = []
+    peak = equity[0] if equity else 0.0
+    for v in equity:
+        peak = max(peak, v)
+        out.append((peak - v) / peak if peak > 0 else 0.0)
+    return out
+
+
 def max_drawdown(equity_curve: list[float]) -> float:
     """Maximum peak-to-trough drawdown as a positive fraction of the peak."""
     if not equity_curve:
@@ -139,6 +186,7 @@ def build_report(result: BacktestResult, *, label: str = "") -> BacktestReport:
     total_return = net_pnl / initial if initial > 0 else 0.0
     longs = [t for t in trades if t.side > 0]
     shorts = [t for t in trades if t.side < 0]
+    avg_win_r, avg_loss_r, realized_rr = _win_loss_r(trades)
 
     payload = {
         "label": label,
@@ -146,11 +194,22 @@ def build_report(result: BacktestResult, *, label: str = "") -> BacktestReport:
         "final_equity": round(result.final_equity, 6),
         "total_return": round(total_return, 8),
         "net_pnl": round(net_pnl, 6),
+        # Gross profit / loss split out explicitly (was only implicit in cost_breakdown).
+        "gross_profit": round(sum(t.pnl for t in trades if t.pnl > 0), 6),
+        "gross_loss": round(sum(t.pnl for t in trades if t.pnl <= 0), 6),
+        "expectancy": round(net_pnl / len(trades), 6) if trades else 0.0,  # per-trade, in equity
         "expectancy_r": round(_expectancy_r(trades), 6),
+        "avg_win_r": avg_win_r,
+        "avg_loss_r": avg_loss_r,
+        "planned_rr": _median_planned_rr(trades),  # target:stop at entry (median)
+        "realized_rr": realized_rr,  # avg_win_r / |avg_loss_r| — what was actually achieved
         "profit_factor": round(_pf(trades), 6),
         "max_drawdown": round(max_drawdown(result.equity_curve), 6),
         "trade_count": len(trades),
         "win_rate": round(sum(1 for t in trades if t.pnl > 0) / len(trades), 6) if trades else 0.0,
+        # Downsampled time series (chartable; capped so a multi-year 5m run stays small).
+        "equity_curve": _downsample(result.equity_ts, result.equity_curve),
+        "drawdown_curve": _downsample(result.equity_ts, _drawdown_series(result.equity_curve)),
         "symbols": list(result.symbols),
         # Required breakdowns (Section 19).
         "symbol_breakdown": _breakdown(trades, lambda t: t.symbol),
