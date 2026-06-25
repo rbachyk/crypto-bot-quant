@@ -69,6 +69,10 @@ class _BaseCandidate:
         stop_frac, tp_frac = self._exit_geometry(row)
         atr = float(row.get("atr_pct", 0.0) or 0.0)
         trail_frac = self.params.atr_trail_mult * atr  # 0 when trailing is disabled
+        # Maker entry: post the limit ``limit_offset_atr_mult × atr_pct`` inside the open so the
+        # passive distance scales with realized volatility (like the stop/TP geometry). 0 when the
+        # family fills as a taker market order.
+        limit_offset_frac = self.params.limit_offset_atr_mult * atr
         return Signal(
             side=side,
             stop_frac=stop_frac,
@@ -76,6 +80,8 @@ class _BaseCandidate:
             hold_bars=self.params.hold_bars,
             trail_frac=trail_frac,
             reason=reason,
+            maker=self.params.maker_entry,
+            limit_offset_frac=limit_offset_frac,
         )
 
     def _exit_geometry(self, row: dict) -> tuple[float, float]:

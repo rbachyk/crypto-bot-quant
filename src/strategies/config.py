@@ -47,6 +47,14 @@ class StrategyParams:
     # cherry-picked from the same sample it's then validated on.
     block_no_trade_regimes: bool = False
     regimes: tuple[str, ...] = ()
+    # Maker (passive limit) entry execution. When ``maker_entry`` is set, the engine posts the
+    # entry as a limit ``limit_offset_atr_mult × atr_pct`` inside the fill-bar open and fills only
+    # if the bar trades through it (else no trade) — maker fee, zero slippage. The take-profit of a
+    # maker position likewise fills as a resting limit; risk exits stay taker. Offset 0 posts at
+    # the open (optimistic); set it > 0 so a fill requires price to come to you. Default off (taker
+    # market entry, unchanged) so momentum families that need immediate fills are not starved.
+    maker_entry: bool = False
+    limit_offset_atr_mult: float = 0.0
     extra: dict[str, float] = field(default_factory=dict)
 
     def with_sides(self, *, allow_long: bool, allow_short: bool) -> StrategyParams:
@@ -99,6 +107,7 @@ class StrategiesConfig:
 _RESERVED = {
     "stop_frac", "tp_frac", "hold_bars", "allow_long", "allow_short",
     "atr_stop_mult", "atr_tp_mult", "atr_trail_mult", "block_no_trade_regimes", "regimes",
+    "maker_entry", "limit_offset_atr_mult",
 }
 
 
@@ -115,6 +124,8 @@ def _parse_params(raw: dict) -> StrategyParams:
         atr_trail_mult=float(raw.get("atr_trail_mult", 0.0)),
         block_no_trade_regimes=bool(raw.get("block_no_trade_regimes", False)),
         regimes=tuple(str(r) for r in raw.get("regimes", ())),
+        maker_entry=bool(raw.get("maker_entry", False)),
+        limit_offset_atr_mult=float(raw.get("limit_offset_atr_mult", 0.0)),
         extra=extra,
     )
 

@@ -40,6 +40,17 @@ class Signal:
     best favorable excursion — so a momentum winner RUNS while the move continues and
     exits when it reverses, instead of being cut at a fixed time-stop (which made
     avgWin ≈ avgLoss). 0 disables trailing (fixed-stop behavior).
+
+    ``maker`` switches entry execution from a taker market fill (cross the spread,
+    pay taker fee + adverse slippage) to a PASSIVE limit order: post a limit
+    ``limit_offset_frac`` inside the fill-bar open and fill ONLY if the bar trades
+    through it (else the order is cancelled and no position opens — fewer trades, by
+    design). A maker fill pays the maker fee with zero slippage. The take-profit of a
+    maker position is likewise treated as a resting limit (maker); risk exits (stop /
+    trailing / time-stop) stay taker — you must cross the spread to get out of a loser.
+    ``limit_offset_frac`` is the passive distance (fraction of price) the entry limit
+    sits inside the reference price; 0 posts at the open (optimistic — a real maker
+    fill should require price to come to you, so set this > 0).
     """
 
     side: int
@@ -48,6 +59,8 @@ class Signal:
     reason: str = ""
     hold_bars: int | None = None
     trail_frac: float = 0.0
+    maker: bool = False
+    limit_offset_frac: float = 0.0
 
 
 @runtime_checkable

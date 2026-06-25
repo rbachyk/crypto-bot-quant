@@ -21,7 +21,7 @@
 version: 1
 
 strategies:
-  strategy_version: strat_0001
+  strategy_version: strat_0002  # strat_0002: maker (passive-limit) entry execution for basis_reversion
 
   # Long/short expectancy is computed separately for every candidate; a side whose
   # out-of-sample expectancy_r is at or below this floor is DISABLED before
@@ -99,6 +99,15 @@ strategies:
         atr_stop_mult: 2.0
         atr_tp_mult: 1.0
         block_no_trade_regimes: true  # exclude no-trade regimes (R4 chop / R7 toxic / R8 unsafe)
+        # Maker (passive-limit) entry. The 20-symbol research run showed the basis edge is THIN and
+        # COST-DOMINATED (~+0.03R, win 64%): taker fee + slippage eats most of the captured
+        # reversion. A mean-reversion entry is a natural maker — you WANT to be filled as price
+        # dislocates TO your resting limit, not to cross the spread chasing it. Posting 0.10×atr_pct
+        # inside the open captures the maker fee + zero slippage at the price of fewer fills (no
+        # fill when the bar doesn't trade through the limit). Offset is a tunable: too wide starves
+        # fills, 0 posts at the open (optimistic). Re-validate fill-rate + per-side expectancy.
+        maker_entry: true
+        limit_offset_atr_mult: 0.10
         allow_long: true              # the harness disables the structurally-weak side
         allow_short: true
       fixture:

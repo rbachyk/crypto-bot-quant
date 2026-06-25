@@ -327,6 +327,93 @@ def test_trailing_stop_lets_a_winner_run_and_exits_on_reversal(cfg, meta):
     assert t.pnl > 0
 
 
+def test_maker_entry_fills_at_the_limit_with_no_slippage_and_maker_fees(cfg, meta):
+    """A maker (passive-limit) entry fills EXACTLY at the limit price (no adverse slippage) and
+    pays the maker fee on both legs when the take-profit — itself a resting limit — is hit. The
+    limit sits ``limit_offset_frac`` below the fill-bar open for a long; the bar must trade through
+    it to fill."""
+    from src.features.pipeline import FeatureFrame
+
+    iv = 60_000
+
+    class FireMaker:
+        name = "fire_maker"
+        strategy_version = "t1"
+
+        def evaluate(self, row: dict):
+            if row["decision_ts"] == iv:
+                # Post 1% inside the open; near TP, wide stop so only the TP can fire.
+                return Signal(
+                    side=1, stop_frac=0.5, tp_frac=0.05, maker=True, limit_offset_frac=0.01
+                )
+            return None
+
+    def bar(ts, o, h, low, c):
+        return {"ts": ts, "open": o, "high": h, "low": low, "close": c, "volume": 10_000.0}
+
+    bars = [
+        bar(0, 100, 100, 100, 100),  # decision bar (decision_ts=iv)
+        bar(iv, 100, 101, 98, 100),  # open 100 → limit 99; low 98 ≤ 99 ⇒ fills at exactly 99
+        bar(2 * iv, 100, 110, 99, 105),  # high 110 ≥ TP(99·1.05=103.95) ⇒ maker TP exit at 103.95
+    ]
+    rows = [{"ts": k * iv, "decision_ts": (k + 1) * iv, "atr_pct": 0.0} for k in range(len(bars))]
+    frame = FeatureFrame(symbol=REF_SYMBOL, timeframe="1m", feature_names=["atr_pct"], rows=rows)
+    spread = [{"ts": b["ts"], "spread_bps": 2.0} for b in bars]
+    sym = SymbolInput(
+        symbol=REF_SYMBOL, bars=bars, frame=frame, spread_samples=spread, funding_events=[]
+    )
+
+    result = BacktestEngine(cfg, meta, FireMaker()).run([sym])
+    assert len(result.trades) == 1
+    t = result.trades[0]
+    assert t.entry_price == pytest.approx(99.0)  # exact limit, no slippage
+    assert t.exit_reason == "take_profit"
+    assert t.exit_price == pytest.approx(99.0 * 1.05)  # maker TP fill at the limit, no slippage
+    assert t.slippage_cost == pytest.approx(0.0)
+    # Both legs pay the MAKER rate (BTC maker_fee=0.0002 in configs/metadata.yaml), not taker.
+    expected_fee = 0.0002 * (t.qty * t.entry_price + t.qty * t.exit_price)
+    assert t.fee == pytest.approx(expected_fee)
+
+
+def test_maker_entry_that_is_not_touched_does_not_fill(cfg, meta):
+    """When the fill bar never trades through the passive limit, the maker order is cancelled and
+    NO position opens (the accepted 'fewer trades' cost of maker execution) — logged as a rejected
+    candidate, not a taker fill at the open."""
+    from src.features.pipeline import FeatureFrame
+
+    iv = 60_000
+
+    class FireMaker:
+        name = "fire_maker"
+        strategy_version = "t1"
+
+        def evaluate(self, row: dict):
+            if row["decision_ts"] == iv:
+                return Signal(
+                    side=1, stop_frac=0.5, tp_frac=0.05, maker=True, limit_offset_frac=0.01
+                )
+            return None
+
+    def bar(ts, o, h, low, c):
+        return {"ts": ts, "open": o, "high": h, "low": low, "close": c, "volume": 10_000.0}
+
+    bars = [
+        bar(0, 100, 100, 100, 100),
+        bar(iv, 100, 102, 99.5, 101),  # open 100 → limit 99; low 99.5 > 99 ⇒ never filled
+        bar(2 * iv, 101, 103, 100, 102),
+    ]
+    rows = [{"ts": k * iv, "decision_ts": (k + 1) * iv, "atr_pct": 0.0} for k in range(len(bars))]
+    frame = FeatureFrame(symbol=REF_SYMBOL, timeframe="1m", feature_names=["atr_pct"], rows=rows)
+    spread = [{"ts": b["ts"], "spread_bps": 2.0} for b in bars]
+    sym = SymbolInput(
+        symbol=REF_SYMBOL, bars=bars, frame=frame, spread_samples=spread, funding_events=[]
+    )
+
+    result = BacktestEngine(cfg, meta, FireMaker()).run([sym])
+    assert result.trades == []
+    assert any(r.reason == "maker_no_fill" for r in result.rejected)
+
+
 def test_engine_charges_costs_on_every_trade(cfg, meta, ref_inputs):
     run = run_engine(cfg, meta, ref_inputs, label="costs")
     assert run.report.trade_count > 0

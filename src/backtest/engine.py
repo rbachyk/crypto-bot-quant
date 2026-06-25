@@ -165,6 +165,7 @@ class _Open:
     next_funding_idx: int
     trail_dist: float = 0.0  # price distance for the trailing stop (0 = no trailing)
     peak: float = 0.0  # best favorable price since entry (high for longs, low for shorts)
+    maker: bool = False  # entered as a passive limit → take-profit exits as a maker limit too
 
 
 def _regime_of(row: dict, spread_bps: float = 0.0) -> str:
@@ -399,20 +400,41 @@ class BacktestEngine:
             reject(sizing.reason)
             return None
 
-        bar_notional = float(bar["volume"]) * ref_price
-        slip = self.slippage.slippage_frac(
-            spread_bps=spread_bps, notional=sizing.notional, bar_notional=bar_notional
-        )
-        if slip > self.cfg.execution.max_slippage_frac:
-            reject(f"slippage_estimate_exceeds_cap({slip:.4f})")
-            return None
+        if sig.maker:
+            # Passive limit entry: post ``limit_offset_frac`` inside the fill-bar open and fill
+            # ONLY if the bar trades through the limit (a buy fills when the low reaches it; a sell
+            # when the high reaches it). No fill ⇒ the order is cancelled and no position opens
+            # (the accepted "fewer trades" cost of maker execution). A maker fill is exact at the
+            # limit price with zero slippage and pays the maker fee. The toxic-spread blocker above
+            # still applies; the taker slippage cap does not (a resting limit has no slippage).
+            offset = max(0.0, sig.limit_offset_frac)
+            limit_price = ref_price * (1.0 - sig.side * offset)
+            if sig.side > 0:
+                if float(bar["low"]) > limit_price:
+                    reject("maker_no_fill")
+                    return None
+            elif float(bar["high"]) < limit_price:
+                reject("maker_no_fill")
+                return None
+            entry_price = limit_price
+            notional = sizing.qty * entry_price
+            entry_fee = self.fees.fee(sym_in.symbol, notional, maker=True)
+            entry_slip_cost = 0.0
+        else:
+            bar_notional = float(bar["volume"]) * ref_price
+            slip = self.slippage.slippage_frac(
+                spread_bps=spread_bps, notional=sizing.notional, bar_notional=bar_notional
+            )
+            if slip > self.cfg.execution.max_slippage_frac:
+                reject(f"slippage_estimate_exceeds_cap({slip:.4f})")
+                return None
 
-        # Fill at the next-bar open with adverse slippage; entry is taker.
-        entry_side = BUY if sig.side > 0 else SELL
-        entry_price = self.slippage.fill_price(ref_price, entry_side, slip)
-        notional = sizing.qty * entry_price
-        entry_fee = self.fees.fee(sym_in.symbol, notional, maker=False)
-        entry_slip_cost = abs(entry_price - ref_price) * sizing.qty
+            # Fill at the next-bar open with adverse slippage; entry is taker.
+            entry_side = BUY if sig.side > 0 else SELL
+            entry_price = self.slippage.fill_price(ref_price, entry_side, slip)
+            notional = sizing.qty * entry_price
+            entry_fee = self.fees.fee(sym_in.symbol, notional, maker=False)
+            entry_slip_cost = abs(entry_price - ref_price) * sizing.qty
 
         stop_price = entry_price * (1.0 - sig.side * sig.stop_frac)
         tp_price = entry_price * (1.0 + sig.side * sig.tp_frac)
@@ -445,6 +467,7 @@ class BacktestEngine:
             next_funding_idx=self._first_funding_after(sym_in, decision_ts),
             trail_dist=sig.trail_frac * entry_price,
             peak=entry_price,
+            maker=sig.maker,
         )
 
     # -- exit ------------------------------------------------------------ #
@@ -462,7 +485,9 @@ class BacktestEngine:
                 reason = "trailing_stop" if stop_level > pos.stop_price else "stop"
                 return self._close(pos, bar, reason, price=stop_level)
             if high >= pos.tp_price:
-                return self._close(pos, bar, "take_profit", price=pos.tp_price)
+                # A take-profit is a resting limit: for a maker position it fills as a maker
+                # (no slippage, maker fee); risk exits below stay taker (you cross to get out).
+                return self._close(pos, bar, "take_profit", price=pos.tp_price, maker=pos.maker)
         else:
             stop_level = pos.stop_price
             if pos.trail_dist > 0:
@@ -471,7 +496,7 @@ class BacktestEngine:
                 reason = "trailing_stop" if stop_level < pos.stop_price else "stop"
                 return self._close(pos, bar, reason, price=stop_level)
             if low <= pos.tp_price:
-                return self._close(pos, bar, "take_profit", price=pos.tp_price)
+                return self._close(pos, bar, "take_profit", price=pos.tp_price, maker=pos.maker)
         if ts >= pos.hold_until_ts:
             return self._close(pos, bar, "time_stop", price=float(bar["close"]))
         if final:
@@ -482,24 +507,32 @@ class BacktestEngine:
         return None
 
     def _close(
-        self, pos: _Open, bar: dict, reason: str, price: float | None = None
+        self, pos: _Open, bar: dict, reason: str, price: float | None = None, *, maker: bool = False
     ) -> Trade:
         ref_price = float(bar["close"]) if price is None else price
         exit_ts = int(bar["ts"])
-        # Closing is taker on the opposite side (adverse slippage).
-        exit_side = SELL if pos.side > 0 else BUY
-        spread_bps = 2.0  # modelled exit spread floor; refined via min_half_spread_frac
-        # Use the REAL exit-bar notional for the impact term (mirrors the entry side). A hardcoded
-        # bar_notional=1.0 made the impact term ~`notional`× too large on exits, so any non-zero
-        # impact_coeff would blow up exit fills and corrupt every expectancy/promotion number.
-        bar_notional = float(bar.get("volume", 0.0) or 0.0) * ref_price
-        slip = self.slippage.slippage_frac(
-            spread_bps=spread_bps, notional=pos.notional, bar_notional=bar_notional or pos.notional
-        )
-        exit_price = self.slippage.fill_price(ref_price, exit_side, slip)
-        exit_notional = pos.qty * exit_price
-        exit_fee = self.fees.fee(pos.symbol, exit_notional, maker=False)
-        exit_slip_cost = abs(exit_price - ref_price) * pos.qty
+        if maker:
+            # Maker exit (take-profit limit that price came into): fill exact at the limit, no
+            # slippage, maker fee. Only the take-profit of a maker position takes this path.
+            exit_price = ref_price
+            exit_fee = self.fees.fee(pos.symbol, pos.qty * exit_price, maker=True)
+            exit_slip_cost = 0.0
+        else:
+            # Closing is taker on the opposite side (adverse slippage).
+            exit_side = SELL if pos.side > 0 else BUY
+            spread_bps = 2.0  # modelled exit spread floor; refined via min_half_spread_frac
+            # Use the REAL exit-bar notional for the impact term (mirrors the entry side). A
+            # hardcoded bar_notional=1.0 made the impact term ~`notional`× too large on exits, so
+            # any non-zero impact_coeff would blow up exit fills and corrupt every expectancy.
+            bar_notional = float(bar.get("volume", 0.0) or 0.0) * ref_price
+            slip = self.slippage.slippage_frac(
+                spread_bps=spread_bps,
+                notional=pos.notional,
+                bar_notional=bar_notional or pos.notional,
+            )
+            exit_price = self.slippage.fill_price(ref_price, exit_side, slip)
+            exit_fee = self.fees.fee(pos.symbol, pos.qty * exit_price, maker=False)
+            exit_slip_cost = abs(exit_price - ref_price) * pos.qty
 
         gross = pos.side * (exit_price - pos.entry_price) * pos.qty
         total_fee = pos.entry_fee + exit_fee
