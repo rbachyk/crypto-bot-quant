@@ -24,6 +24,7 @@ from src.data.source import DeterministicSource
 from src.data.store import SeriesStore
 from src.exchange.metadata import load_metadata_config
 from src.execution.live_venue import CcxtLiveVenue
+from src.execution.venue import SimulatedVenue, VenuePosition
 from src.killswitch import KillSwitch
 from src.live.loop import LiveLoop, ReplayFeed
 from src.paper.lake import build_lake_paper_inputs
@@ -117,6 +118,42 @@ def test_live_loop_halts_on_kill_switch(tmp_path) -> None:
 def test_live_loop_rejects_bad_mode() -> None:
     with pytest.raises(ValueError, match="mode must be one of"):
         LiveLoop(mode="bogus")
+
+
+def test_time_stop_flattens_only_aged_positions() -> None:
+    """The bot-side time-stop flattens an owned position once it reaches its hold_bars horizon and
+    leaves younger ones alone (the exchange can't express 'close after N bars')."""
+    settings = _testnet_settings()
+    venue = SimulatedVenue(load_metadata_config())
+    loop = LiveLoop(mode="testnet", venue=venue, settings=settings)
+    session = loop.engine.new_session("t")
+    iv = timeframe_ms(TF)
+    for sym in ("A/USDT:USDT", "B/USDT:USDT"):
+        loop.venue.positions[sym] = VenuePosition(symbol=sym, side=1, qty=1.0, entry_price=100.0)
+    loop._bar_iv = iv
+    loop._open_age["A/USDT:USDT"] = (0, 2)  # entered at ts 0, hold 2 bars → aged at ts 2·iv
+    loop._open_age["B/USDT:USDT"] = (0, 10)  # hold 10 bars → still young
+
+    loop._apply_time_stops(2 * iv, session)
+    assert "A/USDT:USDT" not in loop.venue.positions  # time-stopped
+    assert "A/USDT:USDT" not in loop._open_age  # and stopped tracking it
+    assert "B/USDT:USDT" in loop.venue.positions  # younger position untouched
+    assert any(e.get("phase") == "time_stop" for e in session.reconciliation_events)
+
+
+def test_time_stop_is_a_noop_until_bar_interval_known() -> None:
+    """Before the bar interval is inferred (tick 0) the time-stop does nothing — it can't compute
+    an age yet, so it never closes a fresh position prematurely."""
+    settings = _testnet_settings()
+    venue = SimulatedVenue(load_metadata_config())
+    loop = LiveLoop(mode="testnet", venue=venue, settings=settings)
+    session = loop.engine.new_session("t")
+    loop.venue.positions["A/USDT:USDT"] = VenuePosition(
+        symbol="A/USDT:USDT", side=1, qty=1.0, entry_price=100.0
+    )
+    loop._open_age["A/USDT:USDT"] = (0, 1)
+    loop._apply_time_stops(10 * timeframe_ms(TF), session)  # _bar_iv still 0
+    assert "A/USDT:USDT" in loop.venue.positions  # not closed (interval unknown)
 
 
 class FakeCcxt:

@@ -186,6 +186,14 @@ class LiveLoop:
             )
         # Consecutive-absence counter for debounced retirement of exchange-side-closed positions.
         self._absent_ticks: dict[str, int] = {}
+        # Active time-stop (hold_bars) bookkeeping: the exchange holds SL/TP/trailing natively but
+        # cannot do "close after N bars", so the bot tracks each owned position's entry time + hold
+        # horizon and flattens it once aged (parity with the backtest time-stop). Real venues only —
+        # in replay paper the engine closes positions itself (exit_move_frac). ``_bar_iv`` is the
+        # bar interval, inferred from the spacing of the feed's decision timestamps.
+        self._open_age: dict[str, tuple[int, int]] = {}  # symbol -> (entry_decision_ts, hold_bars)
+        self._bar_iv: int = 0
+        self._prev_decision_ts: int | None = None
 
     def _reconcile_live(self, session: PaperSession) -> bool:
         """Per-tick reconciliation against the REAL exchange book (real venues only, Section 7).
@@ -279,6 +287,37 @@ class LiveLoop:
         Bybit **demo** run is tagged ``demo:`` and never mixed with testnet/live history."""
         return "paper" if self.mode == "paper" else self.settings.exchange_env
 
+    def _record_open_ages(self, decision_ts: int, group: list[PaperCandidateInput]) -> None:
+        """Remember the entry time + hold horizon of any position this tick just opened, so the
+        time-stop can flatten it once aged. Keyed by symbol (max one owned position per symbol)."""
+        if self.mode == "paper":
+            return
+        for pin in group:
+            sym = pin.candidate.symbol
+            hold_bars = int(getattr(pin.candidate, "hold_bars", 0) or 0)
+            if hold_bars > 0 and sym in self.venue.positions and sym not in self._open_age:
+                self._open_age[sym] = (decision_ts, hold_bars)
+
+    def _apply_time_stops(self, decision_ts: int, session: PaperSession) -> None:
+        """Flatten owned positions that have reached their hold_bars horizon (bot-side time-stop).
+
+        The exchange-resident stop/TP/trailing keep protecting the position regardless; this only
+        adds the time-based exit the exchange can't express. No-op until the bar interval is known
+        and only on real venues (replay paper exits via the engine's own model)."""
+        if self.mode == "paper" or self._bar_iv <= 0:
+            return
+        for sym in [s for s in self._open_age if s not in self.venue.positions]:
+            self._open_age.pop(sym, None)  # already closed exchange-side
+        for sym, (entry_ts, hold_bars) in list(self._open_age.items()):
+            if decision_ts - entry_ts >= hold_bars * self._bar_iv:
+                closed = self.venue.close_position(sym)
+                self._open_age.pop(sym, None)
+                if closed:
+                    _log.info("live_time_stop", symbol=sym, held_bars=hold_bars, ts=decision_ts)
+                    session.reconciliation_events.append(
+                        {"phase": "time_stop", "symbol": sym, "decision_ts": decision_ts}
+                    )
+
     def run(
         self,
         feed: MarketFeed,
@@ -319,9 +358,19 @@ class LiveLoop:
             if self.data_manager is not None and self.data_manager.poll(decision_ts).exchange_halt:
                 result.halted = True
                 break
+            # Infer the bar interval from the decision-time spacing (min positive gap, like the
+            # backtest grid), then flatten any position that has reached its hold_bars horizon
+            # BEFORE considering new entries this bar (exit-then-enter, matching the backtest).
+            if self._prev_decision_ts is not None:
+                gap = decision_ts - self._prev_decision_ts
+                if gap > 0 and (self._bar_iv <= 0 or gap < self._bar_iv):
+                    self._bar_iv = gap
+            self._prev_decision_ts = decision_ts
+            self._apply_time_stops(decision_ts, session)
             before_exec = session.executed_count
             before_rej = session.rejected_count
             self.engine.process_candidates(group, session)
+            self._record_open_ages(decision_ts, group)
             # Reconcile every tick (Section 7); a foreign order/position halts the loop. A real
             # venue (testnet/demo/live) re-pulls the ACTUAL exchange book (detecting foreign items
             # and closes that happened exchange-side); offline paper uses the engine's own mirror.

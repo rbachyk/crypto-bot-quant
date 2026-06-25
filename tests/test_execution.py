@@ -142,6 +142,22 @@ def test_builder_rejects_unapproved_decision() -> None:
 # --------------------------------------------------------------------------- #
 # Atomic bracket / trailing                                                    #
 # --------------------------------------------------------------------------- #
+def test_close_position_flattens_one_position_and_its_legs() -> None:
+    """close_position retires ONE owned position + its protective orders (the bot-side time-stop
+    path) without the emergency_close_all confirmation, and is a no-op for an absent symbol."""
+    s = _settings()
+    venue = SimulatedVenue(_meta())
+    cand = _cand(tp_frac=0.02)
+    res = _engine(s, venue).execute(cand, _rm().evaluate(cand, _flat()), realized_slippage_frac=0.0)
+    assert res.placed and cand.symbol in venue.positions
+    assert venue.open_orders  # protective legs resting
+
+    assert venue.close_position(cand.symbol) is True
+    assert cand.symbol not in venue.positions
+    assert not any(o.symbol == cand.symbol for o in venue.open_orders.values())
+    assert venue.close_position(cand.symbol) is False  # already gone
+
+
 def test_atomic_exchange_side_sl_tp() -> None:
     s = _settings()
     venue = SimulatedVenue(_meta())

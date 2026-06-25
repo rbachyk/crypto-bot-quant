@@ -389,6 +389,21 @@ class CcxtLiveVenue:
             )
         return out
 
+    def close_position(self, symbol: str) -> bool:
+        """Reduce-only market close of ONE owned position (bot-side time-stop) + cancel its legs."""
+        pos = self.positions.get(symbol)
+        if pos is None:
+            return False
+        close_side = "sell" if pos.side > 0 else "buy"
+        with contextlib.suppress(Exception):
+            self._ex.create_order(symbol, "market", close_side, pos.qty, None, {"reduceOnly": True})
+        for cid, order in [(c, o) for c, o in self.open_orders.items() if o.symbol == symbol]:
+            with contextlib.suppress(Exception):
+                self._ex.cancel_order(cid, order.symbol, {"clientOrderId": cid})
+            self.open_orders.pop(cid, None)
+        self.positions.pop(symbol, None)
+        return True
+
     def emergency_close_all(self, *, confirm: bool) -> int:
         if not confirm:
             raise PermissionError("emergency_close_all requires explicit confirmation (Section 7)")

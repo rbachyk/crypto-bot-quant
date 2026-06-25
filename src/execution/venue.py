@@ -111,6 +111,8 @@ class Venue(Protocol):
 
     def order_status(self, client_id: str) -> str: ...
 
+    def close_position(self, symbol: str) -> bool: ...
+
     def emergency_close_all(self, *, confirm: bool) -> int: ...
 
     def snapshot(self) -> dict[str, object]: ...
@@ -266,6 +268,19 @@ class SimulatedVenue:
         self.positions[symbol] = VenuePosition(
             symbol=symbol, side=side, qty=qty, entry_price=price, owned=False
         )
+
+    def close_position(self, symbol: str) -> bool:
+        """Flatten ONE owned position (e.g. the bot-side time-stop) + drop its protective legs.
+
+        Unlike :meth:`emergency_close_all` this is a routine single-symbol close, so it needs no
+        confirmation. Returns True if a position existed. The simulated venue just retires the
+        mirror entry (and its orders); a real venue sends a reduce-only market close."""
+        pos = self.positions.pop(symbol, None)
+        if pos is None:
+            return False
+        for cid in [c for c, o in self.open_orders.items() if o.symbol == symbol]:
+            self.open_orders.pop(cid, None)
+        return True
 
     # -- emergency close (Section 7/35) ---------------------------------- #
     def emergency_close_all(self, *, confirm: bool) -> int:
