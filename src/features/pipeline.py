@@ -270,8 +270,10 @@ def compute_features(symbol: str, reader: FeatureDataReader, cfg: FeatureConfig)
         decision_ts = ts[k] + iv  # close time of bar k = decision time
 
         # --- Market features (bars 0..k) ---
-        ret_1 = close[k] / close[k - 1] - 1.0
-        ret_short = close[k] / close[k - short] - 1.0
+        # Guard the divisor (a zero/again-listed prior close would yield inf/nan that then
+        # propagates into the regime detector + strategies + ML), mirroring `logret` above.
+        ret_1 = close[k] / close[k - 1] - 1.0 if close[k - 1] > 0 else 0.0
+        ret_short = close[k] / close[k - short] - 1.0 if close[k - short] > 0 else 0.0
         rv_short = _std(logret[k - short + 1 : k + 1])
         atr = sum(true_range[k - short + 1 : k + 1]) / short
         atr_pct = atr / close[k] if close[k] > 0 else 0.0

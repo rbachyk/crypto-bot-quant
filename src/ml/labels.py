@@ -166,11 +166,15 @@ def build_reference_dataset(
 def train_test_split(
     samples: list[LabeledSample], test_fraction: float = 0.25, seed: int = 42
 ) -> tuple[list[LabeledSample], list[LabeledSample]]:
-    rng = random.Random(seed)
-    shuffled = list(samples)
-    rng.shuffle(shuffled)
-    split = max(1, int(len(shuffled) * (1.0 - test_fraction)))
-    return shuffled[:split], shuffled[split:]
+    """CHRONOLOGICAL split: train on the earlier ``1-test_fraction``, test on the most-recent
+    ``test_fraction``. NEVER a random shuffle — a random split leaks future trade outcomes into
+    training (temporal leakage that inflates the meta-labeler's apparent skill once real paper
+    trades feed it). Real samples arrive in time order; the synthetic reference dataset is
+    pre-shuffled for class balance, so a front/back split there is still balanced. ``seed`` is
+    accepted for call-site compatibility but unused (the split is deterministic)."""
+    _ = seed
+    split = max(1, int(len(samples) * (1.0 - test_fraction)))
+    return list(samples[:split]), list(samples[split:])
 
 
 def count_positives(samples: list[LabeledSample]) -> int:

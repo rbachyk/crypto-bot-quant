@@ -320,8 +320,28 @@ class PaperTradingEngine:
             free_margin=getattr(self, "_free_margin", None),
         )
 
-        # Setup quality gate (used downstream by ranker; score persisted in session).
-        self._scorer.score(candidate)
+        # Setup-quality HARD BLOCKERS (Section 15): a no-trade regime, toxic spread, negative
+        # expected-value-after-costs, stale data, halted symbol, etc. can NEVER be bypassed.
+        # Previously the score was computed and DISCARDED, so these blockers never ran in the
+        # paper/live loop (this engine backs both). The score threshold + ranked selection remain
+        # a separate (frequency-changing) policy; only the safety blockers are enforced here.
+        score = self._scorer.score(candidate)
+        if score.blockers:
+            reject_reason = f"setup_blocked({','.join(score.blockers)})"
+            session.rejected.append(
+                RejectedPaperCandidate(
+                    symbol=candidate.symbol,
+                    strategy=candidate.strategy,
+                    side=candidate.side,
+                    regime=candidate.regime,
+                    decision_ts=candidate.decision_ts,
+                    reason=reject_reason,
+                )
+            )
+            session.decision_logs.append(
+                self._decision_log(candidate, "reject", reject_reason, False, ks_state)
+            )
+            return
 
         # Risk approval.
         decision = self._risk.evaluate(candidate, account)
