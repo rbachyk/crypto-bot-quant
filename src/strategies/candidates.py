@@ -168,6 +168,10 @@ class BasisReversionStrategy(_BaseCandidate):
         cap = self.params.extra.get("premium_cap", 0.0)
         if cap > 0 and mag > cap:
             return None
+        # NOTE: a funding-confirmation filter (fade a cheap perp only when funding is negative — a
+        # crowded short / squeeze candidate) was TESTED and REJECTED. It lifted every in-sample
+        # metric (deflated 0.555→0.61) but COLLAPSED the locked hold-out (PF 1.07→0.82): the +0.22R
+        # aligned-long edge is a training-period artifact, not OOS. Classic overfit — not adopted.
         if premium >= threshold:
             return self._sided(-1, f"premium {premium:+.5f} >= {threshold} ⇒ fade short", row)
         return self._sided(+1, f"premium {premium:+.5f} <= -{threshold} ⇒ fade long", row)
