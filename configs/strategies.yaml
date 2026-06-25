@@ -21,7 +21,7 @@
 version: 1
 
 strategies:
-  strategy_version: strat_0005  # _0004: momentum R-target + tighter stops; _0005: per-strategy risk_scale (lead_lag 0.4×)
+  strategy_version: strat_0006  # _0005: risk_scale; _0006: basis premium-reversion exit OFF (A/B: it was a net negative)
 
   # Long/short expectancy is computed separately for every candidate; a side whose
   # out-of-sample expectancy_r is at or below this floor is DISABLED before
@@ -99,12 +99,15 @@ strategies:
       # (high win-rate / low R). Reversion is measured net of fees+slippage+funding.
       exit_profile: mean_reversion
       params:
+        # Entry threshold kept at 0.0015 for ROBUSTNESS (2470 trades, 4/5 folds pass). Raising it to
+        # 0.0025 lifts per-trade quality (train mean-fold +0.055→+0.064) BUT cuts trades ~5× and the
+        # fold-pass count goes fragile (folds dip under the 0.03 floor, flickering 3–4/5) while only
+        # improving the noisy hold-out — not worth trading robustness for. Documented, not taken.
         premium_threshold: 0.0015     # |premium| (mark-vs-index) must exceed this to fire
-        # Early exit (manage hook): close once the faded premium has reverted to this fraction of
-        # the entry threshold (0.25 → exit when ~75% of the dislocation is gone; 0 → zero-cross).
-        # This is the family's REAL exit — it fires before the ATR take-profit / time-stop so a
-        # completed reversion is booked instead of sitting on the book and re-widening.
-        exit_premium_frac: 0.25
+        # Premium-reversion early exit DISABLED (sentinel < 0; see BasisReversionStrategy.manage).
+        # Controlled A/B on this snapshot: it booked ~-0.11R small losses (premium reverted but
+        # price hadn't paid) — holding to TP/stop/time did better. The hook stays opt-in for later.
+        exit_premium_frac: -1.0
         stop_frac: 0.018              # SL FLOOR (mean-reversion can run before reverting)
         tp_frac: 0.006                # near-TP FLOOR (capture the reversion)
         hold_bars: 6

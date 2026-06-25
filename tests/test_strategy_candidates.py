@@ -28,6 +28,15 @@ def _pos(side: int) -> PositionView:
     return PositionView(side=side, entry_price=100.0, bars_held=1, regime="R1")
 
 
+def _basis_with_exit_frac(exit_frac: float):
+    """basis with the premium-reversion exit ENABLED at a given band (config ships it disabled)."""
+    scfg = load_strategies_config()
+    cand = scfg.candidate("basis_reversion")
+    assert cand is not None
+    extra = {**cand.params.extra, "exit_premium_frac": exit_frac}
+    return cand, build_strategy(cand, scfg.strategy_version, replace(cand.params, extra=extra))
+
+
 def test_momentum_tp_r_mult_sets_a_reachable_target_in_r() -> None:
     """When tp_r_mult > 0 the TP sits at exactly that many R (× the effective stop distance),
     overriding the unreachable momentum tp_frac — so the take-profit auto-scales with the stop."""
@@ -49,11 +58,11 @@ def test_momentum_tp_r_mult_sets_a_reachable_target_in_r() -> None:
 
 
 def test_basis_manage_exits_when_premium_reverts() -> None:
-    """The manage hook closes a faded position once the premium has reverted to the exit band
-    (exit_premium_frac × threshold) — the family's real exit, fired before the ATR TP/time-stop."""
-    cand, strat = _cand("basis_reversion")
+    """The manage hook (when ENABLED, exit_premium_frac ≥ 0) closes a faded position once the
+    premium has reverted to the exit band — the family's real exit before the ATR TP/time-stop."""
+    cand, strat = _basis_with_exit_frac(0.25)
     thr = cand.params.extra["premium_threshold"]
-    exit_level = cand.params.extra["exit_premium_frac"] * thr
+    exit_level = 0.25 * thr
 
     # SHORT faded a rich perp (premium ≥ +thr): still rich ⇒ hold; reverted under the band ⇒ exit.
     assert strat.manage({"premium": thr, "atr_pct": 0.01}, _pos(-1)) is None
@@ -65,10 +74,19 @@ def test_basis_manage_exits_when_premium_reverts() -> None:
     assert strat.manage({"premium": -exit_level + 1e-6, "atr_pct": 0.01}, _pos(1)) is not None
 
 
-def test_basis_manage_exit_offset_tracks_maker_config() -> None:
-    """The manage exit posts at the same volatility-scaled passive offset as the maker entry
-    (limit_offset_atr_mult × atr_pct), so the exit limit mirrors the entry's execution style."""
+def test_basis_manage_exit_disabled_by_negative_sentinel() -> None:
+    """A negative exit_premium_frac (the shipped config default) DISABLES the premium-reversion
+    exit — manage never fires, so positions hold to TP/stop/time (the real-data A/B winner)."""
     cand, strat = _cand("basis_reversion")
+    assert cand.params.extra["exit_premium_frac"] < 0  # shipped disabled on this snapshot
+    assert strat.manage({"premium": 0.0, "atr_pct": 0.02}, _pos(-1)) is None
+    assert strat.manage({"premium": 0.0, "atr_pct": 0.02}, _pos(1)) is None
+
+
+def test_basis_manage_exit_offset_tracks_maker_config() -> None:
+    """When enabled, the manage exit posts at the same volatility-scaled passive offset as the
+    maker entry (limit_offset_atr_mult × atr_pct), so the exit limit mirrors the entry style."""
+    cand, strat = _basis_with_exit_frac(0.25)
     dec = strat.manage({"premium": 0.0, "atr_pct": 0.02}, _pos(-1))  # 0 premium ⇒ fully reverted
     assert dec is not None
     assert dec.limit_offset_frac == cand.params.limit_offset_atr_mult * 0.02

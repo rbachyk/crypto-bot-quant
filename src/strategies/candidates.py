@@ -173,9 +173,17 @@ class BasisReversionStrategy(_BaseCandidate):
         closes once it has risen to ``−exit_level``. ``exit_premium_frac`` 0 ⇒ exit at the
         zero-cross. The exit is posted maker (passive limit, taker-fallback) at the configured
         offset, mirroring the entry."""
+        exit_frac = self.params.extra.get("exit_premium_frac", 0.0)
+        if exit_frac < 0:
+            # Premium-reversion exit DISABLED (sentinel < 0). A controlled A/B on the 20-sym 4h lake
+            # showed it is a net negative here: premium reverting ≠ price profit, so it booked small
+            # losses (~-0.11R) on trades that had not yet reached their take-profit — holding to
+            # TP/stop/time did better (exp +0.038→+0.044, all 5 folds positive). Kept as an opt-in
+            # knob (the hook + mechanism are sound) but off for basis on this snapshot.
+            return None
         premium = float(row.get("premium", 0.0))
         threshold = self.params.extra["premium_threshold"]
-        exit_level = self.params.extra.get("exit_premium_frac", 0.0) * threshold
+        exit_level = exit_frac * threshold
         reverted = (
             (position.side < 0 and premium <= exit_level)
             or (position.side > 0 and premium >= -exit_level)
