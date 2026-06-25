@@ -21,7 +21,7 @@
 version: 1
 
 strategies:
-  strategy_version: strat_0004  # _0003: basis manage() exit; _0004: momentum R-target (1.3R) + tighter stops
+  strategy_version: strat_0005  # _0004: momentum R-target + tighter stops; _0005: per-strategy risk_scale (lead_lag 0.4×)
 
   # Long/short expectancy is computed separately for every candidate; a side whose
   # out-of-sample expectancy_r is at or below this floor is DISABLED before
@@ -45,6 +45,10 @@ strategies:
       exit_profile: momentum
       params:
         leader_ret_threshold: 0.0025  # leader's last-bar return must exceed this
+        # Position-size scale: this edge is real OOS (hold-out +0.098R, PF 1.19) but HOT — at the
+        # account standard (0.5%/trade) its drawdown is ~43%, over the 25% gate. Sized to 0.4× the
+        # standard targets ~20% max drawdown (dd is ~linear in size; expectancy_r/PF unchanged).
+        risk_scale: 0.4
         stop_frac: 0.012              # initial SL FLOOR (fraction of price) — anchors sizing
         tp_frac: 0.50                 # ~no fixed TP (unreachable); the trailing stop is the exit
         hold_bars: 24                 # generous time-stop BACKSTOP; the trail is the real exit

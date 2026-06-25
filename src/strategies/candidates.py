@@ -36,6 +36,11 @@ class _BaseCandidate:
         return self.candidate.id
 
     @property
+    def risk_scale(self) -> float:
+        """Per-strategy position-size scale (≤ 1.0) read by the engine's sizing (Section 17)."""
+        return self.params.risk_scale
+
+    @property
     def hypothesis(self) -> StrategyHypothesis:
         """Every candidate declares its full Section 13 hypothesis before it trades."""
         raise NotImplementedError

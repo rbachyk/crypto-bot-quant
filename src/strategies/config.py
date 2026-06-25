@@ -61,6 +61,11 @@ class StrategyParams:
     # market entry, unchanged) so momentum families that need immediate fills are not starved.
     maker_entry: bool = False
     limit_offset_atr_mult: float = 0.0
+    # Per-strategy position-size scale (multiplier on the account risk_pct, clamped to (0,1]). A
+    # strategy whose edge is real but whose drawdown is too large at the account standard is sized
+    # DOWN here so its drawdown fits the risk envelope — expectancy_r/PF are size-invariant, only
+    # the equity drawdown scales. ≤ 1 so it can only reduce risk, never loosen the control.
+    risk_scale: float = 1.0
     extra: dict[str, float] = field(default_factory=dict)
 
     def with_sides(self, *, allow_long: bool, allow_short: bool) -> StrategyParams:
@@ -113,7 +118,7 @@ class StrategiesConfig:
 _RESERVED = {
     "stop_frac", "tp_frac", "hold_bars", "allow_long", "allow_short",
     "atr_stop_mult", "atr_tp_mult", "atr_trail_mult", "block_no_trade_regimes", "regimes",
-    "maker_entry", "limit_offset_atr_mult", "tp_r_mult",
+    "maker_entry", "limit_offset_atr_mult", "tp_r_mult", "risk_scale",
 }
 
 
@@ -133,6 +138,7 @@ def _parse_params(raw: dict) -> StrategyParams:
         regimes=tuple(str(r) for r in raw.get("regimes", ())),
         maker_entry=bool(raw.get("maker_entry", False)),
         limit_offset_atr_mult=float(raw.get("limit_offset_atr_mult", 0.0)),
+        risk_scale=float(raw.get("risk_scale", 1.0)),
         extra=extra,
     )
 

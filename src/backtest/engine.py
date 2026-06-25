@@ -209,6 +209,9 @@ class BacktestEngine:
         # (per-symbol) or ``manage_portfolio`` (cross-asset) gets an early thesis-driven exit
         # consulted each bar after stop/take-profit. Absent ⇒ engine-only exits (unchanged).
         self._has_manage = hasattr(strategy, "manage_portfolio" if self.is_portfolio else "manage")
+        # Per-strategy size scale (≤ 1.0): a hot edge sized down so its drawdown fits the envelope.
+        # Duck-typed (default 1.0) so the reference strategy and any plain Strategy are unaffected.
+        self._risk_scale = float(getattr(strategy, "risk_scale", 1.0))
         self.fees = FeeModel(meta, cfg.costs)
         self.slippage = SlippageModel(cfg.costs)
         self.funding = FundingModel(cfg.costs)
@@ -428,7 +431,11 @@ class BacktestEngine:
         # Risk sizing (Section 17). Entry reference is THIS bar's open.
         ref_price = float(bar["open"])
         sizing = self.risk.size(
-            sym_in.symbol, equity=equity, entry_price=ref_price, stop_frac=sig.stop_frac
+            sym_in.symbol,
+            equity=equity,
+            entry_price=ref_price,
+            stop_frac=sig.stop_frac,
+            risk_scale=self._risk_scale,
         )
         if not sizing.approved:
             reject(sizing.reason)

@@ -129,6 +129,22 @@ def test_risk_sizing_follows_section17_identity(cfg, meta):
     assert r.risk_amount == pytest.approx(100_000.0 * cfg.account.risk_pct, rel=0.05)
 
 
+def test_risk_scale_reduces_size_proportionally_and_clamps_above_one(cfg, meta):
+    """A per-strategy risk_scale < 1 cuts qty/risk_amount proportionally (drawdown control without
+    touching expectancy_r); a scale > 1 is clamped to 1.0 so a strategy can never bet ABOVE the
+    account per-trade risk standard."""
+    risk = RiskSimulator(cfg.account, meta)
+    eq, px, sf = 100_000.0, 100.0, 0.02
+    full = risk.size(REF_SYMBOL, equity=eq, entry_price=px, stop_frac=sf)
+    half = risk.size(REF_SYMBOL, equity=eq, entry_price=px, stop_frac=sf, risk_scale=0.5)
+    assert half.approved and full.approved
+    assert half.qty == pytest.approx(full.qty * 0.5, rel=0.02)
+    assert half.risk_amount == pytest.approx(full.risk_amount * 0.5, rel=0.02)
+    # scale > 1 cannot increase risk past the standard.
+    over = risk.size(REF_SYMBOL, equity=eq, entry_price=px, stop_frac=sf, risk_scale=3.0)
+    assert over.risk_amount == pytest.approx(full.risk_amount, rel=0.02)
+
+
 def test_risk_rejects_invalid_inputs(cfg, meta):
     risk = RiskSimulator(cfg.account, meta)
     assert not risk.size(REF_SYMBOL, equity=0.0, entry_price=100.0, stop_frac=0.02).approved

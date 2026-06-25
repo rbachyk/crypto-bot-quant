@@ -46,12 +46,24 @@ class RiskSimulator:
         self.meta = meta
 
     def size(
-        self, symbol: str, *, equity: float, entry_price: float, stop_frac: float
+        self,
+        symbol: str,
+        *,
+        equity: float,
+        entry_price: float,
+        stop_frac: float,
+        risk_scale: float = 1.0,
     ) -> SizingResult:
+        """``risk_scale`` (per-strategy, default 1.0) scales the per-trade risk DOWN for a
+        strategy that is too volatile at the account standard — a hot momentum edge can be sized
+        at e.g. 0.4× so its drawdown fits the risk envelope without changing its expectancy_r
+        (R is sizing-invariant). Clamped to (0, 1]: a strategy can scale down, never UP past the
+        account ``risk_pct`` (so it can never loosen the per-trade risk control)."""
         if equity <= 0:
             return SizingResult(False, reason="non_positive_equity")
         if stop_frac <= 0 or entry_price <= 0:
             return SizingResult(False, reason="invalid_stop_or_price")
+        risk_scale = min(1.0, max(0.0, risk_scale))
 
         spec = self.meta.spec(symbol)
         fields = spec.fields if spec is not None else {}
@@ -64,8 +76,8 @@ class RiskSimulator:
             float(meta_leverage or self.account.max_leverage),
         )
 
-        # Section 17 per-trade sizing: size = (equity × risk_pct) / |entry − stop|.
-        risk_amount = equity * self.account.risk_pct
+        # Section 17 per-trade sizing: size = (equity × risk_pct × risk_scale) / |entry − stop|.
+        risk_amount = equity * self.account.risk_pct * risk_scale
         stop_distance = entry_price * stop_frac
         qty = risk_amount / stop_distance
 
