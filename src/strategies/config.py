@@ -40,6 +40,12 @@ class StrategyParams:
     # Trailing stop at atr_trail_mult × atr_pct behind the best favorable excursion (0 = off).
     # Lets a momentum winner RUN and exit on reversal instead of being amputated at the time-stop.
     atr_trail_mult: float = 0.0
+    # Reachable take-profit at tp_r_mult × the EFFECTIVE stop distance (i.e. tp_r_mult R), set when
+    # > 0 and overriding the fixed/ATR tp geometry. The MFE diagnostic showed momentum winners reach
+    # ~1.6R but the loose trail books only ~0.9R (≈46% given back); a target at e.g. 1.3R captures
+    # that crowd while the trailing stop still protects trades that peak below it (target + trail —
+    # whichever fires first). Always expressed in R so it auto-scales if the stop is retuned.
+    tp_r_mult: float = 0.0
     # Regime gating (Section 11). Empty + flag off → no gating (legacy behavior: trade every bar).
     # ``block_no_trade_regimes`` excludes the live safety regimes (R4 chop / R7 toxic / R8 unsafe)
     # — defensible, not edge-fitted. ``regimes`` is an explicit allow-list (trade ONLY these): the
@@ -107,7 +113,7 @@ class StrategiesConfig:
 _RESERVED = {
     "stop_frac", "tp_frac", "hold_bars", "allow_long", "allow_short",
     "atr_stop_mult", "atr_tp_mult", "atr_trail_mult", "block_no_trade_regimes", "regimes",
-    "maker_entry", "limit_offset_atr_mult",
+    "maker_entry", "limit_offset_atr_mult", "tp_r_mult",
 }
 
 
@@ -122,6 +128,7 @@ def _parse_params(raw: dict) -> StrategyParams:
         atr_stop_mult=float(raw.get("atr_stop_mult", 0.0)),
         atr_tp_mult=float(raw.get("atr_tp_mult", 0.0)),
         atr_trail_mult=float(raw.get("atr_trail_mult", 0.0)),
+        tp_r_mult=float(raw.get("tp_r_mult", 0.0)),
         block_no_trade_regimes=bool(raw.get("block_no_trade_regimes", False)),
         regimes=tuple(str(r) for r in raw.get("regimes", ())),
         maker_entry=bool(raw.get("maker_entry", False)),

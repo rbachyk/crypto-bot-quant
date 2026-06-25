@@ -21,7 +21,7 @@
 version: 1
 
 strategies:
-  strategy_version: strat_0003  # _0002: maker entry (basis); _0003: basis manage() premium-reversion exit
+  strategy_version: strat_0004  # _0003: basis manage() exit; _0004: momentum R-target (1.3R) + tighter stops
 
   # Long/short expectancy is computed separately for every candidate; a side whose
   # out-of-sample expectancy_r is at or below this floor is DISABLED before
@@ -51,10 +51,16 @@ strategies:
         # Volatility-scaled stop: effective SL = max(stop_frac, atr_stop_mult × atr_pct), so the
         # stop adapts to the decision timeframe (a fixed 1.2% is ~1 1h bar → noise stop-outs). On
         # the low-vol 5m fixtures atr×mult stays under the floor (unchanged); it widens on 1h/4h.
-        atr_stop_mult: 2.5
-        atr_tp_mult: 0.0              # momentum: no fixed TP
-        # Trailing stop: let the lagged move RUN and exit on reversal, instead of cutting every
-        # winner at a fixed 3-bar time-stop (which made avgWin ≈ avgLoss → no momentum edge).
+        atr_stop_mult: 1.5            # TIGHTENED 2.5→1.5: winners only dip 0.26R (MAE), losers
+                                      # sink to ~0.78R — a momentum trade that digs deep is wrong,
+                                      # so a tighter stop culls losers while keeping most winners.
+        atr_tp_mult: 0.0              # momentum: no fixed ATR TP (see tp_r_mult below)
+        # Reachable profit target: winners reach ~1.6R MFE but the loose trail booked only ~0.88R
+        # (≈46% given back). Take profit at 1.3R to capture that crowd; the trailing stop still
+        # exits trades that peak below the target ("higher exit + keep trail").
+        tp_r_mult: 1.3
+        # Trailing stop kept as the backstop: let a lagged move that DOESN'T reach the target RUN
+        # and exit on reversal instead of being cut at the time-stop.
         atr_trail_mult: 2.0
         # Regime safety gate (matches live): skip the no-trade regimes (R4 chop / R7 toxic /
         # R8 unsafe). Defensible, not edge-fitted — the edge-conditional `regimes` allow-list is
@@ -101,6 +107,10 @@ strategies:
         # Volatility-scaled geometry: SL = max(stop_frac, 2.0×atr_pct), TP = max(tp_frac,
         # 1.0×atr_pct). On 1h/4h the reversion target + stop scale with realized range instead of
         # being a fixed % that noise trips; the 5m fixtures stay under the floors (unchanged).
+        # NOTE: tightening to 1.5×atr was TESTED on the 20-sym 4h lake and HURT the locked hold-out
+        # (-0.0029 → -0.0306): stop-outs doubled, win rate fell 62.5%→59.6%. Mean-reversion needs
+        # overshoot room before the revert — the MAE separation does NOT translate to a tighter SL
+        # here. Kept at 2.0 (the momentum families, which DO want tight stops, are tightened).
         atr_stop_mult: 2.0
         atr_tp_mult: 1.0
         block_no_trade_regimes: true  # exclude no-trade regimes (R4 chop / R7 toxic / R8 unsafe)
@@ -140,10 +150,11 @@ strategies:
         stop_frac: 0.014              # initial SL FLOOR
         tp_frac: 0.50                 # ~no fixed TP (unreachable); the trailing stop is the exit
         hold_bars: 24                 # generous time-stop BACKSTOP; the trail is the real exit
-        # Volatility-scaled stop (see lead_lag_xasset): SL = max(stop_frac, 2.5×atr_pct).
-        atr_stop_mult: 2.5
-        atr_tp_mult: 0.0              # momentum: no fixed TP
-        atr_trail_mult: 2.0           # let relative-strength continuation RUN; exit on reversal
+        # TIGHTENED 2.5→1.5 (see lead_lag_xasset): winner MAE ~0.26R vs loser MAE ~0.83R.
+        atr_stop_mult: 1.5
+        atr_tp_mult: 0.0              # momentum: no fixed ATR TP (see tp_r_mult below)
+        tp_r_mult: 1.3               # reachable target at 1.3R (winners reach ~1.67R MFE; cap give-back)
+        atr_trail_mult: 2.0           # trail kept as backstop for trades that peak below the target
         block_no_trade_regimes: true  # exclude no-trade regimes (R4 chop / R7 toxic / R8 unsafe)
         allow_long: true
         allow_short: true

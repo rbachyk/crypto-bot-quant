@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
 from src.backtest.strategy import PositionView
 from src.strategies.candidates import build_strategy
 from src.strategies.config import load_strategies_config
@@ -25,6 +26,26 @@ def _cand(candidate_id: str):
 
 def _pos(side: int) -> PositionView:
     return PositionView(side=side, entry_price=100.0, bars_held=1, regime="R1")
+
+
+def test_momentum_tp_r_mult_sets_a_reachable_target_in_r() -> None:
+    """When tp_r_mult > 0 the TP sits at exactly that many R (× the effective stop distance),
+    overriding the unreachable momentum tp_frac — so the take-profit auto-scales with the stop."""
+    cand, strat = _cand("lead_lag_xasset")
+    assert cand.params.tp_r_mult > 0  # momentum now carries an R-target
+    # Build a signal via the cross-asset path (leader move triggers a follower entry).
+    leader = str(cand.fixture.values["leader"])
+    follower = "ETH/USDT:USDT"
+    thr = cand.params.extra["leader_ret_threshold"]
+    row = {"atr_pct": 0.02}
+    peers = {leader: {"ret_1": thr * 2, "atr_pct": 0.02}}
+    sig = strat.evaluate_portfolio(follower, row, peers)
+    assert sig is not None
+    # stop = max(stop_frac floor, atr_stop_mult × atr); tp = tp_r_mult × stop (exactly that many R).
+    expected_stop = max(cand.params.stop_frac, cand.params.atr_stop_mult * 0.02)
+    assert sig.stop_frac == pytest.approx(expected_stop)
+    assert sig.tp_frac == pytest.approx(cand.params.tp_r_mult * expected_stop)
+    assert sig.trail_frac > 0  # trailing stop kept as the backstop
 
 
 def test_basis_manage_exits_when_premium_reverts() -> None:
@@ -119,11 +140,13 @@ def test_regime_gate_off_by_default_blocks_no_trade_and_restricts_allowlist() ->
     assert only_trend.evaluate(trend) is not None  # R2 is
 
 
-def test_momentum_tp_stays_unreachable_when_mult_zero() -> None:
-    """Momentum candidates set atr_tp_mult=0, so the TP stays the unreachable fixed floor (the
-    time-stop is the exit) even on very volatile bars — only the stop scales."""
+def test_momentum_tp_is_a_reachable_r_multiple() -> None:
+    """Momentum candidates now carry tp_r_mult > 0, so the TP is a REACHABLE target at
+    tp_r_mult × the effective stop (that many R), overriding the legacy unreachable floor. The
+    stop still scales with ATR; both move together so the target stays a fixed R-multiple."""
     cand, strat = _cand("lead_lag_xasset")
     assert cand.params.atr_tp_mult == 0.0
+    assert cand.params.tp_r_mult > 0.0
     stop, tp = strat._exit_geometry({"atr_pct": 0.05})
-    assert tp == cand.params.tp_frac  # 0.50, NOT scaled
-    assert stop == cand.params.atr_stop_mult * 0.05  # stop scaled
+    assert stop == max(cand.params.stop_frac, cand.params.atr_stop_mult * 0.05)  # stop scaled
+    assert tp == pytest.approx(cand.params.tp_r_mult * stop)  # reachable R-target, not the floor

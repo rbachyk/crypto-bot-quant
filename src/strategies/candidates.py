@@ -93,7 +93,13 @@ class _BaseCandidate:
         never yields a degenerate sub-floor stop (which would explode position sizing)."""
         atr = float(row.get("atr_pct", 0.0) or 0.0)
         stop_frac = max(self.params.stop_frac, self.params.atr_stop_mult * atr)
-        tp_frac = max(self.params.tp_frac, self.params.atr_tp_mult * atr)
+        if self.params.tp_r_mult > 0.0:
+            # Reachable R-multiple target: TP sits tp_r_mult × the effective stop distance, so it
+            # is always exactly that many R regardless of which stop term binds (floor vs ATR).
+            # Momentum uses it to cap give-back; the trailing stop still exits trades peaking below.
+            tp_frac = self.params.tp_r_mult * stop_frac
+        else:
+            tp_frac = max(self.params.tp_frac, self.params.atr_tp_mult * atr)
         return stop_frac, tp_frac
 
 
