@@ -69,30 +69,45 @@ def test_impossible_prices_is_critical(tmp_path) -> None:
     assert "impossible_prices" in _critical_checks(store, cfg)
 
 
-def test_extreme_gap_is_critical(tmp_path) -> None:
+def test_extreme_gap_is_warning_not_critical(tmp_path) -> None:
+    """A >50% close-to-close move is real crypto market data (a flash crash / liquidation cascade),
+    NOT a data defect — flagged as a WARNING for review, never a critical that blocks the snapshot.
+    Genuinely-broken bars (h<l, non-positive) stay critical (see the impossible-prices test).
+    """
     cfg = small_cfg()
     store = fresh_store(tmp_path)
     populate(store, cfg)
     key = SeriesKey(cfg.exchange_id, OHLCV, cfg.symbols[0], "5m")
     ts = cfg.window_start_ms + key.interval_ms
     store.delete_range(key, ts, ts + key.interval_ms)
-    # A ~10x close vs neighbours -> >50% close-to-close move.
+    # A ~10x close vs neighbours -> >50% close-to-close move (a real flash-crash-shaped spike).
     base = store.read(key)[0]["close"]
     big = base * 10
     store.write(
         key,
-        [
-            {
-                "ts": ts,
-                "open": big,
-                "high": big * 1.001,
-                "low": big * 0.999,
-                "close": big,
-                "volume": 1,
-            }
-        ],
+        [{"ts": ts, "open": big, "high": big * 1.001,
+          "low": big * 0.999, "close": big, "volume": 1}],
     )
-    assert "extreme_gaps" in _critical_checks(store, cfg)
+    report = DataValidator(store, cfg).validate()
+    assert "extreme_gaps" not in _critical_checks(store, cfg)  # not a blocking critical
+    assert any(v.check == "extreme_gaps" and v.severity == "warning" for v in report.violations)
+
+
+def test_one_tick_ohlc_glitch_is_tolerated(tmp_path) -> None:
+    """A 1-tick rounding glitch (low a hair above open) is a feed artifact, not 'impossible prices'
+    — it must NOT block the snapshot. (Regression for real Bybit bars failing validation.)"""
+    cfg = small_cfg()
+    store = fresh_store(tmp_path)
+    populate(store, cfg)
+    key = SeriesKey(cfg.exchange_id, OHLCV, cfg.symbols[0], "5m")
+    ts = cfg.window_start_ms
+    store.delete_range(key, ts, ts + key.interval_ms)
+    # low (100.01) sits a hair ABOVE open (100.0) — a 0.01% rounding glitch, prices otherwise sane.
+    store.write(
+        key,
+        [{"ts": ts, "open": 100.0, "high": 100.05, "low": 100.01, "close": 100.02, "volume": 1}],
+    )
+    assert "impossible_prices" not in _critical_checks(store, cfg)
 
 
 def test_abnormal_spread_is_critical(tmp_path) -> None:

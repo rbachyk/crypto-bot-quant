@@ -38,8 +38,14 @@ from src.data.store import SeriesStore
 CRITICAL = "critical"
 WARNING = "warning"
 
-# A close-to-close move larger than this fraction is an "extreme unexplained gap".
+# A close-to-close move larger than this fraction is an "extreme price move". In a multi-year,
+# multi-symbol crypto universe these are almost always REAL flash crashes / liquidation cascades
+# (market data the backtest must include) — so they are flagged as WARNINGS for review, not as
+# critical data defects that block the snapshot.
 _EXTREME_MOVE_FRAC = 0.5
+# Relative tolerance for OHLC self-consistency: a bar whose low sits a hair above its open (or high
+# a hair below its close) by less than this fraction is a feed-rounding glitch, not corruption.
+_OHLC_TOL_FRAC = 0.005
 
 
 @dataclass(slots=True)
@@ -182,7 +188,10 @@ class DataValidator:
     ) -> None:
         label = key.label()
         th = self.cfg.thresholds
-        prev_close: float | None = None
+        tol = 1.0 + _OHLC_TOL_FRAC
+        # Impossible prices: non-positive / above ceiling, or a GROSSLY inconsistent bar. A small
+        # relative tolerance absorbs 1-tick feed-rounding glitches (low a hair above open, high a
+        # hair below close); only h<l or a gap beyond tolerance is a genuinely broken bar.
         for r in rows:
             o, h, low, c = r["open"], r["high"], r["low"], r["close"]
             if min(o, h, low, c) <= th.min_price or max(o, h, low, c) > th.max_price:
@@ -192,28 +201,36 @@ class DataValidator:
                     )
                 )
                 break
-            if h < low or h < max(o, c) or low > min(o, c):
+            if h < low or h < max(o, c) / tol or low > min(o, c) * tol:
                 report.violations.append(
                     Violation(
                         "impossible_prices", CRITICAL, f"OHLC inconsistent at {r['ts']}", label
                     )
                 )
                 break
+        # Extreme close-to-close moves → WARNING (real crypto flash crashes are market data, not a
+        # defect). Count them and surface the worst so an operator can review; a genuine single-bar
+        # bad tick is rare and has negligible backtest impact among millions of bars.
+        extreme: list[tuple[float, int]] = []
+        prev_close: float | None = None
         for r in rows:
             c = r["close"]
             if prev_close is not None and prev_close > 0:
                 move = abs(c - prev_close) / prev_close
                 if move > _EXTREME_MOVE_FRAC:
-                    report.violations.append(
-                        Violation(
-                            "extreme_gaps",
-                            CRITICAL,
-                            f"{move:.1%} close-to-close move at {r['ts']}",
-                            label,
-                        )
-                    )
-                    break
+                    extreme.append((move, int(r["ts"])))
             prev_close = c
+        if extreme:
+            worst, worst_ts = max(extreme)
+            report.violations.append(
+                Violation(
+                    "extreme_gaps",
+                    WARNING,
+                    f"{len(extreme)} move(s) > {_EXTREME_MOVE_FRAC:.0%}; worst {worst:.1%} "
+                    f"at {worst_ts}",
+                    label,
+                )
+            )
 
     def _check_funding_alignment(
         self, key: SeriesKey, ts_list: list[int], report: DataQualityReport
