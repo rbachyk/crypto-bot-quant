@@ -185,23 +185,26 @@ class LiveCandidateFeed:
         symbols' most-recent feature rows."""
         out: list[PaperCandidateInput] = []
 
-        def _emit(sig, sid: str, ver: str, promoted: bool) -> None:
+        def _emit(sig, sid: str, ver: str, promoted: bool, risk_scale: float) -> None:
             if sig is None:
                 return
             cand = build_candidate(
                 sym, row, sig, strat_id=sid, strat_ver=ver,
                 entry_price=float(bar["close"]), spread_bps=self._toxic_spread / 5.0,
-                promoted=promoted, data_ok=True,
+                promoted=promoted, data_ok=True, risk_scale=risk_scale,
             )
-            # Real exits are exchange-side (bracket SL/TP) → no forward move in live mode.
+            # Real exits are exchange-side (bracket SL/TP/trailing) → no forward move in live mode.
             out.append(PaperCandidateInput(candidate=cand, equity=self.equity, exit_move_frac=0.0))
 
         for strat, sid, ver, promoted in self._row_strategies:
-            _emit(strat.evaluate(row), sid, ver, promoted)
+            _emit(strat.evaluate(row), sid, ver, promoted, float(getattr(strat, "risk_scale", 1.0)))
         if self._portfolio_strategies:
             peers = {k: v for k, v in self._latest_rows.items() if k != sym}
             for strat, sid, ver, promoted in self._portfolio_strategies:
-                _emit(strat.evaluate_portfolio(sym, row, peers), sid, ver, promoted)
+                _emit(
+                    strat.evaluate_portfolio(sym, row, peers), sid, ver, promoted,
+                    float(getattr(strat, "risk_scale", 1.0)),
+                )
         return out
 
     def _advance_symbol(

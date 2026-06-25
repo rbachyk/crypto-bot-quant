@@ -11,6 +11,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+import pytest
 from src.config import Settings
 from src.exchange.metadata import load_metadata_config
 from src.execution import (
@@ -212,6 +213,32 @@ def test_partial_fill_tracks_remaining() -> None:
 # --------------------------------------------------------------------------- #
 # Slippage measurement                                                         #
 # --------------------------------------------------------------------------- #
+def test_momentum_carries_both_reachable_tp_and_trailing() -> None:
+    """Parity: a momentum candidate with a REACHABLE R-target TP plus its own trail_frac arms BOTH
+    a take-profit AND a trailing stop on the bracket (Bybit holds SL+TP+trail at once), so live
+    reproduces the backtest's stop/TP/trail OR-of-exits — not the legacy trail-only path."""
+    own = OwnershipPolicy(_settings())
+    builder = OrderBuilder(load_execution_config(), own)
+    cand = _cand(tp_frac=0.02, trail_frac=0.03)  # reachable TP + a 3% trailing offset
+    res = builder.build(cand, _rm().evaluate(cand, _flat()), _meta().spec(BTC))
+    assert res.ok and res.plan is not None
+    assert res.plan.take_profit is not None  # reachable TP attached
+    assert res.plan.trailing is not None  # trailing armed from candidate.trail_frac
+    assert res.plan.trailing.trail_offset == pytest.approx(0.03)  # strategy offset, ≥ the stop
+
+
+def test_maker_candidate_posts_passive_limit_entry() -> None:
+    """Parity: a maker candidate posts a POST_ONLY entry limit_offset_frac INSIDE the reference
+    (buy below), not a market order — matching the backtest's passive maker fill."""
+    own = OwnershipPolicy(_settings())
+    builder = OrderBuilder(load_execution_config(), own)
+    cand = _cand(maker=True, limit_offset_frac=0.001)  # long: post 0.1% below the reference
+    res = builder.build(cand, _rm().evaluate(cand, _flat()), _meta().spec(BTC))
+    assert res.ok and res.plan is not None
+    assert res.plan.entry.order_type is OrderType.POST_ONLY
+    assert res.plan.entry.price is not None and res.plan.entry.price < 50_000.0  # inside the ref
+
+
 def test_taker_slippage_measured_maker_zero() -> None:
     s = _settings()
     venue = SimulatedVenue(_meta())

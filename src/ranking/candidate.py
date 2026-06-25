@@ -57,6 +57,16 @@ class Candidate:
 
     decision_ts: int = 0
 
+    # Execution geometry carried from the strategy Signal so the LIVE/paper path reproduces the
+    # backtest (Parity Rule, Section 10): maker (passive-limit) entry, the trailing-stop offset,
+    # the time-stop horizon, and the per-strategy size scale. Defaults reproduce the legacy taker /
+    # no-trail / no-time-stop / full-size behaviour, so candidates built without them are unchanged.
+    maker: bool = False  # entry posts a passive limit instead of crossing the spread
+    limit_offset_frac: float = 0.0  # passive distance inside the reference for the maker limit
+    trail_frac: float = 0.0  # trailing-stop offset (fraction of price); 0 = no trailing leg
+    hold_bars: int = 0  # active time-stop horizon in bars (0 = no time-stop)
+    risk_scale: float = 1.0  # per-strategy size scale (≤1) applied to risk_pct by the risk manager
+
     @property
     def stop_price(self) -> float:
         return self.entry_price * (1.0 - self.side * self.stop_frac)

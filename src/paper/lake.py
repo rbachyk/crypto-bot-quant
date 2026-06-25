@@ -41,6 +41,7 @@ def build_candidate(
     spread_bps: float,
     promoted: bool,
     data_ok: bool = True,
+    risk_scale: float = 1.0,
 ) -> Candidate:
     """Build a ranking Candidate from a decision-time feature row + a strategy signal.
 
@@ -54,6 +55,13 @@ def build_candidate(
         entry_price=entry_price,
         stop_frac=sig.stop_frac,
         tp_frac=sig.tp_frac,
+        # Execution geometry → live/paper parity (Section 10). maker/limit/trail/hold come off the
+        # Signal; risk_scale is a per-strategy property the caller reads off the strategy object.
+        maker=bool(getattr(sig, "maker", False)),
+        limit_offset_frac=float(getattr(sig, "limit_offset_frac", 0.0)),
+        trail_frac=float(getattr(sig, "trail_frac", 0.0)),
+        hold_bars=int(getattr(sig, "hold_bars", 0) or 0),
+        risk_scale=float(risk_scale),
         regime=detect_regime(row, spread_bps=spread_bps, data_ok=data_ok),
         session=int(row.get("session_code", 0)),
         features={
@@ -177,6 +185,7 @@ def _eval_strategy_over_lake(
                 entry_price=entry_price,
                 spread_bps=spread_bps,
                 promoted=promoted,
+                risk_scale=float(getattr(strategy, "risk_scale", 1.0)),
             )
             out.append(
                 PaperCandidateInput(

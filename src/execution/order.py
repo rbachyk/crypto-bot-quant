@@ -164,15 +164,23 @@ class OrderBuilder:
         entry_side = BUY if long else SELL
         exit_side = SELL if long else BUY
 
-        # Entry price snapped to the tick grid (adverse rounding: pay up to enter).
-        entry_price = _round_to_tick(candidate.entry_price, tick, side_up=long)
+        # Entry style: explicit override, else the strategy's own maker flag, else config default
+        # (parity with the backtest, where maker entries rest at a passive limit).
+        style = entry_style or ("maker" if candidate.maker else self.cfg.default_entry_style)
+        entry_type = OrderType.MARKET if style == "taker" else OrderType.POST_ONLY
+
+        if entry_type is OrderType.MARKET:
+            # Taker: snapped with adverse rounding (pay up to enter).
+            entry_price = _round_to_tick(candidate.entry_price, tick, side_up=long)
+        else:
+            # Maker passive limit: post limit_offset_frac INSIDE the reference (buy below / sell
+            # above) and snap to the more-passive tick — mirrors the backtest maker fill price.
+            raw_limit = candidate.entry_price * (1.0 - candidate.side * candidate.limit_offset_frac)
+            entry_price = _round_to_tick(raw_limit, tick, side_up=not long)
         if entry_price * qty < min_notional:
             return BuildResult(
                 False, reason=f"notional_below_min({entry_price * qty:.8g}<{min_notional})"
             )
-
-        style = entry_style or self.cfg.default_entry_style
-        entry_type = OrderType.MARKET if style == "taker" else OrderType.POST_ONLY
         entry = Order(
             client_id=self.ownership.new_client_id("entry"),
             symbol=candidate.symbol,
@@ -202,10 +210,12 @@ class OrderBuilder:
         take_profit: Order | None = None
         trailing: Order | None = None
 
-        if no_fixed_tp or self.cfg.trailing_offset_frac > 0:
-            # Momentum / no-fixed-TP exit: exchange-native trailing stop so it
-            # survives bot downtime (Section 12/18). Offset ≥ the initial stop.
-            offset = max(self.cfg.trailing_offset_frac, candidate.stop_frac)
+        # Trailing stop: parity with the backtest uses the STRATEGY'S OWN offset (atr_trail_mult×
+        # atr, carried on the candidate), falling back to the config offset. Floored at the stop
+        # so the trail never sits tighter than the hard stop. Exchange-native (survives downtime).
+        trail_off = max(candidate.trail_frac, self.cfg.trailing_offset_frac)
+        if trail_off > 0 or no_fixed_tp:
+            offset = max(trail_off, candidate.stop_frac)
             trailing = Order(
                 client_id=self.ownership.new_client_id("trail"),
                 symbol=candidate.symbol,
@@ -217,7 +227,11 @@ class OrderBuilder:
                 reduce_only=True,
                 tags=self.ownership.tags(parent_id=entry.client_id),
             )
-        elif self.cfg.attach_take_profit:
+        # Take-profit: armed when the TP is REACHABLE (not the unreachable momentum sentinel) and
+        # enabled. A momentum candidate now carries BOTH a reachable R-target TP AND a trailing
+        # stop — Bybit holds stopLoss + takeProfit + trailingStop on the position simultaneously, so
+        # whichever triggers first exits, matching the backtest's stop/TP/trail OR-of-exits.
+        if not no_fixed_tp and self.cfg.attach_take_profit:
             tp_price = _round_to_tick(candidate.tp_price, tick, side_up=long)
             take_profit = Order(
                 client_id=self.ownership.new_client_id("tp"),

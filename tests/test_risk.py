@@ -124,6 +124,19 @@ def test_sizing_identity_when_no_cap_binds() -> None:
     assert d.risk_pct_used <= cfg.envelope.max_risk_pct_per_trade + 1e-9
 
 
+def test_risk_scale_reduces_size_proportionally() -> None:
+    """Parity with the backtest: a per-strategy risk_scale < 1 scales the per-trade risk (and so
+    qty/risk_amount) DOWN — sizing a hot edge to the envelope. ≥1 cannot increase it."""
+    from dataclasses import replace
+
+    full = _rm().evaluate(_cand(stop_frac=0.02), _flat())
+    half = _rm().evaluate(replace(_cand(stop_frac=0.02), risk_scale=0.5), _flat())
+    over = _rm().evaluate(replace(_cand(stop_frac=0.02), risk_scale=3.0), _flat())
+    assert full.approved and half.approved and over.approved
+    assert half.risk_amount == pytest.approx(full.risk_amount * 0.5, rel=0.05)
+    assert over.risk_amount == pytest.approx(full.risk_amount, rel=0.05)  # clamped to 1.0
+
+
 def test_leverage_is_capped_not_targeted() -> None:
     cfg = load_risk_config()
     d = _rm().evaluate(_cand(stop_frac=0.0001), _flat())  # tiny stop → huge notional

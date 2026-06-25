@@ -135,7 +135,11 @@ class RiskManager:
 
         # 3) Deterministic per-trade sizing (Section 17). Each portfolio cap below
         #    can only REDUCE the size (resize down); the binding one wins.
+        # The per-strategy risk_scale (≤1) scales the per-trade risk DOWN for a hot edge so its
+        # drawdown fits the envelope (parity with the backtest's RiskSimulator). Clamped to (0,1]
+        # so a strategy can only reduce risk, never exceed the account standard.
         risk_pct = min(self.cfg.base_risk_pct, self.envelope.max_risk_pct_per_trade)
+        risk_pct *= min(1.0, max(0.0, candidate.risk_scale))
         stop_distance = candidate.entry_price * candidate.stop_frac
         target_risk = equity * risk_pct
         qty = target_risk / stop_distance
