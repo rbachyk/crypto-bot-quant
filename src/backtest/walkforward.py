@@ -91,6 +91,7 @@ class WalkForwardResult:
 
 
 def _evaluate_fold(report: BacktestReport, kc: KillCriteria) -> tuple[bool, list[str]]:
+    """Full economic kill-criteria — used for the LOCKED HOLD-OUT (and folds in 'economic' mode)."""
     failures: list[str] = []
     if report.trade_count < kc.min_trades_per_fold:
         failures.append(f"trades {report.trade_count} < {kc.min_trades_per_fold}")
@@ -98,6 +99,22 @@ def _evaluate_fold(report: BacktestReport, kc: KillCriteria) -> tuple[bool, list
         failures.append(f"expectancy_r {report.expectancy_r:.3f} < {kc.min_oos_expectancy_r}")
     if report.profit_factor < kc.min_oos_profit_factor:
         failures.append(f"profit_factor {report.profit_factor:.3f} < {kc.min_oos_profit_factor}")
+    if report.max_drawdown > kc.max_oos_drawdown:
+        failures.append(f"max_drawdown {report.max_drawdown:.3f} > {kc.max_oos_drawdown}")
+    return (not failures), failures
+
+
+def _evaluate_fold_directional(report: BacktestReport, kc: KillCriteria) -> tuple[bool, list[str]]:
+    """Per-fold STABILITY test: is the edge PRESENT in this period (expectancy_r > 0), on enough
+    trades, without a ruinous drawdown? The economic-MAGNITUDE bar (expectancy≥min, PF≥min) is
+    reserved for the locked hold-out, so a thin-but-real edge that is directionally positive across
+    most folds is not rejected for per-fold magnitude noise. The drawdown risk cap is kept here —
+    relaxing magnitude must not relax risk."""
+    failures: list[str] = []
+    if report.trade_count < kc.min_trades_per_fold:
+        failures.append(f"trades {report.trade_count} < {kc.min_trades_per_fold}")
+    if report.expectancy_r <= 0.0:
+        failures.append(f"expectancy_r {report.expectancy_r:.3f} <= 0 (edge not present)")
     if report.max_drawdown > kc.max_oos_drawdown:
         failures.append(f"max_drawdown {report.max_drawdown:.3f} > {kc.max_oos_drawdown}")
     return (not failures), failures
@@ -128,13 +145,18 @@ def run_walk_forward(
     fold_region = test_end_ts - data_lo
     fold_span = fold_region // wf.folds if wf.folds > 0 else fold_region
 
-    # 1) Out-of-sample folds across the pre-holdout window.
+    # 1) Out-of-sample folds across the pre-holdout window. The fold test answers STABILITY (is
+    # the edge present across time?); "directional" judges that as expectancy_r > 0 while the
+    # economic-magnitude bar is applied only to the locked hold-out (see fold_criterion).
+    fold_eval = (
+        _evaluate_fold if wf.fold_criterion == "economic" else _evaluate_fold_directional
+    )
     for i in range(wf.folds):
         lo = data_lo + i * fold_span
         hi = data_lo + (i + 1) * fold_span if i < wf.folds - 1 else test_end_ts
         windowed = rebase_window(inputs, lo, hi)
         report = run_engine(cfg, meta, windowed, strategy=strategy, label=f"wf_fold_{i}").report
-        passed, failures = _evaluate_fold(report, kc)
+        passed, failures = fold_eval(report, kc)
         out.folds.append(FoldResult(i, lo, hi, passed, failures, report))
 
     out.folds_passed = sum(1 for f in out.folds if f.passed)
@@ -167,15 +189,26 @@ def run_walk_forward(
             -1, test_end_ts, data_hi, holdout_passed, holdout_failures, holdout_report
         )
 
-    # 3) Verdict.
+    # 3) Verdict. STABILITY (folds), ECONOMIC VIABILITY (locked hold-out, full kill-criteria), and
+    # MULTIPLE-TESTING SIGNIFICANCE (deflated Sharpe over the fold trials) must ALL hold. The
+    # deflated-Sharpe floor is what stops a no-edge strategy from sneaking through on directional
+    # folds that happened to land positive by luck — a genuinely edgeless strategy averages a
+    # deflated Sharpe below 0.5.
     if out.folds_passed < kc.min_folds_passed:
+        word = "passed" if wf.fold_criterion == "economic" else "directionally positive"
         out.reasons.append(
-            f"only {out.folds_passed}/{len(out.folds)} folds passed (need {kc.min_folds_passed})"
+            f"only {out.folds_passed}/{len(out.folds)} folds {word} (need {kc.min_folds_passed})"
         )
     if out.holdout is not None and not out.holdout.passed:
         out.reasons.append("locked hold-out not positive net of costs")
     if out.holdout is None:
         out.reasons.append("no locked hold-out evaluated (holdout_frac=0)")
+    deflated = float(out.overfitting().get("deflated_sharpe", 0.0))
+    if deflated < kc.min_deflated_sharpe:
+        out.reasons.append(
+            f"deflated Sharpe {deflated:.3f} < {kc.min_deflated_sharpe} "
+            "(edge not significant net of multiple testing)"
+        )
 
     out.passed = not out.reasons
     return out

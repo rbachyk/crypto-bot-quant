@@ -720,6 +720,48 @@ def test_run_reference_backtest_smoke(cfg, meta):
 # --------------------------------------------------------------------------- #
 # Walk-forward (Section 16) + stress (FEE / SLIP)                              #
 # --------------------------------------------------------------------------- #
+def test_directional_fold_accepts_thin_positive_but_keeps_risk_and_direction():
+    """The 'directional' fold test passes a thin-but-positive fold the economic bar rejects, but
+    still rejects a directionally-negative fold and one with a ruinous drawdown (risk is not
+    relaxed). This is what lets a thin-but-real edge clear the folds while the locked hold-out
+    still enforces economic magnitude."""
+    from src.backtest.config import KillCriteria
+    from src.backtest.metrics import BacktestReport
+    from src.backtest.walkforward import _evaluate_fold, _evaluate_fold_directional
+
+    kc = KillCriteria()
+
+    def rep(exp, pf, dd, n=100):
+        return BacktestReport(
+            {"trade_count": n, "expectancy_r": exp, "profit_factor": pf, "max_drawdown": dd}
+        )
+
+    thin = rep(0.01, 1.05, 0.20)  # positive but below the 0.03 / 1.10 economic bar
+    assert _evaluate_fold_directional(thin, kc)[0] is True  # edge present → directional PASS
+    assert _evaluate_fold(thin, kc)[0] is False  # economic bar REJECTS it (correctly, per-fold)
+
+    assert _evaluate_fold_directional(rep(-0.01, 0.95, 0.20), kc)[0] is False  # no edge this fold
+    assert _evaluate_fold_directional(rep(0.05, 1.2, 0.40), kc)[0] is False  # dd>0.25 risk cap held
+    assert _evaluate_fold_directional(rep(0.05, 1.2, 0.20, n=5), kc)[0] is False  # too few trades
+
+
+def test_walk_forward_verdict_requires_deflated_sharpe(cfg, meta):
+    """The refined verdict also requires the multiple-testing-aware deflated Sharpe to clear the
+    floor — a no-structure series (no real edge) is rejected even if some folds land positive by
+    luck, so 'directional' folds can't let an edgeless strategy through."""
+    from dataclasses import replace
+
+    from src.backtest.strategy import ReferenceMomentumStrategy
+
+    # A no-structure (noise) reference series: the planted edge is removed, so any fold positivity
+    # is luck and the deflated Sharpe stays below the floor → WF must FAIL.
+    noise_cfg = replace(cfg, reference=replace(cfg.reference, edge="none"))
+    noise_inputs = build_reference_inputs(noise_cfg)
+    strat = ReferenceMomentumStrategy(cfg.reference_strategy)
+    wf = run_walk_forward(noise_cfg, meta, noise_inputs, strat)
+    assert not wf.passed  # the no-edge control is rejected under the refined criterion
+
+
 def test_walk_forward_passes_on_the_reference_edge(cfg, meta, ref_inputs):
     wf = run_walk_forward(cfg, meta, ref_inputs)
     assert len(wf.folds) == cfg.walk_forward.folds

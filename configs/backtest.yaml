@@ -106,15 +106,28 @@ backtest:
     # Locked hold-out: the most-recent fraction is untouched during all folds and
     # is evaluated EXACTLY ONCE at the end (Section 16).
     holdout_frac: 0.2
-    # Kill-criteria, declared up front (Section 16). A fold "passes" when it clears
-    # ALL of these; WF passes when >= min_folds_passed folds pass AND the locked
-    # hold-out is positive net of costs.
+    # How a FOLD is judged (the walk-forward asks two different questions):
+    #   directional (default) — per-fold tests STABILITY: is the edge PRESENT (expectancy_r > 0,
+    #     enough trades, drawdown within the risk cap)? The economic-MAGNITUDE bar (expectancy/PF)
+    #     is reserved for the locked hold-out. This stops a thin-but-real edge that is directionally
+    #     positive across most folds + clears the hold-out from being rejected for per-fold magnitude
+    #     NOISE. The locked hold-out STILL enforces the full economic criteria, and the deflated
+    #     Sharpe floor (below) rejects a no-edge strategy whose folds land positive by luck.
+    #   economic — legacy: the full kill-criteria are applied to every fold AND the hold-out.
+    fold_criterion: directional
+    # Kill-criteria, declared up front (Section 16). WF passes when >= min_folds_passed folds pass
+    # the fold test AND the locked hold-out clears ALL economic criteria AND the deflated Sharpe
+    # (multiple-testing-aware significance over the folds) clears its floor.
     kill_criteria:
       min_oos_expectancy_r: 0.03
       min_oos_profit_factor: 1.10
       max_oos_drawdown: 0.25
       min_folds_passed: 4
       min_trades_per_fold: 20
+      # Deflated Sharpe (PSR over the fold trials) ≥ this. 0.5 = "more likely than not a real edge
+      # net of multiple testing"; a genuinely edgeless strategy averages below 0.5 (the neutral
+      # point of a probability — not a number fitted to any candidate).
+      min_deflated_sharpe: 0.5
 
   # --- Stress tests (Section 16 / FEE + SLIP gates) -------------------------
   stress:

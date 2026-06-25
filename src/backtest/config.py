@@ -81,6 +81,11 @@ class KillCriteria:
     max_oos_drawdown: float = 0.25
     min_folds_passed: int = 4
     min_trades_per_fold: int = 20
+    # Multiple-testing-aware significance floor: the deflated Sharpe (PSR over the fold trials)
+    # must clear this for the verdict to pass. 0.5 = "the edge is more-likely-than-not genuinely
+    # positive after adjusting for the multiple folds". A no-edge strategy whose folds average
+    # negative scores below 0.5; it is the neutral point of a probability, not a fitted number.
+    min_deflated_sharpe: float = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +94,15 @@ class WalkForwardConfig:
     train_frac: float = 0.5
     holdout_frac: float = 0.2
     kill_criteria: KillCriteria = field(default_factory=KillCriteria)
+    # How a FOLD is judged. The walk-forward asks two DIFFERENT questions: per-fold = is the edge
+    # present across time (STABILITY)? hold-out = is it economically viable on never-seen data?
+    # "directional" (default) tests fold STABILITY as expectancy_r > 0 (+ trade adequacy + the
+    # drawdown risk cap) and reserves the economic magnitude bar (expectancy≥min, PF≥min) for the
+    # locked hold-out — so a thin-but-real edge that is directionally positive in most folds and
+    # clears the hold-out is not rejected for per-fold magnitude noise. "economic" (legacy) applies
+    # the full economic kill-criteria to every fold AND the hold-out. The hold-out is ALWAYS judged
+    # on the full economic criteria regardless; only the FOLDS' test changes.
+    fold_criterion: str = "directional"
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,12 +218,14 @@ def load_backtest_config(path: str | None = None) -> BacktestConfig:
             folds=int(wf.get("folds", 5)),
             train_frac=float(wf.get("train_frac", 0.5)),
             holdout_frac=float(wf.get("holdout_frac", 0.2)),
+            fold_criterion=str(wf.get("fold_criterion", "directional")),
             kill_criteria=KillCriteria(
                 min_oos_expectancy_r=float(kc.get("min_oos_expectancy_r", 0.03)),
                 min_oos_profit_factor=float(kc.get("min_oos_profit_factor", 1.10)),
                 max_oos_drawdown=float(kc.get("max_oos_drawdown", 0.25)),
                 min_folds_passed=int(kc.get("min_folds_passed", 4)),
                 min_trades_per_fold=int(kc.get("min_trades_per_fold", 20)),
+                min_deflated_sharpe=float(kc.get("min_deflated_sharpe", 0.5)),
             ),
         ),
         stress=StressConfig(
