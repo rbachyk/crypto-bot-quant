@@ -414,6 +414,139 @@ def test_maker_entry_that_is_not_touched_does_not_fill(cfg, meta):
     assert any(r.reason == "maker_no_fill" for r in result.rejected)
 
 
+def _manage_sym(bars, extra_cols=("atr_pct",)):
+    """Build a single-symbol input on a 1-minute grid (used by the manage-hook tests)."""
+    from src.features.pipeline import FeatureFrame
+
+    iv = 60_000
+    rows = [
+        {"ts": k * iv, "decision_ts": (k + 1) * iv, **dict.fromkeys(extra_cols, 0.0)}
+        for k in range(len(bars))
+    ]
+    frame = FeatureFrame(
+        symbol=REF_SYMBOL, timeframe="1m", feature_names=list(extra_cols), rows=rows
+    )
+    spread = [{"ts": b["ts"], "spread_bps": 2.0} for b in bars]
+    return SymbolInput(
+        symbol=REF_SYMBOL, bars=bars, frame=frame, spread_samples=spread, funding_events=[]
+    )
+
+
+def _bar(ts, o, h, low, c):
+    return {"ts": ts, "open": o, "high": h, "low": low, "close": c, "volume": 10_000.0}
+
+
+def test_manage_hook_exits_early_before_the_time_stop(cfg, meta):
+    """A strategy that exposes ``manage`` gets an early thesis-driven exit: the position closes on
+    the bar the hook fires (its own reason), not at the long time-stop backstop."""
+    from src.backtest.strategy import ExitDecision
+
+    iv = 60_000
+
+    class FireAndManage:
+        name = "fire_manage"
+        strategy_version = "t1"
+
+        def evaluate(self, row: dict):
+            if row["decision_ts"] == iv:
+                return Signal(side=1, stop_frac=0.5, tp_frac=10.0, hold_bars=100)
+            return None
+
+        def manage(self, row: dict, position):
+            if row["decision_ts"] == 3 * iv:  # thesis "done" on the bar at ts=3·iv
+                return ExitDecision(reason="thesis_done")
+            return None
+
+    bars = [_bar(k * iv, 100, 100.1, 99.9, 100) for k in range(6)]  # flat → no stop/tp
+    result = BacktestEngine(cfg, meta, FireAndManage()).run([_manage_sym(bars)])
+    assert len(result.trades) == 1
+    t = result.trades[0]
+    assert t.exit_reason == "thesis_done"
+    assert t.exit_ts == 3 * iv  # closed on the manage bar, well before the hold_bars=100 backstop
+
+
+def test_manage_hook_never_overrides_a_protective_stop(cfg, meta):
+    """The stop is checked BEFORE the manage hook each bar, so a position that would both stop out
+    and be managed-out on the same bar exits as ``stop`` (the conservative worst-case wins)."""
+    from src.backtest.strategy import ExitDecision
+
+    iv = 60_000
+
+    class FireAndManage:
+        name = "fire_manage"
+        strategy_version = "t1"
+
+        def evaluate(self, row: dict):
+            if row["decision_ts"] == iv:
+                return Signal(side=1, stop_frac=0.05, tp_frac=10.0, hold_bars=100)
+            return None
+
+        def manage(self, row: dict, position):
+            if row["decision_ts"] == 2 * iv:
+                return ExitDecision(reason="thesis_done")
+            return None
+
+    bars = [
+        _bar(0, 100, 100, 100, 100),
+        _bar(iv, 100, 101, 99, 100),  # entry ~100; stop ≈ 95
+        _bar(2 * iv, 100, 101, 90, 95),  # low 90 ≤ stop → stop fires; manage would also fire here
+        _bar(3 * iv, 95, 96, 94, 95),
+    ]
+    result = BacktestEngine(cfg, meta, FireAndManage()).run([_manage_sym(bars)])
+    assert len(result.trades) == 1
+    assert result.trades[0].exit_reason == "stop"  # not "thesis_done"
+
+
+def test_manage_maker_exit_fills_passive_then_falls_back_to_taker(cfg, meta):
+    """A maker position's manage exit posts a passive limit favorable to the close (sell above) and
+    fills maker when the bar trades through it; when the bar never reaches it, the exit falls back
+    to a taker cross at the close — guaranteeing the exit on the signal bar."""
+    from src.backtest.strategy import ExitDecision
+
+    iv = 60_000
+
+    class MakerManage:
+        name = "maker_manage"
+        strategy_version = "t1"
+
+        def evaluate(self, row: dict):
+            if row["decision_ts"] == iv:
+                return Signal(
+                    side=1, stop_frac=0.5, tp_frac=10.0, hold_bars=100,
+                    maker=True, limit_offset_frac=0.01,
+                )
+            return None
+
+        def manage(self, row: dict, position):
+            if row["decision_ts"] == 2 * iv:
+                return ExitDecision(reason="thesis_done", limit_offset_frac=0.01)
+            return None
+
+    # Case 1: bar at 2·iv trades up through the passive sell limit (open 100 → limit 101) → maker.
+    fill_bars = [
+        _bar(0, 100, 100, 100, 100),
+        _bar(iv, 100, 101, 98, 100),  # entry maker at 99 (low 98 ≤ limit 99)
+        _bar(2 * iv, 100, 105, 99, 103),  # high 105 ≥ exit limit 101 → maker exit at 101
+    ]
+    r1 = BacktestEngine(cfg, meta, MakerManage()).run([_manage_sym(fill_bars)])
+    assert len(r1.trades) == 1
+    assert r1.trades[0].exit_reason == "thesis_done"
+    assert r1.trades[0].exit_price == pytest.approx(101.0)  # filled at the passive limit
+    assert r1.trades[0].slippage_cost == pytest.approx(0.0)  # maker entry + maker exit
+
+    # Case 2: bar at 2·iv never reaches the limit → taker fallback at the close.
+    fallback_bars = [
+        _bar(0, 100, 100, 100, 100),
+        _bar(iv, 100, 101, 98, 100),  # entry maker at 99
+        _bar(2 * iv, 100, 100.5, 99, 100),  # high 100.5 < limit 101 → taker fallback at close 100
+    ]
+    r2 = BacktestEngine(cfg, meta, MakerManage()).run([_manage_sym(fallback_bars)])
+    assert len(r2.trades) == 1
+    assert r2.trades[0].exit_reason == "thesis_done"
+    assert r2.trades[0].exit_price < 100.0  # taker sell crosses down with adverse slippage
+    assert r2.trades[0].slippage_cost > 0.0  # the taker exit leg incurs slippage
+
+
 def test_engine_charges_costs_on_every_trade(cfg, meta, ref_inputs):
     run = run_engine(cfg, meta, ref_inputs, label="costs")
     assert run.report.trade_count > 0

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.backtest.strategy import Signal
+from src.backtest.strategy import ExitDecision, PositionView, Signal
 from src.regime.detector import NO_TRADE_REGIMES, detect_regime
 from src.strategies.base import StrategyHypothesis
 from src.strategies.config import CandidateConfig, StrategyParams
@@ -152,6 +152,28 @@ class BasisReversionStrategy(_BaseCandidate):
         if premium <= -threshold:
             return self._sided(+1, f"premium {premium:+.5f} <= -{threshold} ⇒ fade long", row)
         return None
+
+    def manage(self, row: dict, position: PositionView) -> ExitDecision | None:
+        """Exit the faded position once the premium it faded has REVERTED — the family's actual
+        exit thesis, instead of waiting for a fixed ATR take-profit or the time-stop (which let a
+        completed reversion sit on the book and give the edge back). The exit band is
+        ``exit_premium_frac × premium_threshold``: a short (faded a rich perp, premium ≥ +thr)
+        closes once the premium has fallen back to ``+exit_level``; a long (faded a cheap perp)
+        closes once it has risen to ``−exit_level``. ``exit_premium_frac`` 0 ⇒ exit at the
+        zero-cross. The exit is posted maker (passive limit, taker-fallback) at the configured
+        offset, mirroring the entry."""
+        premium = float(row.get("premium", 0.0))
+        threshold = self.params.extra["premium_threshold"]
+        exit_level = self.params.extra.get("exit_premium_frac", 0.0) * threshold
+        reverted = (
+            (position.side < 0 and premium <= exit_level)
+            or (position.side > 0 and premium >= -exit_level)
+        )
+        if not reverted:
+            return None
+        atr = float(row.get("atr_pct", 0.0) or 0.0)
+        offset = self.params.limit_offset_atr_mult * atr  # 0 ⇒ taker close (no maker entry)
+        return ExitDecision(reason="premium_reverted", limit_offset_frac=offset)
 
 
 # --------------------------------------------------------------------------- #

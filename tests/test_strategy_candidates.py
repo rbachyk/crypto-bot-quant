@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from src.backtest.strategy import PositionView
 from src.strategies.candidates import build_strategy
 from src.strategies.config import load_strategies_config
 
@@ -20,6 +21,36 @@ def _cand(candidate_id: str):
     cand = scfg.candidate(candidate_id)
     assert cand is not None
     return cand, build_strategy(cand, scfg.strategy_version)
+
+
+def _pos(side: int) -> PositionView:
+    return PositionView(side=side, entry_price=100.0, bars_held=1, regime="R1")
+
+
+def test_basis_manage_exits_when_premium_reverts() -> None:
+    """The manage hook closes a faded position once the premium has reverted to the exit band
+    (exit_premium_frac × threshold) — the family's real exit, fired before the ATR TP/time-stop."""
+    cand, strat = _cand("basis_reversion")
+    thr = cand.params.extra["premium_threshold"]
+    exit_level = cand.params.extra["exit_premium_frac"] * thr
+
+    # SHORT faded a rich perp (premium ≥ +thr): still rich ⇒ hold; reverted under the band ⇒ exit.
+    assert strat.manage({"premium": thr, "atr_pct": 0.01}, _pos(-1)) is None
+    dec = strat.manage({"premium": exit_level - 1e-6, "atr_pct": 0.01}, _pos(-1))
+    assert dec is not None and dec.reason == "premium_reverted"
+
+    # LONG faded a cheap perp (premium ≤ −thr): exit once it has risen back above −exit_level.
+    assert strat.manage({"premium": -thr, "atr_pct": 0.01}, _pos(1)) is None
+    assert strat.manage({"premium": -exit_level + 1e-6, "atr_pct": 0.01}, _pos(1)) is not None
+
+
+def test_basis_manage_exit_offset_tracks_maker_config() -> None:
+    """The manage exit posts at the same volatility-scaled passive offset as the maker entry
+    (limit_offset_atr_mult × atr_pct), so the exit limit mirrors the entry's execution style."""
+    cand, strat = _cand("basis_reversion")
+    dec = strat.manage({"premium": 0.0, "atr_pct": 0.02}, _pos(-1))  # 0 premium ⇒ fully reverted
+    assert dec is not None
+    assert dec.limit_offset_frac == cand.params.limit_offset_atr_mult * 0.02
 
 
 def test_atr_stop_widens_on_volatile_bars() -> None:

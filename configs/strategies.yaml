@@ -21,7 +21,7 @@
 version: 1
 
 strategies:
-  strategy_version: strat_0002  # strat_0002: maker (passive-limit) entry execution for basis_reversion
+  strategy_version: strat_0003  # _0002: maker entry (basis); _0003: basis manage() premium-reversion exit
 
   # Long/short expectancy is computed separately for every candidate; a side whose
   # out-of-sample expectancy_r is at or below this floor is DISABLED before
@@ -90,6 +90,11 @@ strategies:
       exit_profile: mean_reversion
       params:
         premium_threshold: 0.0015     # |premium| (mark-vs-index) must exceed this to fire
+        # Early exit (manage hook): close once the faded premium has reverted to this fraction of
+        # the entry threshold (0.25 → exit when ~75% of the dislocation is gone; 0 → zero-cross).
+        # This is the family's REAL exit — it fires before the ATR take-profit / time-stop so a
+        # completed reversion is booked instead of sitting on the book and re-widening.
+        exit_premium_frac: 0.25
         stop_frac: 0.018              # SL FLOOR (mean-reversion can run before reverting)
         tp_frac: 0.006                # near-TP FLOOR (capture the reversion)
         hold_bars: 6

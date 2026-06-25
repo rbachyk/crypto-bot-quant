@@ -63,6 +63,45 @@ class Signal:
     limit_offset_frac: float = 0.0
 
 
+@dataclass(frozen=True, slots=True)
+class PositionView:
+    """Read-only snapshot of an open position handed to the per-bar ``manage`` hook.
+
+    The strategy that opened a position may need its own state to decide an early,
+    thesis-driven exit (e.g. a mean-reversion family exits the side it is holding when
+    the dislocation it faded has reverted). This view exposes only what such a decision
+    needs — never the engine internals — so a strategy cannot mutate live position state.
+    ``bars_held`` is grid-bars elapsed since entry; ``regime`` is the entry-time R-code.
+    """
+
+    side: int
+    entry_price: float
+    bars_held: int
+    regime: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExitDecision:
+    """A strategy's intent to CLOSE an open position early at the current decision time.
+
+    Returned by the optional ``manage`` hook (per-symbol) / ``manage_portfolio`` hook
+    (cross-asset) when the position's exit thesis has fired before any stop / take-profit
+    / time-stop. The engine executes it on the CURRENT bar: for a maker position it posts
+    a passive exit limit ``limit_offset_frac`` favorable to the closing side (sell above /
+    buy below) and fills if the bar trades through it (maker fee, zero slippage); if the bar
+    never reaches the limit it FALLS BACK to a taker cross at the bar close — the exit is
+    guaranteed this bar, paying taker cost only when the passive fill missed. A taker
+    position exits taker at the close directly.
+
+    Risk exits (stop / trailing stop) still take priority within the bar — ``manage`` only
+    adds an early exit; it can never keep a stopped-out position open. ``reason`` is the
+    exit-reason label recorded on the trade (e.g. ``"premium_reverted"``).
+    """
+
+    reason: str
+    limit_offset_frac: float = 0.0
+
+
 @runtime_checkable
 class Strategy(Protocol):
     @property
@@ -75,6 +114,17 @@ class Strategy(Protocol):
 
     def evaluate(self, row: dict) -> Signal | None:
         """Return a :class:`Signal` for this decision-time feature row, or None."""
+
+    # Optional, duck-typed (the engine calls it only when ``hasattr(strategy, "manage")``):
+    #
+    #     def manage(self, row: dict, position: PositionView) -> ExitDecision | None: ...
+    #
+    # Per-bar management hook: given the current decision-time feature row and a read-only
+    # view of an OPEN position this strategy holds, return an :class:`ExitDecision` to close
+    # it early (the entry edge has played out / inverted) or None to keep holding. Called
+    # AFTER stop/take-profit each bar, so it only adds a thesis-driven early exit; it can
+    # never override a protective stop. Causality matches ``evaluate``: ``row`` is the
+    # prior-bar-close feature row for the bar being managed (no look-ahead).
 
 
 @runtime_checkable
@@ -99,6 +149,13 @@ class PortfolioStrategy(Protocol):
 
     def evaluate_portfolio(self, symbol: str, row: dict, peers: dict[str, dict]) -> Signal | None:
         """Return a :class:`Signal` for ``symbol`` given its row + peer rows, or None."""
+
+    # Optional, duck-typed (called only when ``hasattr(strategy, "manage_portfolio")``):
+    #
+    #     def manage_portfolio(self, symbol, row, peers, position) -> ExitDecision | None: ...
+    #
+    # Cross-asset analogue of ``manage``: decide an early exit for an open ``symbol``
+    # position from its row + the peer snapshot at the managed bar's decision time.
 
 
 @dataclass(slots=True)

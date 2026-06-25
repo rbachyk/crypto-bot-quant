@@ -29,7 +29,13 @@ import structlog
 from src.backtest.config import BacktestConfig
 from src.backtest.costs import BUY, SELL, FeeModel, FundingModel, SlippageModel
 from src.backtest.risk import RiskSimulator
-from src.backtest.strategy import PortfolioStrategy, Signal, Strategy
+from src.backtest.strategy import (
+    ExitDecision,
+    PortfolioStrategy,
+    PositionView,
+    Signal,
+    Strategy,
+)
 from src.exchange.metadata import MetadataConfig
 from src.features.pipeline import FeatureFrame
 
@@ -187,6 +193,10 @@ class BacktestEngine:
         self.strategy = strategy
         # Cross-asset strategies decide from peer rows at the same decision time.
         self.is_portfolio = hasattr(strategy, "evaluate_portfolio")
+        # Optional per-bar management hook (duck-typed): a strategy that exposes ``manage``
+        # (per-symbol) or ``manage_portfolio`` (cross-asset) gets an early thesis-driven exit
+        # consulted each bar after stop/take-profit. Absent ⇒ engine-only exits (unchanged).
+        self._has_manage = hasattr(strategy, "manage_portfolio" if self.is_portfolio else "manage")
         self.fees = FeeModel(meta, cfg.costs)
         self.slippage = SlippageModel(cfg.costs)
         self.funding = FundingModel(cfg.costs)
@@ -194,6 +204,10 @@ class BacktestEngine:
         # Shared-timeline state, (re)built per run() call (see the epoch-time note there).
         self._grid_iv: int = 1  # bar interval (ms), only for hold/bars-held duration math
         self._bars_by_ts: dict[str, dict[int, dict]] = {}  # symbol -> {bar ts -> bar}
+        # Decision-time feature rows keyed by their decision_ts, for the management hook to look
+        # up "this symbol's row at the bar being managed" (and peers, for cross-asset). Built only
+        # when a strategy exposes manage()/manage_portfolio() (see run()).
+        self._rows_by_ts: dict[str, dict[int, dict]] = {}
 
     def run(self, inputs: list[SymbolInput]) -> BacktestResult:
         result = BacktestResult(
@@ -212,6 +226,14 @@ class BacktestEngine:
         # (hold period, bars-held), never as a position offset.
         self._grid_iv = self._grid_interval(inputs)
         self._bars_by_ts = {s.symbol: {b["ts"]: b for b in s.bars} for s in inputs}
+        # Feature rows keyed by decision_ts so the management hook can fetch the causally-available
+        # row for the bar it is managing (decision_ts == the managed bar's ts). Only built when the
+        # strategy manages positions per bar (avoids the dict churn for engine-only-exit runs).
+        self._rows_by_ts = (
+            {s.symbol: {int(r["decision_ts"]): r for r in s.frame.rows} for s in inputs}
+            if self._has_manage
+            else {}
+        )
         # The timeline is the ascending union of every symbol's real bar timestamps, so we visit
         # only timestamps where some symbol actually trades (no empty pre-listing slots).
         timeline = sorted({b["ts"] for s in inputs for b in s.bars})
@@ -497,6 +519,14 @@ class BacktestEngine:
                 return self._close(pos, bar, reason, price=stop_level)
             if low <= pos.tp_price:
                 return self._close(pos, bar, "take_profit", price=pos.tp_price, maker=pos.maker)
+        # Early thesis-driven exit (manage hook) — consulted AFTER stop/take-profit (so a
+        # protective stop always wins) and BEFORE the time-stop backstop (so a position whose
+        # edge has played out exits on its own signal, with its own reason, rather than bleeding
+        # to the time-stop). No-op when the strategy exposes no manage hook.
+        if self._has_manage:
+            exit_dec = self._manage_decision(pos, ts)
+            if exit_dec is not None:
+                return self._close_via_manage(pos, bar, exit_dec)
         if ts >= pos.hold_until_ts:
             return self._close(pos, bar, "time_stop", price=float(bar["close"]))
         if final:
@@ -505,6 +535,53 @@ class BacktestEngine:
         if pos.trail_dist > 0:
             pos.peak = max(pos.peak, high) if pos.side > 0 else min(pos.peak, low)
         return None
+
+    def _manage_decision(self, pos: _Open, ts: int) -> ExitDecision | None:
+        """Ask the strategy whether to exit ``pos`` early at ``ts``, or None.
+
+        Uses the decision-time feature row for the managed bar (``decision_ts == ts`` — the
+        prior bar's close, so strictly causal, same as entries). For cross-asset families the
+        peer snapshot is every OTHER symbol's row at the same ``ts``. Returns None when no row
+        exists at this ts (gap / pre-listing) or the strategy declines."""
+        row = self._rows_by_ts.get(pos.symbol, {}).get(ts)
+        if row is None:
+            return None
+        view = PositionView(
+            side=pos.side,
+            entry_price=pos.entry_price,
+            bars_held=int((ts - pos.entry_ts) // self._grid_iv),
+            regime=pos.regime,
+        )
+        if self.is_portfolio:
+            peers = {
+                sym: m[ts]
+                for sym, m in self._rows_by_ts.items()
+                if sym != pos.symbol and ts in m
+            }
+            return cast(PortfolioStrategy, self.strategy).manage_portfolio(  # type: ignore[attr-defined]
+                pos.symbol, row, peers, view
+            )
+        return cast(Strategy, self.strategy).manage(row, view)  # type: ignore[attr-defined]
+
+    def _close_via_manage(self, pos: _Open, bar: dict, exit_dec: ExitDecision) -> Trade:
+        """Execute a manage-hook exit on this bar: maker passive limit with taker fallback.
+
+        For a maker position, post the exit as a passive limit ``limit_offset_frac`` FAVORABLE to
+        the closing side (a long sells above the open, a short buys below) and fill maker (no
+        slippage, maker fee) if the bar trades through it. If the bar never reaches the limit — or
+        the position entered taker — cross the spread as a TAKER at the bar close, so the exit is
+        guaranteed on the signal bar, paying taker cost only when the passive fill missed."""
+        offset = max(0.0, exit_dec.limit_offset_frac)
+        if pos.maker and offset > 0.0:
+            ref = float(bar["open"])
+            # Favorable passive close: long → sell at ref·(1+offset) above; short → buy below.
+            limit_price = ref * (1.0 + pos.side * offset)
+            if pos.side > 0 and float(bar["high"]) >= limit_price:
+                return self._close(pos, bar, exit_dec.reason, price=limit_price, maker=True)
+            if pos.side < 0 and float(bar["low"]) <= limit_price:
+                return self._close(pos, bar, exit_dec.reason, price=limit_price, maker=True)
+        # Taker fallback — guarantee the exit at the managed bar's close.
+        return self._close(pos, bar, exit_dec.reason, price=float(bar["close"]), maker=False)
 
     def _close(
         self, pos: _Open, bar: dict, reason: str, price: float | None = None, *, maker: bool = False
