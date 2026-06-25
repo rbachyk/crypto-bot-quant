@@ -21,7 +21,7 @@
 version: 1
 
 strategies:
-  strategy_version: strat_0006  # _0005: risk_scale; _0006: basis premium-reversion exit OFF (A/B: it was a net negative)
+  strategy_version: strat_0007  # _0006: basis exit OFF; _0007: basis band entry (premium_cap 0.0030, drop repricing tail)
 
   # Long/short expectancy is computed separately for every candidate; a side whose
   # out-of-sample expectancy_r is at or below this floor is DISABLED before
@@ -103,7 +103,14 @@ strategies:
         # 0.0025 lifts per-trade quality (train mean-fold +0.055→+0.064) BUT cuts trades ~5× and the
         # fold-pass count goes fragile (folds dip under the 0.03 floor, flickering 3–4/5) while only
         # improving the noisy hold-out — not worth trading robustness for. Documented, not taken.
-        premium_threshold: 0.0015     # |premium| (mark-vs-index) must exceed this to fire
+        premium_threshold: 0.0015     # |premium| (mark-vs-index) must exceed this to fire (floor)
+        # BAND entry — upper cap on |premium|. An EXTREME dislocation (>0.3%) is one-way repricing
+        # (the perp being re-rated), not a temporary dislocation that reverts: the entry-quality
+        # study showed the edge fades to ~+0.01R there vs ~+0.07R in the moderate zone. Capping the
+        # extreme TAIL helps in- AND out-of-sample (deflated 0.53→0.56, hold-out PF 1.04→1.07);
+        # NOTE a tighter cap (0.0020) overfits (best train, worst hold-out), so this stays LOOSE —
+        # it removes only the genuine-repricing tail. Still does not clear promotion (edge decay).
+        premium_cap: 0.0030
         # Premium-reversion early exit DISABLED (sentinel < 0; see BasisReversionStrategy.manage).
         # Controlled A/B on this snapshot: it booked ~-0.11R small losses (premium reverted but
         # price hadn't paid) — holding to TP/stop/time did better. The hook stays opt-in for later.

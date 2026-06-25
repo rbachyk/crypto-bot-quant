@@ -158,11 +158,19 @@ class BasisReversionStrategy(_BaseCandidate):
     def evaluate(self, row: dict) -> Signal | None:
         premium = float(row.get("premium", 0.0))
         threshold = self.params.extra["premium_threshold"]
+        mag = abs(premium)
+        if mag < threshold:
+            return None
+        # BAND entry: fade a dislocation only when it is in the reversion zone [threshold, cap].
+        # An EXTREME premium is usually a one-way repricing (the perp is being re-rated, not
+        # temporarily dislocated) — the entry-quality study showed the edge fades to ~+0.01R for
+        # |premium| above ~0.0023 vs ~+0.078R in the moderate band. cap <= 0 disables the cap.
+        cap = self.params.extra.get("premium_cap", 0.0)
+        if cap > 0 and mag > cap:
+            return None
         if premium >= threshold:
             return self._sided(-1, f"premium {premium:+.5f} >= {threshold} ⇒ fade short", row)
-        if premium <= -threshold:
-            return self._sided(+1, f"premium {premium:+.5f} <= -{threshold} ⇒ fade long", row)
-        return None
+        return self._sided(+1, f"premium {premium:+.5f} <= -{threshold} ⇒ fade long", row)
 
     def manage(self, row: dict, position: PositionView) -> ExitDecision | None:
         """Exit the faded position once the premium it faded has REVERTED — the family's actual

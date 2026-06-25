@@ -57,6 +57,22 @@ def test_momentum_tp_r_mult_sets_a_reachable_target_in_r() -> None:
     assert sig.trail_frac > 0  # trailing stop kept as the backstop
 
 
+def test_basis_band_entry_skips_the_extreme_repricing_tail() -> None:
+    """basis fades a dislocation only inside the reversion band [threshold, cap]: a moderate premium
+    fires, but an EXTREME one (> premium_cap, i.e. one-way repricing) is skipped — both sides."""
+    cand, strat = _cand("basis_reversion")
+    thr = cand.params.extra["premium_threshold"]
+    cap = cand.params.extra["premium_cap"]
+    assert cap > thr  # band configured
+    row = {"atr_pct": 0.01}
+    # In-band dislocation fires (short on rich perp, long on cheap).
+    assert strat.evaluate({"premium": (thr + cap) / 2, **row}).side == -1
+    assert strat.evaluate({"premium": -(thr + cap) / 2, **row}).side == 1
+    # Beyond the cap → no trade (extreme = repricing, not reversion).
+    assert strat.evaluate({"premium": cap * 2, **row}) is None
+    assert strat.evaluate({"premium": -cap * 2, **row}) is None
+
+
 def test_basis_manage_exits_when_premium_reverts() -> None:
     """The manage hook (when ENABLED, exit_premium_frac ≥ 0) closes a faded position once the
     premium has reverted to the exit band — the family's real exit before the ATR TP/time-stop."""
