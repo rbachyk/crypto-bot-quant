@@ -52,6 +52,29 @@ def _median_planned_rr(trades: list[Trade]) -> float:
     return round(vals[len(vals) // 2], 6) if vals else 0.0
 
 
+def _avg(vals: list[float]) -> float:
+    return round(sum(vals) / len(vals), 6) if vals else 0.0
+
+
+def _excursion(trades: list[Trade]) -> dict:
+    """Average MFE/MAE in R, overall and split by outcome — the trade-quality lens on the exit.
+
+    ``avg_mfe_r`` of LOSERS is profit reached then given back (an exit that is too slow / a target
+    set too far); ``avg_mae_r`` of WINNERS is heat taken before the trade worked (a stop that
+    could sit wider, or an early entry). ``avg_mfe_r`` of winners vs the realized avg win shows how
+    much of the favorable move the exit actually captured."""
+    wins = [t for t in trades if t.pnl > 0]
+    losses = [t for t in trades if t.pnl <= 0]
+    return {
+        "avg_mfe_r": _avg([t.mfe_r for t in trades]),
+        "avg_mae_r": _avg([t.mae_r for t in trades]),
+        "avg_mfe_r_wins": _avg([t.mfe_r for t in wins]),
+        "avg_mae_r_wins": _avg([t.mae_r for t in wins]),
+        "avg_mfe_r_losses": _avg([t.mfe_r for t in losses]),
+        "avg_mae_r_losses": _avg([t.mae_r for t in losses]),
+    }
+
+
 def _downsample(ts: list[int], vals: list[float], n: int = 500) -> list[list[float]]:
     """``[[ts, value], ...]`` thinned to at most ``n`` evenly-spaced points (curves stay chartable
     without bloating the report — a 5m/5y run has ~575k points)."""
@@ -254,6 +277,8 @@ def build_report(result: BacktestResult, *, label: str = "") -> BacktestReport:
         "exit_reason_breakdown": _count_by(trades, lambda t: t.exit_reason),
         "worst_trades": [t.to_dict() for t in sorted(trades, key=lambda x: x.pnl)[:10]],
         "stability": _stability(trades),
+        # Excursion (MAE/MFE) trade-quality diagnostics, in R, overall + by win/loss.
+        "excursion": _excursion(trades),
     }
     return BacktestReport(payload)
 

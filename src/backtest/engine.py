@@ -90,6 +90,11 @@ class Trade:
     session: int
     bars_held: int
     planned_rr: float = 0.0  # |tp-entry|/|entry-stop| at entry (∞-ish when TP unreachable)
+    # Excursion diagnostics, in R (= price excursion ÷ stop distance), both ≥ 0. mfe_r is the
+    # best unrealized profit reached before the exit; mae_r is the worst unrealized loss reached.
+    # avg(mfe_r) of LOSERS measures profit given back; avg(mae_r) of WINNERS measures heat taken.
+    mfe_r: float = 0.0
+    mae_r: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -113,6 +118,8 @@ class Trade:
             "session": self.session,
             "bars_held": self.bars_held,
             "planned_rr": self.planned_rr,
+            "mfe_r": self.mfe_r,
+            "mae_r": self.mae_r,
         }
 
 
@@ -172,6 +179,11 @@ class _Open:
     trail_dist: float = 0.0  # price distance for the trailing stop (0 = no trailing)
     peak: float = 0.0  # best favorable price since entry (high for longs, low for shorts)
     maker: bool = False  # entered as a passive limit → take-profit exits as a maker limit too
+    # Excursion watermarks (diagnostic only — never used in an exit decision, so no look-ahead).
+    # fav_price = best favorable price seen (max high for longs, min low for shorts); adv_price =
+    # worst adverse price seen (min low for longs, max high for shorts). Seeded to entry_price.
+    fav_price: float = 0.0
+    adv_price: float = 0.0
 
 
 def _regime_of(row: dict, spread_bps: float = 0.0) -> str:
@@ -490,11 +502,21 @@ class BacktestEngine:
             trail_dist=sig.trail_frac * entry_price,
             peak=entry_price,
             maker=sig.maker,
+            fav_price=entry_price,
+            adv_price=entry_price,
         )
 
     # -- exit ------------------------------------------------------------ #
     def _maybe_exit(self, pos: _Open, bar: dict, ts: int, *, final: bool) -> Trade | None:
         high, low = float(bar["high"]), float(bar["low"])
+        # Track favorable/adverse excursion watermarks for this bar (diagnostic; folded into the
+        # trade's mfe_r/mae_r at close). Long: high is favorable, low adverse; short is the mirror.
+        if pos.side > 0:
+            pos.fav_price = max(pos.fav_price, high)
+            pos.adv_price = min(pos.adv_price, low)
+        else:
+            pos.fav_price = min(pos.fav_price, low)
+            pos.adv_price = max(pos.adv_price, high)
         # Effective stop: the initial stop, ratcheted by a trailing stop set from the best
         # favorable excursion BEFORE this bar (so a fresh high on this bar can't raise the stop
         # that this same bar's low then hits — conservative, no intrabar look-ahead). When
@@ -620,6 +642,22 @@ class BacktestEngine:
         # the edge depends on the time-stop, not a target (compare against realized RR).
         stop_dist = abs(pos.entry_price - pos.stop_price)
         planned_rr = abs(pos.tp_price - pos.entry_price) / stop_dist if stop_dist > 0 else 0.0
+        # Excursion in R: fold in THIS bar's extremes too, so the force-close path (which skips
+        # _maybe_exit) still counts the final bar. mfe/mae are price excursions ÷ the entry stop
+        # distance (risk per unit), matching pnl_r's R unit. Both ≥ 0.
+        risk_per_unit = pos.risk_amount / pos.qty if pos.qty > 0 else 0.0
+        if pos.side > 0:
+            fav = max(pos.fav_price, float(bar["high"]))
+            adv = min(pos.adv_price, float(bar["low"]))
+            mfe = fav - pos.entry_price
+            mae = pos.entry_price - adv
+        else:
+            fav = min(pos.fav_price, float(bar["low"]))
+            adv = max(pos.adv_price, float(bar["high"]))
+            mfe = pos.entry_price - fav
+            mae = adv - pos.entry_price
+        mfe_r = max(0.0, mfe / risk_per_unit) if risk_per_unit > 0 else 0.0
+        mae_r = max(0.0, mae / risk_per_unit) if risk_per_unit > 0 else 0.0
         return Trade(
             symbol=pos.symbol,
             strategy=pos.strategy,
@@ -642,6 +680,8 @@ class BacktestEngine:
             # Bars held in grid terms: elapsed time / bar interval (was an index delta).
             bars_held=int((exit_ts - pos.entry_ts) // self._grid_iv),
             planned_rr=round(planned_rr, 6),
+            mfe_r=round(mfe_r, 6),
+            mae_r=round(mae_r, 6),
         )
 
     # -- funding --------------------------------------------------------- #

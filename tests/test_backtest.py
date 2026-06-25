@@ -547,6 +547,35 @@ def test_manage_maker_exit_fills_passive_then_falls_back_to_taker(cfg, meta):
     assert r2.trades[0].slippage_cost > 0.0  # the taker exit leg incurs slippage
 
 
+def test_trade_records_mfe_and_mae_in_r(cfg, meta):
+    """Every trade records its max favorable / adverse excursion in R (stop-distance units): a long
+    that rallies before reversing has mfe_r ≈ peak-move/stop and mae_r ≈ dip/stop."""
+    iv = 60_000
+
+    class FireOnce:
+        name = "fire_once"
+        strategy_version = "t1"
+
+        def evaluate(self, row: dict):
+            if row["decision_ts"] == iv:
+                return Signal(side=1, stop_frac=0.10, tp_frac=10.0, hold_bars=100)
+            return None
+
+    bars = [
+        _bar(0, 100, 100, 100, 100),
+        _bar(iv, 100, 100, 100, 100),  # entry at open 100; stop_frac 0.10 ⇒ 1R = 10 price units
+        _bar(2 * iv, 100, 105, 96, 98),  # +5 favorable (0.5R), −4 adverse (0.4R)
+        _bar(3 * iv, 98, 99, 97, 98),  # time-stop backstop will close it eventually
+    ]
+    result = BacktestEngine(cfg, meta, FireOnce()).run([_manage_sym(bars)])
+    assert len(result.trades) == 1
+    t = result.trades[0]
+    # entry ~100, 1R = 100·0.10 = 10. Peak high 105 → mfe ≈ 0.5R; trough low 96 → mae ≈ 0.4R.
+    assert t.mfe_r == pytest.approx(0.5, abs=0.05)
+    assert t.mae_r == pytest.approx(0.4, abs=0.05)
+    assert t.mfe_r >= 0.0 and t.mae_r >= 0.0
+
+
 def test_engine_charges_costs_on_every_trade(cfg, meta, ref_inputs):
     run = run_engine(cfg, meta, ref_inputs, label="costs")
     assert run.report.trade_count > 0
