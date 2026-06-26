@@ -75,6 +75,43 @@ Control Center shows session/gate/kill-switch status. Stop with
 `docker compose stop paper-live`; the kill switch (`qbot kill` / dashboard) halts trading without
 stopping the container.
 
+## Basket (cross-sectional) paper-trading
+
+Carry / factor baskets (**funding_carry**, **residual_momentum**) run through the
+`CrossSectionalEngine` — a dollar-neutral basket rebalanced on the live feed — which the per-symbol
+`paper-live` loop cannot drive. They paper-trade through a **separate** path, and crucially **do not
+require promotion**: a basket strategy is named explicitly and paper is simulated (no real account
+to protect), so a validated-but-not-yet-promoted carry/momentum edge can be paper-traded today.
+Their booked legs persist to `paper_trades` like every session, so they show up on the dashboard
+**Overview** and **Paper Trading** pages.
+
+Three ways to run them (pick one):
+
+1. **Managed compose services (recommended on the VPS)** — restart-on-failure, one per strategy:
+   ```
+   docker compose --profile paper up -d paper-basket-funding-carry paper-basket-residual
+   docker compose logs -f paper-basket-funding-carry
+   ```
+   Timeframe/cadence come from `.env` (`PAPER_BASKET_TIMEFRAME=1h`, `PAPER_BASKET_POLL_SEC=60`);
+   the strategy ids default to `funding_carry` / `residual_momentum` (override via
+   `PAPER_BASKET_FUNDING_STRATEGY` / `PAPER_BASKET_RESIDUAL_STRATEGY`). These run **independently**
+   of `paper-live`, so lead_lag on 4h and the baskets on 1h all run at once.
+
+2. **Dashboard** — **Paper Trading** page → *Basket (cross-sectional) paper sessions* → pick a
+   strategy + timeframe → **Start basket paper session**. It enqueues a continuous job on the
+   `live` worker (so the core stack must be up); the same row has a **Stop** button. (Needs the
+   `worker-live` service — part of `docker compose up -d`.)
+
+3. **Manual CLI** (ad-hoc):
+   ```
+   docker compose exec worker-live python -m src.cli.main \
+     paper-basket --strategy funding_carry --timeframe 1h --poll-sec 60
+   ```
+
+All three drive the same `CrossSectionalEngine` rebalance / leg / funding math as the backtest (the
+Parity Rule). The loop math is offline-proven (`tests/test_basket_paper.py`); the live REST feed is
+network-dependent and VPS-validated. PAPER only — simulated fills, no real orders/funds.
+
 ## Notes & current limitations
 
 - **One timeframe per `paper-live`.** The loop runs a single timeframe and `--multi-strategy`
@@ -87,13 +124,11 @@ stopping the container.
 - **No real funds, ever, in paper mode.** Going to testnet/live is a separate, gated path
   (`--profile live`, `ENABLE_LIVE_TRADING`, sign-off, real keys) — out of scope here.
 - **Parity:** maker fills, trailing/TP brackets, `risk_scale`, and the time-stop are honored in the
-  live/paper path. Cross-sectional (basket) strategies like funding_carry do **not** run through
-  `qbot live` (a per-symbol directional loop); they paper-trade via a dedicated basket loop:
-  ```
-  qbot paper-basket --strategy funding_carry --timeframe 1h --poll-sec 60
-  ```
-  This drives the same `CrossSectionalEngine` rebalance / leg / funding math as the backtest (the
-  Parity Rule) over the live REST cross-section, booking each closed leg as a `PaperTrade`. The loop
-  math is offline-proven (`tests/test_basket_paper.py`); the live feed is REST-network-dependent and
-  validated on the VPS. Run it as a **separate** process from `paper-live` (which handles directional
-  strategies). PAPER only — simulated fills, no real orders/funds.
+  live/paper path. Cross-sectional (basket) strategies (funding_carry, residual_momentum) do **not**
+  run through `qbot live` (a per-symbol directional loop) — see *Basket (cross-sectional)
+  paper-trading* above for their dedicated path (managed services / dashboard button / CLI).
+- **Promotion vs paper:** `paper-live --multi-strategy` runs the **promoted** ensemble only (the gate
+  protects real accounts). The basket path is **not** promotion-gated — paper is simulated, so a
+  3/5-fold edge like funding_carry/residual_momentum can be paper-traded by name while it's still
+  short of promotion. Promotion is written *only* by the validation gate (`promote-lake`); there is
+  no manual force-promote.

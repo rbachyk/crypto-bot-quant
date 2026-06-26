@@ -33,7 +33,8 @@ _CLASS_MEMBERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("rl", ("train_rl_", "run_rl_", "simulate_rl_", "rl_")),
     # A live/demo run is a long-lived loop; give it a dedicated worker so it never blocks
     # (or is blocked by) backtest/data jobs. reset_env_stats rides the same class (light).
-    ("live", ("run_live_session", "reset_env_stats")),
+    # run_basket_paper_session is the same shape (a continuous cross-sectional paper loop).
+    ("live", ("run_live_session", "run_basket_paper_session", "reset_env_stats")),
     (
         "backtest",
         (

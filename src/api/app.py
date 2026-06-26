@@ -670,6 +670,24 @@ def _valid_timeframe(tf: str) -> str:
     return tf if tf in tfs else ""
 
 
+def _cross_sectional_candidate_ids() -> list[str]:
+    """Enabled candidate ids whose built strategy is a cross-sectional (basket) one — the set the
+    basket PAPER path (CrossSectionalEngine) can run (funding_carry, residual_momentum, …)."""
+    from src.strategies.candidates import build_strategy
+    from src.strategies.config import load_strategies_config
+
+    sc = load_strategies_config()
+    out: list[str] = []
+    for c in sc.enabled_candidates():
+        try:
+            strat = build_strategy(c, sc.strategy_version)
+        except ValueError:
+            continue
+        if getattr(strat, "cross_sectional", False):
+            out.append(c.id)
+    return out
+
+
 def _period_selector(action: str, period: str) -> str:
     """A custom segmented pill control that re-renders the page per time period (Section 25).
 
@@ -3362,9 +3380,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _audit("run_paper_session", target="paper", actor=user, detail={})
         return {"job_id": job_id}
 
+    @app.post("/api/paper/run-basket")
+    def run_paper_basket(
+        strategy: str = "", timeframe: str = "", user: str = Depends(require_dashboard_auth)
+    ) -> RedirectResponse:
+        """Start a continuous cross-sectional (basket) PAPER session for ONE named strategy on the
+        dedicated live worker. PAPER only (simulated fills); does NOT require promotion — a basket
+        carry/momentum edge (funding_carry / residual_momentum) is paper-traded by name. The Stop
+        button on this page cancels the job."""
+        from src.jobs import JobQueue
+
+        if strategy not in _cross_sectional_candidate_ids():
+            raise HTTPException(status_code=400, detail=f"{strategy!r} is not a basket strategy")
+        params: dict = {"strategy": strategy, "requested_by": user}
+        if _valid_timeframe(timeframe):
+            params["timeframe"] = timeframe
+        JobQueue(settings).enqueue("run_basket_paper_session", params, requested_by=user)
+        _audit(
+            "run_basket_paper_session", target=strategy, actor=user,
+            detail={"timeframe": timeframe},
+        )
+        return RedirectResponse(url="/dashboard/paper", status_code=303)
+
     @app.get("/dashboard/paper", response_class=HTMLResponse)
     def dashboard_paper(user: str = Depends(require_dashboard_auth)) -> str:
-        from src.db.models import PaperRun
+        from src.db.models import JobStatus, PaperRun
 
         with session_scope() as session:
             runs = (
@@ -3385,11 +3425,57 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
                 for r in runs
             ]
+            # Basket (cross-sectional) paper-session jobs — running first, so the operator sees
+            # progress + can Stop (these are continuous loops on the live worker).
+            basket_jobs = list(
+                session.execute(
+                    select(Job)
+                    .where(Job.job_type == "run_basket_paper_session")
+                    .order_by(desc(Job.created_at))
+                    .limit(20)
+                )
+                .scalars()
+                .all()
+            )
+            basket_rows = []
+            for j in basket_jobs:
+                active = j.status in (JobStatus.QUEUED, JobStatus.RUNNING)
+                strat = str((j.input_params or {}).get("strategy", "?"))
+                tf = str((j.input_params or {}).get("timeframe", "base"))
+                stop = (
+                    f"<form method='post' action='/api/jobs/{j.job_id}/cancel' "
+                    f"style='display:inline'><button class='btn btn-danger' type='submit'>"
+                    f"&#9632; Stop</button></form>"
+                    if active
+                    else "-"
+                )
+                basket_rows.append(
+                    f"<tr><td><code>{_esc(strat)}</code></td><td>{_esc(tf)}</td>"
+                    f"<td>{_esc(str(j.status.value if hasattr(j.status, 'value') else j.status))}"
+                    f"</td><td>{j.created_at.strftime('%Y-%m-%d %H:%M')}</td><td>{stop}</td></tr>"
+                )
 
         body_rows = "".join(
             f"<tr><td><code>{_esc(sid)}</code></td><td>{created}</td><td>{ex}</td><td>{rej}</td>"
             f"<td>{net:+.2f}</td><td>{er:+.4f}</td><td>{wr:.0%}</td><td>{_esc(strats)}</td></tr>"
             for (sid, created, ex, rej, net, er, wr, strats) in rows
+        )
+        basket_ids = _cross_sectional_candidate_ids()
+        strat_opts = "".join(f'<option value="{_esc(s)}">{_esc(s)}</option>' for s in basket_ids)
+        tfs, _base = _data_timeframes()
+        tf_opts = "".join(f'<option value="{_esc(t)}">{_esc(t)}</option>' for t in tfs)
+        basket_start = (
+            f"""
+  <form method="post" action="/api/paper/run-basket" style="margin:8px 0">
+    <select name="strategy">{strat_opts}</select>
+    <select name="timeframe">{tf_opts}</select>
+    <button class="btn" type="submit">&#9654; Start basket paper session</button>
+  </form>"""
+            if basket_ids
+            else "<p class='meta'>No cross-sectional (basket) candidates are enabled.</p>"
+        )
+        basket_table = "".join(basket_rows) or (
+            "<tr><td colspan='5' class='meta'>No basket sessions yet.</td></tr>"
         )
         body = f"""
 <div class="card">
@@ -3404,6 +3490,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     <tr><th>Session</th><th>Created</th><th>Executed</th><th>Rejected</th><th>Net PnL</th>
         <th>Expectancy R</th><th>Win Rate</th><th>Strategies</th></tr>
     {body_rows or '<tr><td colspan="8" class="meta">No paper sessions yet — click Run paper session.</td></tr>'}
+  </table>
+</div>
+<div class="card">
+  <h2>Basket (cross-sectional) paper sessions</h2>
+  <p class="meta">Carry / factor baskets (funding_carry, residual_momentum) run through the
+     <b>CrossSectionalEngine</b>, not the per-symbol path. PAPER only (simulated fills) and
+     <b>does not require promotion</b> — pick a strategy + timeframe and Start. The loop is
+     continuous; press Stop to end. Booked legs appear in the table above and on Overview.</p>
+  {basket_start}
+  <table>
+    <tr><th>Strategy</th><th>TF</th><th>Status</th><th>Started</th><th></th></tr>
+    {basket_table}
   </table>
 </div>"""
         return _page("Paper Trading", body)

@@ -784,6 +784,62 @@ def _run_paper_session(ctx: JobContext, params: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Basket (cross-sectional) PAPER loop — dashboard-triggered, rides the `live`   #
+# queue (a long-lived continuous loop). The per-symbol `run_live_session` path  #
+# can't run a basket strategy (funding_carry / residual_momentum) through its   #
+# engine, so this drives the CrossSectionalEngine in real time (Section 12/19). #
+# --------------------------------------------------------------------------- #
+@job_handler("run_basket_paper_session")
+def _run_basket_paper_session(ctx: JobContext, params: dict) -> dict:
+    """Run + persist a continuous cross-sectional (basket) PAPER session for ONE strategy.
+
+    PAPER only — simulated fills, no real orders/funds. Sources data from the live REST feed and
+    drives :func:`src.live.basket.run_basket_paper_session` (which reuses the offline-proven
+    ``BasketPaperLoop``). The loop polls the job's cancel flag every tick, so the dashboard Stop
+    button halts it cleanly; whatever booked before the stop is still persisted. Unlike
+    ``run_live_session`` this does NOT require promotion — a basket strategy is named explicitly and
+    paper is simulated, so an unpromoted-but-validated carry/momentum edge can be paper-traded."""
+    from src.config import get_settings
+    from src.data.config import load_data_config
+    from src.live.basket import run_basket_paper_session
+
+    settings = get_settings()
+    strategy = str(params.get("strategy") or params.get("candidate_id") or "").strip()
+    if not strategy:
+        raise ValueError("run_basket_paper_session requires a 'strategy' (cross-sectional id)")
+    config_path = str(params.get("config_path") or "configs/data.bybit.yaml")
+    data_cfg = load_data_config(config_path)
+    timeframe = params.get("timeframe") or None
+    poll_sec = float(params.get("poll_sec") or 60.0)
+    max_ticks = int(params["max_ticks"]) if params.get("max_ticks") else None
+
+    ctx.log(
+        f"starting basket paper session: strategy={strategy} "
+        f"timeframe={timeframe or data_cfg.base_timeframe} poll_sec={poll_sec} "
+        f"max_ticks={'continuous' if max_ticks is None else max_ticks}"
+    )
+    ctx.progress(0, max_ticks or 0, "starting basket paper loop (press Stop to end)")
+
+    n_trades = run_basket_paper_session(
+        strategy,
+        data_cfg=data_cfg,
+        timeframe=timeframe,
+        poll_sec=poll_sec,
+        max_ticks=max_ticks,
+        settings=settings,
+        # Stop on a dashboard Stop (cancel flag) OR if this run was superseded (another worker
+        # now owns the requeued job) — so two basket loops never run at once.
+        should_stop=lambda: ctx.is_cancelled() or not ctx.still_owns(),
+    )
+    ctx.progress(max_ticks or 0, max_ticks or 0, f"stopped: {n_trades} paper legs booked")
+    return {
+        "message": f"basket paper session ({strategy}): {n_trades} legs booked",
+        "strategy": strategy,
+        "trades": n_trades,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Live / demo trading loop (dashboard-triggered; runs on the dedicated `live`  #
 # queue). Lets the operator start, watch, stop, and restart a demo/testnet run #
 # entirely from the dashboard — no terminal command required.                  #

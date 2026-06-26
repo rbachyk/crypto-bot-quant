@@ -100,6 +100,27 @@ def test_enqueue_unknown_job_rejected() -> None:
     assert resp.status_code == 400
 
 
+def test_run_basket_rejects_non_cross_sectional_strategy() -> None:
+    """The basket-paper start endpoint must reject a strategy that isn't cross-sectional BEFORE
+    enqueueing (no redis hit) — only funding_carry / residual_momentum-style baskets run here."""
+    resp = client.post(
+        "/api/paper/run-basket",
+        params={"strategy": "lead_lag", "timeframe": ""},
+        auth=AUTH,
+        headers={"sec-fetch-site": "same-origin"},
+    )
+    assert resp.status_code == 400
+
+
+@requires_db
+def test_dashboard_paper_offers_basket_start_form() -> None:
+    """The Paper page exposes the basket launch control with the cross-sectional candidates."""
+    resp = client.get("/dashboard/paper", auth=AUTH)
+    assert resp.status_code == 200
+    assert "Start basket paper session" in resp.text
+    assert "funding_carry" in resp.text  # a cross-sectional candidate in the dropdown
+
+
 def test_dashboard_killswitch_engage_and_recovery(tmp_path) -> None:
     # Isolated kill switch (own data lake, unreachable redis ⇒ file backend) so the
     # test never touches shared state (AGENTS.md Section 2.2, KILL gate).

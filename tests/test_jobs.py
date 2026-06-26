@@ -140,6 +140,17 @@ def test_run_backtest_job_persists_result() -> None:
         assert mine[0].trade_count > 0
 
 
+def test_basket_paper_session_routes_to_live_worker_and_is_registered() -> None:
+    """The continuous cross-sectional paper loop must ride the dedicated `live` queue (like
+    run_live_session, so it never blocks/gets blocked) and have a registered handler."""
+    import src.jobs.handlers  # noqa: F401 - import registers all handlers
+    from src.jobs.registry import registry
+    from src.jobs.routing import queue_class
+
+    assert queue_class("run_basket_paper_session") == "live"
+    assert registry.get("run_basket_paper_session") is not None  # raises KeyError if missing
+
+
 @requires_redis
 def test_enqueue_routes_to_class_queue() -> None:
     # Heavy ML / data / gate jobs are routed to dedicated class queues (B.13 isolation),

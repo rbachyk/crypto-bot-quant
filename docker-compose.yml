@@ -270,6 +270,65 @@ services:
       redis:
         condition: service_healthy
 
+  # Cross-sectional (basket) PAPER loops — funding_carry / residual_momentum run through the
+  # CrossSectionalEngine (the per-symbol `paper-live` path can't). PAPER mode = offline
+  # SimulatedVenue (NO real funds, no keys); does NOT require promotion (a basket strategy is named
+  # explicitly and paper is simulated). One service per (strategy, timeframe); both opt in via
+  # `docker compose --profile paper up -d paper-basket-funding-carry paper-basket-residual`.
+  paper-basket-funding-carry:
+    <<: *app-build
+    profiles: ["paper"]
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      SERVICE_NAME: paper-basket-funding-carry
+      TRADING_MODE: PAPER
+    command:
+      - python
+      - -m
+      - src.cli.main
+      - paper-basket
+      - --strategy
+      - "${PAPER_BASKET_FUNDING_STRATEGY:-funding_carry}"
+      - --timeframe
+      - "${PAPER_BASKET_TIMEFRAME:-1h}"
+      - --poll-sec
+      - "${PAPER_BASKET_POLL_SEC:-60}"
+      - --config
+      - "${PAPER_DATA_CONFIG:-configs/data.bybit.yaml}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  paper-basket-residual:
+    <<: *app-build
+    profiles: ["paper"]
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      SERVICE_NAME: paper-basket-residual
+      TRADING_MODE: PAPER
+    command:
+      - python
+      - -m
+      - src.cli.main
+      - paper-basket
+      - --strategy
+      - "${PAPER_BASKET_RESIDUAL_STRATEGY:-residual_momentum}"
+      - --timeframe
+      - "${PAPER_BASKET_TIMEFRAME:-1h}"
+      - --poll-sec
+      - "${PAPER_BASKET_POLL_SEC:-60}"
+      - --config
+      - "${PAPER_DATA_CONFIG:-configs/data.bybit.yaml}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   # DISABLED BY DEFAULT — only starts with `--profile live` AND a production,
   # explicitly live-enabled config (see src.config.Settings safety validator).
   trading-engine-live:
