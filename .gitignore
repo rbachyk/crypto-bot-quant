@@ -47,3 +47,6 @@ reports/phase_13/
 # OS
 .DS_Store
 .aider*
+
+# Local/VPS-only compose overrides (host port mappings for an external proxy, etc.)
+docker-compose.override.yml
