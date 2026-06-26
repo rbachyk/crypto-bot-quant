@@ -372,6 +372,12 @@ def live(
     realtime: bool = typer.Option(
         False, "--realtime", help="drive candidates from the live feed (needs --transport)"
     ),
+    multi_strategy: bool = typer.Option(
+        False, "--multi-strategy", help="run the active PROMOTED ensemble (not a single --strategy)"
+    ),
+    poll_sec: float = typer.Option(
+        0.0, "--poll-sec", help="real-time poll interval; >0 = CONTINUOUS session (waits for bars)"
+    ),
     max_ticks: int = typer.Option(0, "--max-ticks", help="0 = process the whole snapshot"),
 ) -> None:
     """Run the live trading loop over a snapshot (replay), shadow/paper by default.
@@ -392,8 +398,10 @@ def live(
         timeframe=timeframe or None,
         symbols=syms,
         candidate_id=strategy or None,
+        multi_strategy=multi_strategy,
         transport=transport or None,
         realtime=realtime,
+        poll_sec=poll_sec,
         max_ticks=max_ticks or None,
     )
     typer.echo(

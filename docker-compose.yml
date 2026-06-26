@@ -232,6 +232,44 @@ services:
       redis:
         condition: service_healthy
 
+  # CONTINUOUS PAPER-TRADING of the promoted ensemble on LIVE data (REST-polled closed bars).
+  # Profiled `paper` so a plain `docker compose up` does NOT start it — opt in on the VPS with
+  # `docker compose --profile paper up -d paper-live`. PAPER mode = offline SimulatedVenue (NO real
+  # funds, no keys). `--multi-strategy` runs only REAL-DATA-validated promoted strategies (a
+  # reference/synthetic candidate can never trade here); with nothing promoted the feed simply has
+  # no candidates (safe no-op). NOTE: the loop runs ONE timeframe — run one paper-live per timeframe
+  # that has promoted strategies (PAPER_TIMEFRAME). restart keeps it up across transient faults.
+  paper-live:
+    <<: *app-build
+    profiles: ["paper"]
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      SERVICE_NAME: paper-live
+      TRADING_MODE: PAPER
+    command:
+      - python
+      - -m
+      - src.cli.main
+      - live
+      - --mode
+      - paper
+      - --realtime
+      - --transport
+      - rest
+      - --multi-strategy
+      - --poll-sec
+      - "${PAPER_POLL_SEC:-60}"
+      - --timeframe
+      - "${PAPER_TIMEFRAME:-4h}"
+      - --config
+      - "${PAPER_DATA_CONFIG:-configs/data.bybit.yaml}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   # DISABLED BY DEFAULT — only starts with `--profile live` AND a production,
   # explicitly live-enabled config (see src.config.Settings safety validator).
   trading-engine-live:
