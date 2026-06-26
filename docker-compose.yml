@@ -127,12 +127,16 @@ services:
         condition: service_started
     expose:
       - "8001"
-    # Loopback-only host publish so the dashboard is reachable WITHOUT Caddy in local dev:
-    # open http://127.0.0.1:8001 (bound to 127.0.0.1, so it is never externally exposed — the
-    # INFRA gate's "only 443 external" check ignores loopback ports). On the VPS, front it with
-    # the `proxy` profile (Caddy) instead.
+    # Host publish: host 8504 -> container 8001 (where uvicorn listens). Bound to 0.0.0.0 (the
+    # default when no IP is given), NOT 127.0.0.1 — a CONTAINERISED external Caddy reaching this via
+    # host.docker.internal arrives on the host's bridge gateway, which a loopback-bound port refuses.
+    # This makes 8504 reachable on the VPS's public interface too: restrict it at the host firewall
+    # (Docker's published ports BYPASS ufw — use the DOCKER-USER iptables chain), or the fully
+    # private alternative: put Caddy on the `trading-bot-internal` network and proxy to dashboard:8001
+    # (then drop this publish entirely). NOTE: a non-443 publish trips the INFRA "only-443" gate — a
+    # VPS-deploy trade-off, fine for paper; revert to "127.0.0.1:8001:8001" for local dev.
     ports:
-      - "127.0.0.1:8504:8504"
+      - "8504:8001"
 
   worker-data:
     <<: *app-build
