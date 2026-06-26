@@ -151,6 +151,27 @@ class BasketPaperLoop:
                 self.on_trade(pt)
 
 
+def _halt_check(
+    caller_stop: Callable[[], bool] | None, kill_switch: object
+) -> Callable[[], bool]:
+    """Compose the caller's stop condition with the GLOBAL kill switch so the basket loop halts on
+    a kill-switch engage too — not just the dashboard Stop / job-cancel. The per-symbol live loop
+    already honours the kill switch (loop.py); the basket path must too, or an emergency halt
+    would stop directional trading but leave the carry/factor baskets running. Fail-safe: an error
+    reading the kill switch is treated as NOT engaged here (caller_stop / job-cancel still applies),
+    matching KillSwitch's own never-raise contract."""
+
+    def _should_stop() -> bool:
+        try:
+            if kill_switch.engaged():  # type: ignore[attr-defined]
+                return True
+        except Exception:  # noqa: BLE001 - never let a kill-switch read crash the loop
+            pass
+        return bool(caller_stop and caller_stop())
+
+    return _should_stop
+
+
 def run_basket_paper_session(
     candidate_id: str,
     *,
@@ -167,6 +188,7 @@ def run_basket_paper_session(
     :class:`BasketPaperLoop` from its cross-section snapshots, and persists the booked PaperTrades
     the same way every paper session is (so the dashboard shows them). PAPER only — simulated fills,
     no real orders. ``poll_sec`` > 0 = continuous (waits for new bars). Returns the trade count.
+    Halts on the GLOBAL kill switch (flattens + persists) as well as the caller's ``should_stop``.
 
     NOTE: network-dependent — validated against the live feed on the VPS, not in offline tests (the
     loop math is proven by tests/test_basket_paper.py). Run via `qbot paper-basket`.
@@ -176,6 +198,7 @@ def run_basket_paper_session(
     from src.data.config import load_data_config
     from src.data.schema import timeframe_ms
     from src.exchange.metadata import load_metadata_for
+    from src.killswitch import KillSwitch
     from src.live.data_manager import LiveDataManager
     from src.live.realtime import LiveCandidateFeed
     from src.live.websocket_feed import live_feed_source
@@ -201,10 +224,13 @@ def run_basket_paper_session(
         timeframe=tf, exchange_env=settings.exchange_env,
     )
     data_manager = LiveDataManager(source, syms, interval_ms=timeframe_ms(tf))
+    # Halt on the GLOBAL kill switch (emergency stop) as well as the caller's Stop / job-cancel.
+    # When it fires the feed stops yielding, close_all flattens every leg, and the session persists.
+    halt = _halt_check(should_stop, KillSwitch(settings))
     feed = LiveCandidateFeed(
         data_cfg, feed_source=source, data_manager=data_manager, timeframe=tf, symbols=syms,
         candidate_id=candidate_id, settings=settings, max_groups=max_ticks, poll_sec=poll_sec,
-        should_stop=should_stop,
+        should_stop=halt,
     )
 
     meta = load_metadata_for(data_cfg.exchange_id)

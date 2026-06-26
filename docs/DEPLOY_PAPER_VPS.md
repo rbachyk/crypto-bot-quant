@@ -112,6 +112,38 @@ All three drive the same `CrossSectionalEngine` rebalance / leg / funding math a
 Parity Rule). The loop math is offline-proven (`tests/test_basket_paper.py`); the live REST feed is
 network-dependent and VPS-validated. PAPER only — simulated fills, no real orders/funds.
 
+## Risk & position management across the parallel strategies
+
+The three strategies run as **three separate processes**, each with its **own** equity pool
+(`account.initial_equity`) and its **own** `PaperSession`. Risk is enforced *within* each process by
+**two different models**, and — importantly — there is **no portfolio layer across them**:
+
+- **`lead_lag` (per-symbol path)** runs the full `RiskManager` (`src/risk/manager.py`): per-trade
+  sizing `equity × base_risk_pct × risk_scale / |entry − stop|` (capped at the envelope), plus
+  portfolio **heat** (Σ open risk), net **beta-to-BTC**, and **concurrency** caps, plus the circuit
+  breakers. Positions are managed per tick by exchange-style stop / reachable TP / ATR trail /
+  time-stop.
+- **The baskets (`funding_carry`, `residual_momentum`)** do **not** use `RiskManager`. Sizing is
+  `gross = equity × portfolio_gross × risk_scale`, split dollar-neutral across legs; `stop_frac` is
+  an **accounting R-unit only**. Legs are held delta-neutral and **exit only on the rebalance
+  cadence** (or at session end) — there is **no protective stop monitored between rebalances** (a
+  stop would knife the hedge). This is correct for a carry/factor basket but means a leg's mark can
+  drift until the next rebalance.
+
+**Cross-process caveats (matter for live, not for isolated paper measurement):**
+
+- **No aggregation.** The heat / beta / concurrency caps apply *within* `lead_lag` only; the basket
+  processes don't see each other or `lead_lag`. Each process also sizes off the **full**
+  `initial_equity`, so three processes ≈ **3× the intended account exposure**, and a
+  `lead_lag`-short-BTC vs basket-long-BTC position does **not** net. Fine for measuring each edge's
+  standalone Sharpe in paper; **wrong for a single real account** — a shared capital allocator /
+  aggregate-exposure layer is required before live.
+- **Kill switch (shared).** The global `KillSwitch` (redis-backed, also a local file) is the one
+  control all three honour: `lead_lag` checks it per tick, and the basket loop now halts on it too
+  (`_halt_check` in `src/live/basket.py` — flattens every leg and persists on engage). Engage from
+  the dashboard or `qbot kill`; it stops *all* three processes (redis backend is shared across
+  containers).
+
 ## Notes & current limitations
 
 - **One timeframe per `paper-live`.** The loop runs a single timeframe and `--multi-strategy`

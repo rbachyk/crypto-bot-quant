@@ -6,9 +6,11 @@ from __future__ import annotations
 
 from src.backtest.config import load_backtest_config
 from src.backtest.engine import SymbolInput
+from src.config import Settings
 from src.exchange.metadata import load_metadata_config
 from src.features.pipeline import FeatureFrame
-from src.live.basket import BasketPaperLoop
+from src.killswitch import KillSwitch
+from src.live.basket import BasketPaperLoop, _halt_check
 from src.paper.session import PaperSession
 from src.strategies.candidates import build_strategy
 from src.strategies.config import load_strategies_config
@@ -68,3 +70,27 @@ def test_basket_paper_loop_books_profitable_carry_trades():
     assert longs and shorts  # dollar-neutral basket trades both sides
     assert sum(t.pnl for t in session.trades) > 0.0  # planted carry is harvested
     assert all(t.execution_route == "maker" for t in session.trades)  # rebalanced as maker
+
+
+def test_basket_halt_check_honours_global_kill_switch(tmp_path) -> None:
+    """The basket loop's stop condition must trip on the GLOBAL kill switch (emergency halt), not
+    just the caller's Stop/job-cancel — or a kill switch would stop directional trading but leave
+    the carry/factor baskets running. Isolated file-backed switch (unreachable redis)."""
+    iso = Settings(
+        _env_file=None, app_env="paper",
+        data_lake_path=tmp_path / "dl", redis_url="redis://127.0.0.1:1/0",
+    )
+    kill = KillSwitch(iso)
+    kill.disengage()  # clean slate
+
+    # caller never asks to stop; only the kill switch governs.
+    halt = _halt_check(lambda: False, kill)
+    assert halt() is False  # not engaged → keep running
+    kill.engage(reason="test")
+    assert halt() is True  # engaged → halt the basket loop
+    kill.disengage()
+    assert halt() is False
+
+    # caller's own stop still works independently of the kill switch.
+    assert _halt_check(lambda: True, kill)() is True
+    assert _halt_check(None, kill)() is False
