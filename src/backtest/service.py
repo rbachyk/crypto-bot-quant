@@ -552,8 +552,15 @@ def run_engine(
     *,
     label: str = "",
 ) -> BacktestRunResult:
-    engine = BacktestEngine(cfg, meta, strategy or make_strategy(cfg))
-    result = engine.run(inputs)
+    strat = strategy or make_strategy(cfg)
+    # Route cross-sectional (basket) strategies to the portfolio engine; everything else uses the
+    # per-trade engine. Single dispatch point, so walk-forward / stress route automatically.
+    if getattr(strat, "cross_sectional", False):
+        from src.backtest.portfolio import CrossSectionalEngine
+
+        result = CrossSectionalEngine(cfg, meta, strat).run(inputs)
+    else:
+        result = BacktestEngine(cfg, meta, strat).run(inputs)
     report = build_report(result, label=label)
     return BacktestRunResult(result=result, report=report)
 

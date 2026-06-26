@@ -345,6 +345,16 @@ class FundingCarryStrategy(_BaseCandidate):
     horizon; an ATR stop bounds the idiosyncratic price risk. Diversifies the directional book.
     """
 
+    # Routed to the CrossSectionalEngine (dollar-neutral basket) instead of the per-trade engine —
+    # a carry edge must be held delta-neutral or the directional variance of unhedged legs buries
+    # the funding cash flow. The engine ranks the universe by score() each rebalance.
+    cross_sectional = True
+
+    def score(self, row: dict) -> float | None:
+        """Cross-sectional rank score (higher ⇒ more attractive LONG). Funding carry favours the
+        most-NEGATIVE funding (paid to be long), so the score is −funding_z."""
+        return -float(row.get("funding_z", 0.0))
+
     @property
     def hypothesis(self) -> StrategyHypothesis:
         return StrategyHypothesis(

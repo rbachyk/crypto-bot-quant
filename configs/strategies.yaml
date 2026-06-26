@@ -197,14 +197,21 @@ strategies:
       lake_only: true
       exit_profile: mean_reversion
       params:
-        funding_rank_threshold: 0.5   # |funding_z − cross-mean| to fire (z-score units)
-        stop_frac: 0.020              # ATR-scaled below; bounds idiosyncratic price risk
+        # Routed to the CrossSectionalEngine (dollar-neutral basket). The portfolio knobs:
+        basket_frac: 0.20             # long the top 20% by score (−funding_z) / short the bottom 20%
+        rebalance_bars: 8             # rebalance cadence in BARS (8 = 8h at 1h ≈ one funding period)
+        portfolio_gross: 1.0          # gross exposure as a fraction of equity (× risk_scale)
+        min_universe: 8               # min names with a score to form a basket
+        stop_frac: 0.020              # the R unit for the gate (risk per leg = notional × stop_frac)
+        risk_scale: 0.5               # scale gross down (net-neutral so this is conservative)
+        # funding_rank_threshold/tp/hold/atr below are UNUSED by the cross-sectional engine (it
+        # ranks rather than thresholds and holds rather than per-trade exits) — kept harmless.
+        funding_rank_threshold: 0.5
         tp_frac: 0.010
-        hold_bars: 6                  # carry horizon — hold to collect funding settlements
+        hold_bars: 6
         atr_stop_mult: 2.0
         atr_tp_mult: 1.0
         block_no_trade_regimes: true
-        risk_scale: 0.5               # basket only partially beta-hedged in a per-trade engine
         allow_long: true
         allow_short: true
       fixture:                        # unused (lake_only) — present only to satisfy the loader
