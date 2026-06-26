@@ -246,9 +246,12 @@ strategies:
       lake_only: true
       exit_profile: mean_reversion
       params:
-        abnormal_move: 0.020          # |ret_short| flagging a flush
-        oi_flush_frac: 0.020          # OI must drop ≥ this (forced liquidations)
-        vol_spike: 0.010              # rv_short floor (volatility-spike confirmation)
+        # CALIBRATED FOR 5m (its native horizon). The first guesses (2% move + 2% OI drop in ONE
+        # bar) gave 1 trade on 1h — a flush + reversal both happen within an hour, so the signal is
+        # averaged out at 1h. On 5m the per-bar move/OI-drop are smaller; loosen. Tune on the 5m pkl.
+        abnormal_move: 0.006          # |ret_short| flagging a flush (~0.6% in a 5m bar)
+        oi_flush_frac: 0.005          # OI must drop ≥ this in the bar (forced liquidations)
+        vol_spike: 0.004              # rv_short floor (volatility-spike confirmation)
         stop_frac: 0.010              # tight SL (fast reversal)
         tp_frac: 0.008
         hold_bars: 4                  # short hold — the bounce is quick
