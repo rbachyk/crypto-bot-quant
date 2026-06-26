@@ -442,6 +442,10 @@ The universe manager must:
 - mark symbols as active, disabled, quarantined, or research-only;
 - prevent trading on symbols that do not pass gates.
 
+**Implemented (`src/universe/manager.py`, `src/universe/filters.py`, `configs/universe.yaml`, UNIV gate).** The `UniverseManager` scores the config candidate set against the Section-9 filters (using owned data + `[VERIFIED]` metadata) and records each symbol `active` / `research_only` / `quarantined` with a per-filter reason (never silently dropped). The build is **content-addressed** (version id `univ_0001_<hash>` = pure function of membership + statuses + filter policy, so an identical universe re-uses the version) and **history-logged** (the diff vs the previous version is written to `universe_changes` — membership history). Backtest survivorship / future-universe leakage is prevented in the engine via `activation_ts` (a symbol is tradable only at decision times at/after it entered the universe).
+
+**Known gap (NOT yet implemented):** liquidity-**ranked** dynamic selection of the top-N universe and **scheduled monthly rotation** are not wired. The current real-data validation universe is a **hardcoded point-in-time 20-symbol list** in `configs/data.bybit.yaml` (the 20 most-liquid Bybit USDT perps that listed before mid-2022, chosen manually to prove edge with breadth), NOT the manager's output; `configs/universe.yaml` still carries the skeleton/test candidate set. So "no hardcoded single-symbol assumption" holds (the system is multi-symbol throughout), but a survivorship-free, liquidity-rotated universe is outstanding work.
+
 ### Default Universe Filters
 
 Configurable filters should include:
