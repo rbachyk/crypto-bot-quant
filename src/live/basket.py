@@ -149,3 +149,74 @@ class BasketPaperLoop:
             self.session.trades.append(pt)
             if self.on_trade is not None:
                 self.on_trade(pt)
+
+
+def run_basket_paper_session(
+    candidate_id: str,
+    *,
+    data_cfg=None,
+    timeframe: str | None = None,
+    poll_sec: float = 0.0,
+    max_ticks: int | None = None,
+    settings=None,
+    should_stop: Callable[[], bool] | None = None,
+) -> int:
+    """Continuous PAPER session for ONE cross-sectional (basket) strategy on the live REST feed.
+
+    The shell of the basket path: builds the real-time feed for the universe, drives the proven
+    :class:`BasketPaperLoop` from its cross-section snapshots, and persists the booked PaperTrades
+    the same way every paper session is (so the dashboard shows them). PAPER only — simulated fills,
+    no real orders. ``poll_sec`` > 0 = continuous (waits for new bars). Returns the trade count.
+
+    NOTE: network-dependent — validated against the live feed on the VPS, not in offline tests (the
+    loop math is proven by tests/test_basket_paper.py). Run via `qbot paper-basket`.
+    """
+    from src.backtest.config import load_backtest_config
+    from src.config import get_settings
+    from src.data.config import load_data_config
+    from src.data.schema import timeframe_ms
+    from src.exchange.metadata import load_metadata_for
+    from src.live.data_manager import LiveDataManager
+    from src.live.realtime import LiveCandidateFeed
+    from src.live.websocket_feed import live_feed_source
+    from src.paper.report import build_paper_report
+    from src.paper.run import persist_paper_session
+    from src.strategies.candidates import build_strategy
+    from src.strategies.config import load_strategies_config
+
+    settings = settings or get_settings()
+    data_cfg = data_cfg or load_data_config()
+    tf = timeframe or data_cfg.base_timeframe
+    syms = data_cfg.active_symbols()
+
+    sc = load_strategies_config()
+    cand = sc.candidate(candidate_id)
+    built = build_strategy(cand, sc.strategy_version) if cand is not None else None
+    if built is None or not getattr(built, "cross_sectional", False):
+        raise ValueError(f"{candidate_id!r} is not a cross-sectional (basket) strategy")
+    strategy = build_strategy(cand, sc.strategy_version)
+
+    source = live_feed_source(
+        syms, transport="rest", exchange_id=data_cfg.exchange_id,
+        timeframe=tf, exchange_env=settings.exchange_env,
+    )
+    data_manager = LiveDataManager(source, syms, interval_ms=timeframe_ms(tf))
+    feed = LiveCandidateFeed(
+        data_cfg, feed_source=source, data_manager=data_manager, timeframe=tf, symbols=syms,
+        candidate_id=candidate_id, settings=settings, max_groups=max_ticks, poll_sec=poll_sec,
+        should_stop=should_stop,
+    )
+
+    meta = load_metadata_for(data_cfg.exchange_id)
+    cfg = load_backtest_config()
+    session = PaperSession(session_id=f"paper:basket:{candidate_id}:{data_cfg.data_version}:{tf}")
+    loop = BasketPaperLoop(cfg, meta, strategy, bar_interval_ms=timeframe_ms(tf), session=session)
+
+    last_bars: dict[str, dict] = {}
+    for ts, bars_at, rows_at in feed.snapshots():
+        last_bars = bars_at
+        loop.step(ts, bars_at, rows_at, feed.symbol_inputs())
+    loop.close_all(int(max((b["ts"] for b in last_bars.values()), default=0)), last_bars)
+
+    persist_paper_session(session, build_paper_report(session), settings)
+    return len(session.trades)

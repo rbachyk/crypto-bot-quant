@@ -299,6 +299,81 @@ class LiveCandidateFeed:
                 else:
                     return  # nothing new and not polling → finite stream (tests / one-shot)
 
+    def snapshots(self) -> Iterator[tuple[int, dict, dict]]:
+        """Like :meth:`groups` but yields the CROSS-SECTION snapshot ``(decision_ts, {sym: bar},
+        {sym: feature_row})`` each cycle — for the basket (cross-sectional) paper loop, which needs
+        the whole universe at one bar rather than per-symbol candidate groups. Same poll / halt /
+        Stop / transient-fault handling as ``groups``."""
+        if not self._reader.ohlcv(self.symbols[0]):
+            self.seed()
+        last_ts = dict.fromkeys(self.symbols, -1)
+        emitted = 0
+        while self.max_groups is None or emitted < self.max_groups:
+            if self._should_stop is not None and self._should_stop():
+                return
+            now = int(time.time() * 1000)
+            try:
+                halted = self.data_manager is not None and self.data_manager.poll(now).exchange_halt
+            except Exception:  # noqa: BLE001 - a poll error must not kill the stream
+                _log.warning("live_feed_poll_error", exc_info=True)
+                if self._sleep_or_stop():
+                    return
+                continue
+            if halted:
+                if self.poll_sec > 0 and not self._sleep_or_stop():
+                    continue
+                return
+            advanced = []
+            for sym in self.symbols:
+                try:
+                    got = self._advance_symbol(sym, last_ts)
+                except Exception:  # noqa: BLE001 - one bad symbol must not end the session
+                    _log.warning("live_feed_symbol_error", symbol=sym, exc_info=True)
+                    continue
+                if got is not None:
+                    advanced.append(got)
+            if advanced:
+                ts = max(int(r["decision_ts"]) for _, _, r in advanced)
+                bars_at = {
+                    s: self._reader.ohlcv(s)[-1] for s in self.symbols if self._reader.ohlcv(s)
+                }
+                emitted += 1
+                yield (ts, bars_at, dict(self._latest_rows))
+            elif self.poll_sec > 0:
+                if self._sleep_or_stop():
+                    return
+            else:
+                return
+
+    def symbol_inputs(self) -> dict:
+        """Per-symbol ``SymbolInput`` (bars + features + funding + spread) from the rolling window —
+        the basket loop's ``by_symbol`` (its funding/cost helpers need the funding_events + spread).
+        Rebuilt each call from the reader; funding/spread share the engine schema (funding_rate /
+        spread_bps); guarded so a missing field degrades to a safe default."""
+        from src.backtest.engine import SymbolInput
+
+        out: dict = {}
+        for sym in self.symbols:
+            bars = self._reader.ohlcv(sym)
+            if not bars:
+                continue
+            funding = [
+                {"ts": int(f["ts"]), "funding_rate": float(f.get("funding_rate", 0.0))}
+                for f in self._reader.series(sym, FUNDING)
+            ]
+            spread = [
+                {"ts": int(s["ts"]), "spread_bps": float(s.get("spread_bps", 2.0))}
+                for s in self._reader.series(sym, SPREAD)
+            ]
+            out[sym] = SymbolInput(
+                symbol=sym,
+                bars=list(bars),
+                frame=compute_features(sym, self._reader, self.feat_cfg),
+                spread_samples=spread,
+                funding_events=funding,
+            )
+        return out
+
     def _sleep_or_stop(self) -> bool:
         """Wait ``poll_sec`` (or 1s if not polling) in 1s slices so a dashboard Stop is honoured
         fast. Returns True if the operator pressed Stop during the wait."""

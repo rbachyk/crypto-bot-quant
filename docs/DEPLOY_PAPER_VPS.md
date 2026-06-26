@@ -87,5 +87,13 @@ stopping the container.
 - **No real funds, ever, in paper mode.** Going to testnet/live is a separate, gated path
   (`--profile live`, `ENABLE_LIVE_TRADING`, sign-off, real keys) — out of scope here.
 - **Parity:** maker fills, trailing/TP brackets, `risk_scale`, and the time-stop are honored in the
-  live/paper path; cross-sectional (basket) strategies like funding_carry run through their engine
-  only in the backtest today — wire basket execution into the live path before paper-trading carry.
+  live/paper path. Cross-sectional (basket) strategies like funding_carry do **not** run through
+  `qbot live` (a per-symbol directional loop); they paper-trade via a dedicated basket loop:
+  ```
+  qbot paper-basket --strategy funding_carry --timeframe 1h --poll-sec 60
+  ```
+  This drives the same `CrossSectionalEngine` rebalance / leg / funding math as the backtest (the
+  Parity Rule) over the live REST cross-section, booking each closed leg as a `PaperTrade`. The loop
+  math is offline-proven (`tests/test_basket_paper.py`); the live feed is REST-network-dependent and
+  validated on the VPS. Run it as a **separate** process from `paper-live` (which handles directional
+  strategies). PAPER only — simulated fills, no real orders/funds.

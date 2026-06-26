@@ -419,6 +419,31 @@ def live(
     )
 
 
+@app.command(name="paper-basket")
+def paper_basket(
+    strategy: str = typer.Option(..., "--strategy", help="cross-sectional candidate id"),
+    config_path: str = typer.Option("configs/data.bybit.yaml", "--config"),
+    timeframe: str = typer.Option("", "--timeframe"),
+    poll_sec: float = typer.Option(60.0, "--poll-sec", help=">0 = continuous (waits for new bars)"),
+    max_ticks: int = typer.Option(0, "--max-ticks", help="0 = run until stopped"),
+) -> None:
+    """Continuous PAPER session for one cross-sectional (basket) strategy on the live REST feed.
+
+    The basket path for carry/factor strategies (funding_carry): holds a dollar-neutral basket,
+    rebalanced on the live feed, booking SIMULATED fills (no real orders/funds). The per-symbol
+    `qbot live` path is for directional strategies; this is for basket ones.
+    """
+    from src.data.config import load_data_config
+    from src.live.basket import run_basket_paper_session
+
+    data_cfg = load_data_config(config_path or None)
+    n = run_basket_paper_session(
+        strategy, data_cfg=data_cfg, timeframe=timeframe or None,
+        poll_sec=poll_sec, max_ticks=max_ticks or None,
+    )
+    typer.echo(json.dumps({"strategy": strategy, "paper_trades": n}, indent=2))
+
+
 @app.command()
 def reports(
     name: str = typer.Option("", "--name", help="one report name ('' = all standard reports)"),
