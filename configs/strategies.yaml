@@ -204,6 +204,12 @@ strategies:
         # stress (-0.011); at 24h it clears it (+0.037) and the hold-out PF goes 1.01→1.10 — the
         # turnover, not the carry, was the problem. Monotonic across train+hold-out+stress (8→24→48h).
         rebalance_hours: 24
+        # Maker rebalancing — a basket rebalance is low-urgency, so post passive limits (maker fee,
+        # no slippage) rather than cross the spread. Realistic basket execution AND turnover is the
+        # carry's tightest margin: it lifted exp +0.092→+0.137R, hold-out PF 1.10→1.13, and FIXED
+        # fee-stress (✗→✓). With it every economic/stress/significance gate passes; only the 4th
+        # directional fold (3/5) remains — the same clean spot as lead_lag.
+        maker_rebalance: 1
         portfolio_gross: 1.0          # gross exposure as a fraction of equity (× risk_scale)
         min_universe: 8               # min names with a score to form a basket
         # Neutralization stays DOLLAR. Beta-neutral was TESTED and slightly HURT (hold-out PF

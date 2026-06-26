@@ -95,6 +95,28 @@ def test_cross_sectional_beta_mode_runs_and_keeps_the_carry():
     assert rep["net_pnl"] > 0.0
 
 
+def test_maker_rebalancing_cuts_cost_vs_taker():
+    """Maker rebalancing (passive limits, maker fee, no slippage) nets MORE than taker on the same
+    planted carry edge — turnover cost is the carry's tightest margin."""
+    from dataclasses import replace
+
+    cfg = load_backtest_config()
+    meta = load_metadata_config()
+    sc = load_strategies_config()
+    base = sc.candidate("funding_carry")
+
+    def net(maker: int) -> float:
+        extra = {**base.params.extra, "maker_rebalance": maker, "rebalance_hours": 0,
+                 "rebalance_bars": 8}
+        cand = replace(base, params=replace(base.params, extra=extra))
+        strat = build_strategy(cand, sc.strategy_version)
+        return build_report(CrossSectionalEngine(cfg, meta, strat).run(_universe(True))).payload[
+            "net_pnl"
+        ]
+
+    assert net(maker=1) > net(maker=0)
+
+
 def test_cross_sectional_routing_via_run_engine():
     """run_engine dispatches a cross_sectional strategy to the basket engine (so walk-forward /
     stress route automatically), and a normal strategy still uses the per-trade engine."""

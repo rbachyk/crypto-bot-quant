@@ -80,6 +80,11 @@ class CrossSectionalEngine:
         # return) — no feature column, so it runs on existing cached inputs with no rebuild.
         self.neutralization = str(ex.get("neutralization", "dollar"))
         self.beta_window = max(10, int(ex.get("beta_window", 120)))
+        # Maker rebalancing: a basket rebalance is low-urgency, so post passive limits (maker fee,
+        # no slippage) rather than cross the spread — the realistic basket execution, and turnover
+        # cost is the carry edge's tightest margin (the fee-stress blocker). Final force-close at
+        # end-of-data stays taker (you can't be patient at the boundary).
+        self.maker = float(ex.get("maker_rebalance", 0.0)) > 0
         self.stop_frac = float(getattr(params, "stop_frac", 0.02)) or 0.02
         self.risk_scale = min(1.0, max(0.0, float(getattr(strategy, "risk_scale", 1.0))))
         self.name = str(getattr(strategy, "name", "cross_sectional"))
@@ -204,11 +209,20 @@ class CrossSectionalEngine:
         if spread_bps > self.cfg.execution.max_spread_bps:
             return None  # toxic spread — skip this leg
         qty = notional / ref_price
-        bar_notional = float(bar.get("volume", 0.0) or 0.0) * ref_price
-        slip = self.slippage.slippage_frac(
-            spread_bps=spread_bps, notional=notional, bar_notional=bar_notional or notional
-        )
-        entry_price = self.slippage.fill_price(ref_price, BUY if side > 0 else SELL, slip)
+        if self.maker:
+            # A basket rebalance is low-urgency → post a passive limit: fill at the reference, no
+            # slippage, maker fee. Realistic basket execution; cuts the turnover cost.
+            entry_price = ref_price
+            entry_fee = self.fees.fee(sym, qty * ref_price, maker=True)
+            slip_cost = 0.0
+        else:
+            bar_notional = float(bar.get("volume", 0.0) or 0.0) * ref_price
+            slip = self.slippage.slippage_frac(
+                spread_bps=spread_bps, notional=notional, bar_notional=bar_notional or notional
+            )
+            entry_price = self.slippage.fill_price(ref_price, BUY if side > 0 else SELL, slip)
+            entry_fee = self.fees.fee(sym, qty * entry_price, maker=False)
+            slip_cost = abs(entry_price - ref_price) * qty
         real_notional = qty * entry_price
         return _Leg(
             symbol=sym,
@@ -218,9 +232,9 @@ class CrossSectionalEngine:
             entry_price=entry_price,
             notional=real_notional,
             risk_amount=real_notional * self.stop_frac,
-            entry_fee=self.fees.fee(sym, real_notional, maker=False),
+            entry_fee=entry_fee,
             funding=0.0,
-            slippage_cost=abs(entry_price - ref_price) * qty,
+            slippage_cost=slip_cost,
             regime=_regime_of(row, spread_bps),
             session=int(row.get("session_code", 0)),
             next_funding_idx=self._first_funding_after(sym_in, ts),
@@ -229,12 +243,16 @@ class CrossSectionalEngine:
     def _close_leg(self, leg: _Leg, bar: dict, reason: str, result: BacktestResult) -> float:
         ref_price = float(bar["close"])
         exit_ts = int(bar["ts"])
-        bar_notional = float(bar.get("volume", 0.0) or 0.0) * ref_price
-        slip = self.slippage.slippage_frac(
-            spread_bps=2.0, notional=leg.notional, bar_notional=bar_notional or leg.notional
-        )
-        exit_price = self.slippage.fill_price(ref_price, SELL if leg.side > 0 else BUY, slip)
-        exit_fee = self.fees.fee(leg.symbol, leg.qty * exit_price, maker=False)
+        if self.maker and reason != "end_of_data":
+            exit_price = ref_price  # passive maker exit on a planned rebalance
+            exit_fee = self.fees.fee(leg.symbol, leg.qty * ref_price, maker=True)
+        else:
+            bar_notional = float(bar.get("volume", 0.0) or 0.0) * ref_price
+            slip = self.slippage.slippage_frac(
+                spread_bps=2.0, notional=leg.notional, bar_notional=bar_notional or leg.notional
+            )
+            exit_price = self.slippage.fill_price(ref_price, SELL if leg.side > 0 else BUY, slip)
+            exit_fee = self.fees.fee(leg.symbol, leg.qty * exit_price, maker=False)
         gross = leg.side * (exit_price - leg.entry_price) * leg.qty
         total_fee = leg.entry_fee + exit_fee
         pnl = gross - total_fee - leg.funding  # funding>0 = paid by the leg; carry is its negative
