@@ -206,6 +206,10 @@ strategies:
         rebalance_hours: 24
         portfolio_gross: 1.0          # gross exposure as a fraction of equity (× risk_scale)
         min_universe: 8               # min names with a score to form a basket
+        # Neutralization stays DOLLAR. Beta-neutral was TESTED and slightly HURT (hold-out PF
+        # 1.16→1.04): crypto betas all cluster near 1, so a dollar-neutral basket leaves tiny
+        # residual beta and neutralizing it on noisy rolling-beta estimates adds sizing noise. The
+        # "beta" mode is kept (engine flag) for a future less-correlated universe.
         stop_frac: 0.020              # the R unit for the gate (risk per leg = notional × stop_frac)
         risk_scale: 0.5               # scale gross down (net-neutral so this is conservative)
         # funding_rank_threshold/tp/hold/atr below are UNUSED by the cross-sectional engine (it

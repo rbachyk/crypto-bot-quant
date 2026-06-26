@@ -77,6 +77,24 @@ def test_cross_sectional_engine_harvests_a_planted_carry_edge():
     assert edge["net_pnl"] > ctrl["net_pnl"]
 
 
+def test_cross_sectional_beta_mode_runs_and_keeps_the_carry():
+    """Beta-neutral mode is wired and computes betas internally (no feature/rebuild). On flat-price
+    inputs betas are degenerate ⇒ it falls back to dollar-neutral, so the planted carry still nets
+    positive — proving the beta path runs end-to-end without breaking the edge."""
+    from dataclasses import replace
+
+    cfg = load_backtest_config()
+    meta = load_metadata_config()
+    sc = load_strategies_config()
+    base = sc.candidate("funding_carry")
+    cand = replace(
+        base, params=replace(base.params, extra={**base.params.extra, "neutralization": "beta"})
+    )
+    strat = build_strategy(cand, sc.strategy_version)
+    rep = build_report(CrossSectionalEngine(cfg, meta, strat).run(_universe(aligned=True))).payload
+    assert rep["net_pnl"] > 0.0
+
+
 def test_cross_sectional_routing_via_run_engine():
     """run_engine dispatches a cross_sectional strategy to the basket engine (so walk-forward /
     stress route automatically), and a normal strategy still uses the per-trade engine."""

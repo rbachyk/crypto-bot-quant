@@ -18,6 +18,7 @@ vectorized shortcut — so it is validation-grade (Section 19).
 
 from __future__ import annotations
 
+import bisect
 import math
 from dataclasses import dataclass
 
@@ -72,10 +73,19 @@ class CrossSectionalEngine:
         self.rebalance_bars = max(1, int(ex.get("rebalance_bars", 8)))
         self.portfolio_gross = float(ex.get("portfolio_gross", 1.0))
         self.min_universe = int(ex.get("min_universe", 4))
+        # Neutralization: "dollar" (equal long-$/short-$) or "beta" (weight legs so NET beta-to-the-
+        # market-factor ≈ 0 — strips the residual market exposure a dollar-neutral basket leaves
+        # when the long/short legs differ in beta, which adds variance/noise). Beta is
+        # computed INSIDE the engine from the bars (rolling cov/var vs the equal-weight universe
+        # return) — no feature column, so it runs on existing cached inputs with no rebuild.
+        self.neutralization = str(ex.get("neutralization", "dollar"))
+        self.beta_window = max(10, int(ex.get("beta_window", 120)))
         self.stop_frac = float(getattr(params, "stop_frac", 0.02)) or 0.02
         self.risk_scale = min(1.0, max(0.0, float(getattr(strategy, "risk_scale", 1.0))))
         self.name = str(getattr(strategy, "name", "cross_sectional"))
         self._grid_iv = 1
+        self._sym_rets: dict[str, tuple[list[int], list[float]]] = {}
+        self._mkt_ret: dict[int, float] = {}
 
     # -- public ---------------------------------------------------------- #
     def run(self, inputs: list[SymbolInput]) -> BacktestResult:
@@ -91,6 +101,8 @@ class CrossSectionalEngine:
             s.symbol: {int(r["decision_ts"]): r for r in s.frame.rows} for s in inputs
         }
         self._grid_iv = self._grid_interval(inputs)
+        if self.neutralization == "beta":
+            self._prepare_returns(inputs)
         timeline = sorted({b["ts"] for s in inputs for b in s.bars})
         last_ts = timeline[-1]
         rebal_ms = (
@@ -152,9 +164,10 @@ class CrossSectionalEngine:
                 if bar is not None:
                     equity += self._close_leg(leg, bar, "rebalance", result)
                     del holdings[sym]
-        # Open new legs (stable same-side members are kept — no churn). Dollar-neutral, equal-wt.
-        n_legs = max(1, len(longs) + len(shorts))
-        per_leg_notional = equity * self.portfolio_gross * self.risk_scale / n_legs
+        # Open new legs (stable same-side members are kept — no churn). Per-symbol target notionals
+        # are dollar- or beta-neutral depending on config.
+        gross = equity * self.portfolio_gross * self.risk_scale
+        notionals = self._target_notionals(longs, shorts, ts, gross)
         for sym, side in target.items():
             if sym in holdings:
                 continue
@@ -162,10 +175,26 @@ class CrossSectionalEngine:
             row = rows_by_ts[sym].get(ts)
             if bar is None or row is None:
                 continue
-            leg = self._open_leg(sym, side, per_leg_notional, bar, row, ts, by_symbol[sym])
+            leg = self._open_leg(sym, side, notionals.get(sym, 0.0), bar, row, ts, by_symbol[sym])
             if leg is not None:
                 holdings[sym] = leg
         return equity
+
+    def _target_notionals(self, longs, shorts, ts, gross) -> dict[str, float]:
+        """Per-leg notional. Dollar-neutral = equal weight. Beta-neutral scales the two legs so the
+        NET dollar-beta is zero: a·Σβ_long = b·Σβ_short, k_l·a + k_s·b = gross (legs ≥ 0)."""
+        kl, ks = len(longs), len(shorts)
+        equal = {s: gross / max(1, kl + ks) for s in (*longs, *shorts)}
+        if self.neutralization != "beta" or not kl or not ks:
+            return equal
+        betas = {s: self._beta(s, ts) for s in (*longs, *shorts)}
+        sum_lb = sum(betas[s] for s in longs)
+        sum_sb = sum(betas[s] for s in shorts)
+        if sum_lb <= 1e-9 or sum_sb <= 1e-9:  # degenerate (mixed-sign / ~0 betas) → dollar-neutral
+            return equal
+        a = gross / (kl + ks * sum_lb / sum_sb)
+        b = a * sum_lb / sum_sb
+        return {**dict.fromkeys(longs, a), **dict.fromkeys(shorts, b)}
 
     def _open_leg(self, sym, side, notional, bar, row, ts, sym_in) -> _Leg | None:
         ref_price = float(bar["open"])
@@ -272,3 +301,41 @@ class CrossSectionalEngine:
                 if d > 0 and (best is None or d < best):
                     best = d
         return best or 1
+
+    # -- beta (computed internally from bars; no feature column / no rebuild) -- #
+    def _prepare_returns(self, inputs: list[SymbolInput]) -> None:
+        """Per-symbol ordered (ts, bar-return) series + the equal-weight universe return per ts (the
+        market factor for beta). Built once per run from the bars already in hand."""
+        self._sym_rets: dict[str, tuple[list[int], list[float]]] = {}
+        ret_at_ts: dict[int, list[float]] = {}
+        for s in inputs:
+            ts_list: list[int] = []
+            ret_list: list[float] = []
+            prev: float | None = None
+            for b in s.bars:
+                c = float(b["close"])
+                if prev is not None and prev > 0:
+                    r = c / prev - 1.0
+                    ts_list.append(int(b["ts"]))
+                    ret_list.append(r)
+                    ret_at_ts.setdefault(int(b["ts"]), []).append(r)
+                prev = c
+            self._sym_rets[s.symbol] = (ts_list, ret_list)
+        self._mkt_ret = {t: sum(v) / len(v) for t, v in ret_at_ts.items()}
+
+    def _beta(self, symbol: str, ts: int) -> float:
+        """Rolling beta of ``symbol`` to the universe factor over the last ``beta_window`` returns
+        STRICTLY before ``ts`` (causal). 1.0 on too little history / degenerate variance."""
+        ts_list, ret_list = self._sym_rets.get(symbol, ([], []))
+        hi = bisect.bisect_left(ts_list, ts)  # first index at/after ts → exclusive upper bound
+        lo = max(0, hi - self.beta_window)
+        if hi - lo < 10:
+            return 1.0
+        rs = ret_list[lo:hi]
+        ms = [self._mkt_ret.get(ts_list[i], 0.0) for i in range(lo, hi)]
+        n = len(rs)
+        mr = sum(rs) / n
+        mm = sum(ms) / n
+        cov = sum((rs[i] - mr) * (ms[i] - mm) for i in range(n))
+        var = sum((ms[i] - mm) ** 2 for i in range(n))
+        return cov / var if var > 1e-12 else 1.0
