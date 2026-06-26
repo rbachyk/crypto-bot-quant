@@ -132,7 +132,7 @@ services:
     # INFRA gate's "only 443 external" check ignores loopback ports). On the VPS, front it with
     # the `proxy` profile (Caddy) instead.
     ports:
-      - "127.0.0.1:8001:8001"
+      - "127.0.0.1:8504:8504"
 
   worker-data:
     <<: *app-build
