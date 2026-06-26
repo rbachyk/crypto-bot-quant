@@ -547,6 +547,13 @@ Each strategy declares: hypothesis; market condition; expected edge source; data
 - Momentum/trend: **no fixed TP** (the tail is the edge), exchange-native trailing + time stop, explicit initial SL for sizing.
 - Volatility/liquidation: fast short TP, strictest filters, harsher slippage assumption.
 
+**Implemented per-strategy execution model (`configs/strategies.yaml`, `src/strategies/candidates.py`; current `STRATEGY_VERSION strat_0007`).** Each candidate emits a `Signal` carrying its OWN entry + exit geometry, so families no longer share one engine geometry:
+- **Entry execution per strategy:** `maker` (passive-limit entry posted `limit_offset_atr_mult × atr_pct` inside the reference; fills only if the bar trades through it, else no-fill; maker fee, zero slippage) vs taker market. Basis uses maker; momentum families use taker (need immediate fills).
+- **Exit geometry per strategy:** volatility-scaled stop `max(stop_frac, atr_stop_mult × atr_pct)`; momentum uses a **reachable R-multiple take-profit** `tp_r_mult × stop` (e.g. 1.3R) PLUS an ATR trailing stop (`atr_trail_mult`) — whichever fires first; mean-reversion uses an ATR take-profit. A per-bar **`manage()` hook** lets a strategy exit on its own thesis (mechanism present; basis's premium-reversion variant was tested and disabled as a net negative — see Section 16 anti-overfitting). A **time-stop** (`hold_bars`) backstops all.
+- **Entry quality filters:** basis fades only a **band** `[premium_threshold, premium_cap]` (an extreme premium is one-way repricing, not reversion).
+- **Per-strategy `risk_scale`** (≤ 1, Section 17): a real-but-hot edge is sized DOWN so its drawdown fits the envelope without changing its `expectancy_r`.
+- Current real-data state (20-symbol 4h `bybit_0002`): **Family A lead_lag — PROMOTED** (the first to clear the gates); Family B basis — improved but shelved on hold-out economic viability (recent-period edge decay); Family G xsection — shelved (cross-sectional relative-strength carries no OOS edge on this universe). State is a point-in-time validation snapshot, not a permanent claim.
+
 ### Family A — Cross-Asset Lead-Lag
 
 Hypothesis: A statistically significant move in a dominant asset or market cluster can lead delayed moves in related assets under specific correlation, volatility, liquidity, and session regimes.
@@ -766,6 +773,13 @@ kill_criteria:
 ```
 If any criterion fails → **shelve the strategy**, do not tune further to force a pass.
 
+**Implemented walk-forward gate (`src/backtest/walkforward.py`, `configs/backtest.yaml`).** The walk-forward asks two DISTINCT questions and judges them separately — applying one economic bar to both was found to commit a Type II error on thin-but-real edges:
+- **Per-fold = STABILITY** (`fold_criterion: directional`, the default): a fold passes when the edge is PRESENT — `expectancy_r > 0`, enough trades, drawdown within the risk cap. The economic-magnitude bar is NOT applied per fold. (`fold_criterion: economic` restores the legacy full-kill-criteria-per-fold behaviour.)
+- **Locked hold-out = ECONOMIC VIABILITY:** the most-recent untouched segment must clear the FULL kill-criteria (`min_oos_expectancy_r`, `min_oos_profit_factor`, `max_oos_drawdown`), evaluated exactly once.
+- **Multiple-testing significance:** the deflated Sharpe (PSR over the fold trials) must clear `min_deflated_sharpe` (0.5 = "more likely than not a real edge net of multiple testing"; a genuinely edgeless strategy averages below 0.5 — this is the anti-luck guard that stops directional folds passing by chance).
+- **Verdict = all three** (≥ `min_folds_passed` folds pass the fold test AND the hold-out clears the economic criteria AND the deflated Sharpe clears its floor). The change is monotonically looser for the fold COUNT (so nothing previously promoted regresses) but adds the deflated-Sharpe floor (net-new guard). Validated against controls: it promotes a thin-but-real edge while still rejecting a real no-edge strategy on all three counts. The actual operating thresholds live in `configs/backtest.yaml` (`min_oos_expectancy_r: 0.03`, `min_oos_profit_factor: 1.10`, etc.), not the illustrative example above.
+- **Anti-overfit discipline observed in practice:** parameter values are chosen on the TRAIN folds, the hold-out is read once; changes that lift in-sample metrics but collapse the locked hold-out (e.g. basis funding-confirmation, an over-tight band cap) are rejected as overfits, not adopted.
+
 ---
 
 ## 17. Risk Management (capital-agnostic)
@@ -779,6 +793,8 @@ It must approve every order.
 size = (equity × risk_pct) / |entry − stop_loss|
 ```
 Leverage is the resulting notional/equity, **capped** by the envelope; if it would exceed the cap, reduce size or no-trade. If `size < min_qty/min_notional` for the symbol → no-trade (logged).
+
+**Implemented per-strategy `risk_scale` (`src/backtest/risk.py`, `src/risk/manager.py`).** A per-strategy size scale (clamped to `(0, 1]`) multiplies the per-trade risk: `size = (equity × risk_pct × risk_scale) / |entry − stop|`. It can only scale DOWN, never above the account `risk_pct` (cannot loosen the control). Purpose: a real-but-hot edge whose drawdown exceeds the envelope at the account standard is sized down so its drawdown fits — `expectancy_r`/profit-factor are size-invariant, only the equity drawdown scales. The backtest `RiskSimulator` and the live/paper `RiskManager` apply it identically (Parity Rule).
 
 **Portfolio-level (multi-symbol):** account/symbol/strategy/correlation/market-wide exposure; **portfolio heat cap**; **net beta-to-BTC cap**; max positions total, per symbol (1), per regime; margin & liquidation-distance checks.
 
@@ -855,6 +871,12 @@ Default execution preference:
 - revalidate signal before execution.
 
 Stops/TP are **exchange-resident**; trend trailing uses **exchange-native trailing** so it survives bot downtime.
+
+**Implemented execution / backtest↔live parity (`src/execution/order.py`, `src/execution/live_venue.py`, `src/live/loop.py`).** The strategy `Signal` carries the execution intent (maker, limit offset, trail, time-stop, risk_scale) onto the `Candidate`, and BOTH the backtest engine and the live `OrderBuilder` honour it identically:
+- **Maker entry:** a `POST_ONLY` passive limit posted `limit_offset_frac` inside the reference (rests at price); taker is a market order.
+- **Bracket:** the exchange-resident stop + a reachable take-profit + an exchange-native trailing stop coexist on the position simultaneously (Bybit holds all three) — whichever triggers first exits, matching the backtest's stop/TP/trail OR-of-exits. The trailing offset comes from the strategy's own `trail_frac` (floored at the initial stop).
+- **Time-stop:** `hold_bars` has no exchange-native equivalent, so the live loop tracks each owned position's entry time + horizon and flattens it once aged (`Venue.close_position`) — the exchange legs keep protecting it meanwhile, so this is an optimization exit, not protection.
+This closes the backtest↔live parity gap: a gate-validated edge executes the same live.
 
 Every fill must store:
 
@@ -934,7 +956,10 @@ Backtest output must include:
 - funding breakdown;
 - rejected candidate breakdown;
 - worst trades;
-- stability metrics.
+- stability metrics;
+- **per-trade MAE/MFE excursion** (max adverse / max favorable, in R) with averages split by win/loss — the trade-quality lens for diagnosing whether a problem is the entry (no move to capture) or the exit (move captured then given back).
+
+**Implemented engine behaviour (`src/backtest/engine.py`).** The engine walks one epoch-time grid shared by all symbols (symbols looked up by timestamp, robust to mid-window listings). It fills per the strategy's execution intent — **maker** passive-limit fills (maker fee, zero slippage, no-fill if the bar doesn't trade through) vs taker market fills (taker fee + adverse slippage) — and exits via the OR of: exchange-style stop / reachable take-profit / ATR trailing stop / per-bar **`manage()`** strategy hook (consulted after stop/TP, before the time-stop) / **time-stop** / end-of-data. The same feature pipeline, sizing (`risk_scale`), and exit geometry drive the live path (Parity Rule, Section 10), so backtest and live agree.
 
 ---
 ## 20. ML Layer
