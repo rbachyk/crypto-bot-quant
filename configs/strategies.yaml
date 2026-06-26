@@ -199,7 +199,11 @@ strategies:
       params:
         # Routed to the CrossSectionalEngine (dollar-neutral basket). The portfolio knobs:
         basket_frac: 0.20             # long the top 20% by score (−funding_z) / short the bottom 20%
-        rebalance_bars: 8             # rebalance cadence in BARS (8 = 8h at 1h ≈ one funding period)
+        # Rebalance every 24h (wall-clock, timeframe-independent). The funding RANK is slow-moving,
+        # so 8h rebalancing churns a stable basket and bleeds turnover: at 8h the carry fails fee
+        # stress (-0.011); at 24h it clears it (+0.037) and the hold-out PF goes 1.01→1.10 — the
+        # turnover, not the carry, was the problem. Monotonic across train+hold-out+stress (8→24→48h).
+        rebalance_hours: 24
         portfolio_gross: 1.0          # gross exposure as a fraction of equity (× risk_scale)
         min_universe: 8               # min names with a score to form a basket
         stop_frac: 0.020              # the R unit for the gate (risk per leg = notional × stop_frac)

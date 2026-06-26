@@ -65,6 +65,10 @@ class CrossSectionalEngine:
         params = getattr(strategy, "params", None)
         ex = dict(getattr(params, "extra", {}) or {})
         self.basket_frac = float(ex.get("basket_frac", 0.2))
+        # Rebalance cadence: prefer rebalance_hours (timeframe-INDEPENDENT — the funding rank is a
+        # slow signal, so the right cadence is a wall-clock period, not a bar count). Falls back to
+        # rebalance_bars × the bar interval. Turnover is the carry edge's main cost.
+        self.rebalance_hours = float(ex.get("rebalance_hours", 0.0))
         self.rebalance_bars = max(1, int(ex.get("rebalance_bars", 8)))
         self.portfolio_gross = float(ex.get("portfolio_gross", 1.0))
         self.min_universe = int(ex.get("min_universe", 4))
@@ -89,7 +93,11 @@ class CrossSectionalEngine:
         self._grid_iv = self._grid_interval(inputs)
         timeline = sorted({b["ts"] for s in inputs for b in s.bars})
         last_ts = timeline[-1]
-        rebal_ms = self.rebalance_bars * self._grid_iv
+        rebal_ms = (
+            int(self.rebalance_hours * 3_600_000)
+            if self.rebalance_hours > 0
+            else self.rebalance_bars * self._grid_iv
+        )
 
         equity = self.cfg.account.initial_equity
         holdings: dict[str, _Leg] = {}
