@@ -455,6 +455,64 @@ class LiquidationReversalStrategy(_BaseCandidate):
 
 
 # --------------------------------------------------------------------------- #
+# Family I — Beta-Residual Cross-Sectional Momentum (portfolio)                 #
+# --------------------------------------------------------------------------- #
+@dataclass(slots=True)
+class ResidualMomentumStrategy(_BaseCandidate):
+    """Cross-sectional momentum on the BETA-RESIDUAL return: long the names that rose most / short
+    those that fell most AFTER removing the common market factor (r − β·r_mkt).
+
+    The residual machinery was built to test *reversion* (the over-reaction hypothesis); on the real
+    lake the residual signal TRENDS, it doesn't revert — the reversion variant is net-negative on
+    both sides, the momentum variant is net-positive on both (the residual-momentum factor: idio
+    returns persist). Plain RAW-return cross-sectional momentum/reversion is dead in crypto because
+    the common factor dominates raw dispersion; stripping β·r_mkt isolates the idiosyncratic trend.
+    Residual + beta are computed INSIDE the CrossSectionalEngine from the bars already in hand (no
+    feature column / no rebuild), so ``score`` here is a no-op marker — the engine ranks via
+    ``score_mode`` (``residual_momentum``; ``residual_reversion`` is kept as a tested-negative
+    control).
+    """
+
+    # Routed to the CrossSectionalEngine (dollar-neutral basket). The engine computes the residual
+    # rank internally (it needs the cross-section's market factor, which a single row can't carry),
+    # so the per-row score is unused — this strategy has no per-symbol signal of its own.
+    cross_sectional = True
+
+    def score(self, row: dict) -> float | None:  # noqa: ARG002 - engine ranks via score_mode
+        return None
+
+    @property
+    def hypothesis(self) -> StrategyHypothesis:
+        return StrategyHypothesis(
+            family="I",
+            name=self.candidate.id,
+            hypothesis=(
+                "After removing the common market factor (β·r_mkt), the residual idiosyncratic "
+                "return PERSISTS (residual momentum): longing the most-positive-residual names and "
+                "shorting the most-negative ones harvests that trend — a market-neutral edge "
+                "raw-return momentum cannot capture because the common factor swamps it."
+            ),
+            market_condition="dispersed idiosyncratic trends; not a single-factor stampede",
+            edge_source="beta-residual (idiosyncratic) return persistence (residual momentum)",
+            data_requirements=("returns across the universe (residual + beta computed in-engine)",),
+            entry="rank by +Σ(r − β·r_mkt) over signal_window; long top basket / short bottom",
+            exit="periodic rebalance (held dollar-neutral; carry/price booked by the engine)",
+            invalidation="the residual trend exhausts / reverses (regime flips to reversion)",
+            risk_assumptions="dollar-neutral basket; sized small (risk_scale); per-leg notional R",
+            cost_assumptions="residual momentum must exceed turnover (maker fee) per rebalance",
+            failure_modes=(
+                "residual returns mean-revert (reversion regime) rather than persist",
+                "rolling-beta error leaks market factor back into the residual",
+                "turnover bleeds the thin idiosyncratic spread (rebalance too often)",
+            ),
+            validation_tests=("walk-forward", "fee ×2 stress", "slippage +50% stress"),
+            promotion_criteria="WF + FEE + SLIP PASS on the surviving side(s); else shelve",
+            exit_profile="momentum",
+            notes="Beta + residual computed in-engine from bars (Section 12.I); no rebuild.",
+        )
+
+
+# --------------------------------------------------------------------------- #
 # Factory                                                                      #
 # --------------------------------------------------------------------------- #
 _BY_FAMILY = {
@@ -463,6 +521,7 @@ _BY_FAMILY = {
     "C": FundingCarryStrategy,
     "D": LiquidationReversalStrategy,
     "G": CrossSectionalRSStrategy,
+    "I": ResidualMomentumStrategy,
 }
 
 
@@ -483,4 +542,5 @@ def build_strategy(
 
 
 def is_portfolio_family(family: str) -> bool:
-    return family in {"A", "C", "G"}  # C (funding carry) is cross-sectional like A/G
+    # C (funding carry) and I (residual momentum) are cross-sectional baskets like A/G.
+    return family in {"A", "C", "G", "I"}

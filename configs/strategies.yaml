@@ -265,3 +265,51 @@ strategies:
         bars: 3000
         timeframe: "5m"
         symbols: ["BTC/USDT:USDT"]
+
+    # ----------------------------------------------------------------------- #
+    # Family I — Beta-Residual Cross-Sectional Momentum (Section 12.I) — lake   #
+    # ----------------------------------------------------------------------- #
+    # Long the most-positive-residual names / short the most-negative AFTER removing the common
+    # market factor (r − β·r_mkt). Built to test REVERSION (over-reaction), but on the real lake the
+    # residual TRENDS: the reversion variant is net-negative on both sides at every (window, cadence)
+    # swept, the MOMENTUM variant is net-positive on both — the residual-momentum factor. Plain
+    # raw-return momentum is dead in crypto (the common factor swamps the dispersion); stripping
+    # β·r_mkt isolates the idiosyncratic trend. Beta + residual computed INSIDE the engine from bars
+    # (no feature / no rebuild). lake_only — real cross-section is the test.
+    - id: residual_momentum
+      family: I
+      enabled: true
+      lake_only: true
+      exit_profile: momentum
+      params:
+        # Routed to the CrossSectionalEngine (dollar-neutral basket), ranked by the engine's
+        # residual score (score_mode), NOT a per-row signal.
+        score_mode: residual_momentum    # engine ranks by +Σ(r − β·r_mkt) over signal_window
+        # signal_window 24 / rebalance 24h: the ROBUST interior point, NOT the grid max. Longer
+        # windows raise raw expectancy (sw96/72h hit +0.22R) but concentrate it entirely on the LONG
+        # side (short → ~0) — fragile in a market-neutral basket. sw24/24h keeps BOTH sides solidly
+        # positive on the lake (long +0.089R / short +0.045R over 10.6k legs) with the most trades
+        # (best fold power) and the conservative turnover-heavy cadence (slower rebalance only helps).
+        signal_window: 24                # bars of residual return to accumulate (the trend formation)
+        beta_window: 120                 # rolling-beta lookback to the universe factor (causal)
+        basket_frac: 0.20                # long top 20% by residual momentum score / short bottom 20%
+        rebalance_hours: 24              # wall-clock cadence (turnover is the thin edge's main cost)
+        maker_rebalance: 1               # passive limits — turnover is the tightest margin
+        portfolio_gross: 1.0             # gross exposure as a fraction of equity (× risk_scale)
+        min_universe: 8                  # min names with a score to form a basket
+        neutralization: dollar           # dollar-neutral basket (beta-neutral SIZING hurt — betas≈1)
+        stop_frac: 0.020                 # the R unit for the gate (risk per leg = notional × stop_frac)
+        risk_scale: 0.5                  # net-neutral, so conservative gross
+        # below are UNUSED by the cross-sectional engine — kept harmless for the loader
+        tp_frac: 0.010
+        hold_bars: 6
+        atr_stop_mult: 2.0
+        atr_tp_mult: 1.0
+        block_no_trade_regimes: true
+        allow_long: true
+        allow_short: true
+      fixture:                        # unused (lake_only) — present only to satisfy the loader
+        seed: residual_momentum_v1
+        bars: 3000
+        timeframe: "5m"
+        symbols: ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]

@@ -126,8 +126,18 @@ _RESERVED = {
 }
 
 
+def _coerce_extra(v):
+    """Extra params are numeric by default (float), but some are string-valued (e.g. a mode/enum
+    knob like ``score_mode``/``neutralization``). Coerce to float when possible, else keep as-is —
+    consumers cast on read (``float(ex[...])`` / ``str(ex[...])``)."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return v
+
+
 def _parse_params(raw: dict) -> StrategyParams:
-    extra = {k: float(v) for k, v in raw.items() if k not in _RESERVED}
+    extra = {k: _coerce_extra(v) for k, v in raw.items() if k not in _RESERVED}
     return StrategyParams(
         stop_frac=float(raw["stop_frac"]),
         tp_frac=float(raw["tp_frac"]),

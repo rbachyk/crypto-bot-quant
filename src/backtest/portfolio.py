@@ -80,6 +80,19 @@ class CrossSectionalEngine:
         # return) — no feature column, so it runs on existing cached inputs with no rebuild.
         self.neutralization = str(ex.get("neutralization", "dollar"))
         self.beta_window = max(10, int(ex.get("beta_window", 120)))
+        # Cross-sectional signal mode. "" (default) → rank the universe by the strategy's
+        # score(row) (e.g. funding carry's −funding_z). "residual_reversion" / "residual_momentum"
+        # → the ENGINE computes each name's cumulative BETA-RESIDUAL return over the last
+        # ``signal_window`` returns (Σ r_sym − β·r_mkt — the idiosyncratic move with the common
+        # market factor stripped) and ranks by its negative (reversion: long recent residual
+        # losers / short winners) or itself (momentum). Beta + the market factor are the SAME
+        # internally-computed series used for beta-neutral sizing — no feature column, no rebuild.
+        # Why residual, not raw, returns: in crypto the common factor dominates raw dispersion, so
+        # plain cross-sectional reversion just bets against the market beta (it was tested — dead);
+        # removing β·r_mkt isolates the idiosyncratic component that can actually mean-revert.
+        self.score_mode = str(ex.get("score_mode", ""))
+        self.signal_window = max(2, int(ex.get("signal_window", 12)))
+        self._residual = self.score_mode in ("residual_reversion", "residual_momentum")
         # Maker rebalancing: a basket rebalance is low-urgency, so post passive limits (maker fee,
         # no slippage) rather than cross the spread — the realistic basket execution, and turnover
         # cost is the carry edge's tightest margin (the fee-stress blocker). Final force-close at
@@ -106,7 +119,7 @@ class CrossSectionalEngine:
             s.symbol: {int(r["decision_ts"]): r for r in s.frame.rows} for s in inputs
         }
         self._grid_iv = self._grid_interval(inputs)
-        if self.neutralization == "beta":
+        if self.neutralization == "beta" or self._residual:
             self._prepare_returns(inputs)
         timeline = sorted({b["ts"] for s in inputs for b in s.bars})
         last_ts = timeline[-1]
@@ -133,7 +146,11 @@ class CrossSectionalEngine:
                     row = rows_by_ts[s.symbol].get(ts)
                     if row is None or bars_by_ts[s.symbol].get(ts) is None:
                         continue
-                    sc = self.strategy.score(row)  # type: ignore[attr-defined]
+                    sc = (
+                        self._residual_score(s.symbol, ts)
+                        if self._residual
+                        else self.strategy.score(row)  # type: ignore[attr-defined]
+                    )
                     if sc is not None and math.isfinite(float(sc)):
                         scores[s.symbol] = float(sc)
                 if len(scores) >= self.min_universe:
@@ -340,6 +357,26 @@ class CrossSectionalEngine:
                 prev = c
             self._sym_rets[s.symbol] = (ts_list, ret_list)
         self._mkt_ret = {t: sum(v) / len(v) for t, v in ret_at_ts.items()}
+
+    def _residual_score(self, symbol: str, ts: int) -> float | None:
+        """Cross-sectional rank score from the cumulative BETA-RESIDUAL return over the last
+        ``signal_window`` returns STRICTLY before ``ts`` (causal): Σ (r_sym − β·r_mkt), where β is
+        the rolling beta to the universe factor. That sum is the idiosyncratic component of the
+        recent move — the common market direction removed. ``residual_reversion`` returns its
+        negative (rank LONG the names that fell most on idiosyncratic news, SHORT those that rose
+        most — betting the over-reaction reverts); ``residual_momentum`` returns it as-is. None on
+        too little history (the name simply isn't ranked that rebalance — no partial-window bias).
+        """
+        ts_list, ret_list = self._sym_rets.get(symbol, ([], []))
+        hi = bisect.bisect_left(ts_list, ts)  # first index at/after ts → exclusive upper bound
+        lo = hi - self.signal_window
+        if lo < 0:
+            return None  # require a FULL window (no shorter-window bias early in the sample)
+        beta = self._beta(symbol, ts)
+        resid = sum(
+            ret_list[i] - beta * self._mkt_ret.get(ts_list[i], 0.0) for i in range(lo, hi)
+        )
+        return -resid if self.score_mode == "residual_reversion" else resid
 
     def _beta(self, symbol: str, ts: int) -> float:
         """Rolling beta of ``symbol`` to the universe factor over the last ``beta_window`` returns
