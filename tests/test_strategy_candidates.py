@@ -37,6 +37,53 @@ def _basis_with_exit_frac(exit_frac: float):
     return cand, build_strategy(cand, scfg.strategy_version, replace(cand.params, extra=extra))
 
 
+def test_funding_carry_longs_paid_shorts_charged() -> None:
+    """Family C: cross-sectionally LONG the perp paid funding (funding below the peer mean) and
+    SHORT the one charged funding (above the mean); near the mean ⇒ no trade."""
+    cand, strat = _cand("funding_carry")
+    assert cand.lake_only and cand.family == "C"
+    thr = cand.params.extra["funding_rank_threshold"]
+    peers = {"X": {"funding_z": 0.0}, "Y": {"funding_z": 0.0}}  # mean ~0
+
+    def ev(fz):
+        return strat.evaluate_portfolio("A", {"funding_z": fz, "atr_pct": 0.01}, peers)
+
+    assert ev(thr + 1.0).side == -1  # high funding ⇒ short (paid)
+    assert ev(-thr - 1.0).side == 1  # low funding ⇒ long (paid)
+    assert ev(0.0) is None  # near the mean ⇒ no trade
+
+
+def test_liquidation_reversal_requires_the_full_flush_signature() -> None:
+    """Family D fires only on the full flush: abnormal move AND OI collapse AND vol spike — then
+    fades it (down-flush ⇒ long). Missing any leg ⇒ no trade."""
+    cand, strat = _cand("liquidation_reversal")
+    assert cand.lake_only and cand.family == "D"
+    mv = cand.params.extra["abnormal_move"]
+    oi = cand.params.extra["oi_flush_frac"]
+    vs = cand.params.extra["vol_spike"]
+
+    def row(ret, oichg, rv):
+        return {"ret_short": ret, "oi_change": oichg, "rv_short": rv, "atr_pct": 0.01}
+
+    assert strat.evaluate(row(-mv - 0.01, -oi - 0.01, vs + 0.01)).side == 1  # down-flush ⇒ long
+    assert strat.evaluate(row(mv + 0.01, -oi - 0.01, vs + 0.01)).side == -1  # up-flush ⇒ short
+    assert strat.evaluate(row(-mv - 0.01, 0.0, vs + 0.01)) is None  # no OI collapse
+    assert strat.evaluate(row(-mv - 0.01, -oi - 0.01, 0.0)) is None  # no vol spike
+    assert strat.evaluate(row(-mv * 0.5, -oi - 0.01, vs + 0.01)) is None  # move too small
+
+
+def test_lake_only_candidates_skipped_by_synthetic_fixture_path() -> None:
+    """lake_only candidates (no synthetic fixture) are excluded from the fixture-based research
+    path and validated on real lake data instead — so adding them never breaks the phase-5 gate."""
+    from src.strategies.config import load_strategies_config
+
+    sc = load_strategies_config()
+    enabled = {c.id for c in sc.enabled_candidates()}
+    synthetic = {c.id for c in sc.enabled_candidates() if not c.lake_only}  # what research.py runs
+    assert {"funding_carry", "liquidation_reversal"} <= enabled  # present + enabled
+    assert not ({"funding_carry", "liquidation_reversal"} & synthetic)  # but skipped synthetically
+
+
 def test_momentum_tp_r_mult_sets_a_reachable_target_in_r() -> None:
     """When tp_r_mult > 0 the TP sits at exactly that many R (× the effective stop distance),
     overriding the unreachable momentum tp_frac — so the take-profit auto-scales with the stop."""

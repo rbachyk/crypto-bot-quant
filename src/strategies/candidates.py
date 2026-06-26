@@ -333,11 +333,125 @@ class CrossSectionalRSStrategy(_BaseCandidate):
 
 
 # --------------------------------------------------------------------------- #
+# Family C — Funding-Dispersion Carry (portfolio, structural cash flow)         #
+# --------------------------------------------------------------------------- #
+@dataclass(slots=True)
+class FundingCarryStrategy(_BaseCandidate):
+    """Cross-sectional funding carry: LONG the perps PAID funding (most-negative funding), SHORT
+    those CHARGED funding (most-positive), ranked by ``funding_z`` vs the cross-sectional mean.
+
+    The edge is the periodic funding cash flow the crowded side pays — a STRUCTURAL carry, not a
+    price forecast (the engine's funding model books it on every open position). Held over a carry
+    horizon; an ATR stop bounds the idiosyncratic price risk. Diversifies the directional book.
+    """
+
+    @property
+    def hypothesis(self) -> StrategyHypothesis:
+        return StrategyHypothesis(
+            family="C",
+            name=self.candidate.id,
+            hypothesis=(
+                "Perpetual funding is a periodic cash flow paid by the crowded side; longing the "
+                "most-negative-funding perps and shorting the most-positive collects that flow — a "
+                "structural carry edge independent of price direction."
+            ),
+            market_condition="dispersed funding across the universe; stable liquidity",
+            edge_source="funding cash flow (carry harvested from the crowded side)",
+            data_requirements=("funding rate", "funding z-score across the universe"),
+            entry="funding_z − cross-mean ≤ −thr ⇒ long (paid); ≥ +thr ⇒ short (paid)",
+            exit="carry horizon (hold to collect funding) or ATR stop / time-stop",
+            invalidation="funding normalizes or an adverse price move overwhelms the carry",
+            risk_assumptions="ATR initial SL bounds idiosyncratic risk; sized small (risk_scale)",
+            cost_assumptions="net funding must exceed fees + slippage + adverse price drift",
+            failure_modes=(
+                "a directional price move swamps the collected funding",
+                "funding normalizes before enough is collected",
+                "crowded-side tail risk realizes (the funding is compensation for it)",
+            ),
+            validation_tests=("walk-forward", "fee ×2 stress", "slippage +50% stress"),
+            promotion_criteria="WF + FEE + SLIP PASS on the surviving side(s); else shelve",
+            exit_profile="mean_reversion",
+            notes="Carry, not prediction: the funding model books the cash flow (Section 12.C).",
+        )
+
+    def evaluate_portfolio(self, symbol: str, row: dict, peers: dict[str, dict]) -> Signal | None:
+        if not peers:
+            return None
+        own = float(row.get("funding_z", 0.0))
+        vals = [own] + [float(p.get("funding_z", 0.0)) for p in peers.values()]
+        rel = own - sum(vals) / len(vals)  # funding vs the cross-sectional mean
+        threshold = self.params.extra["funding_rank_threshold"]
+        if rel <= -threshold:  # low/negative funding ⇒ being LONG is paid
+            return self._sided(+1, f"funding_z rel {rel:+.3f} <= -{threshold} ⇒ long (paid)", row)
+        if rel >= threshold:  # high positive funding ⇒ being SHORT is paid
+            return self._sided(-1, f"funding_z rel {rel:+.3f} >= {threshold} ⇒ short (paid)", row)
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Family D — Liquidation / OI-Flush Reversal (per-symbol, event-driven)         #
+# --------------------------------------------------------------------------- #
+@dataclass(slots=True)
+class LiquidationReversalStrategy(_BaseCandidate):
+    """Fade a forced-flow overshoot: an abnormal short-horizon move WITH an open-interest collapse
+    (positions liquidated) AND a volatility spike ⇒ enter AGAINST the flush (down-flush ⇒ long the
+    bounce). The gross move is large (liquidation overshoot), so it clears costs even taker;
+    mean-reversion exit geometry (near TP, tight stop, short hold)."""
+
+    @property
+    def hypothesis(self) -> StrategyHypothesis:
+        return StrategyHypothesis(
+            family="D",
+            name=self.candidate.id,
+            hypothesis=(
+                "After a liquidation cascade — abnormal displacement + open-interest collapse + "
+                "volatility spike — price temporarily overshoots and reverts once forced flow "
+                "exhausts."
+            ),
+            market_condition="liquidation / forced-flow overshoot; not toxic/unsafe execution",
+            edge_source="forced-flow exhaustion (liquidation overshoot reversal)",
+            data_requirements=("short-horizon return", "open-interest change", "realized vol"),
+            entry="|ret_short|≥abnormal_move AND oi_change≤−oi_flush_frac AND rv_short≥vol_spike",
+            exit="fast TP (the bounce) / tight stop / short time-stop (mean-reversion geometry)",
+            invalidation="the move continues (genuine repricing, not an exhausted cascade)",
+            risk_assumptions="tight ATR initial SL; reduced size; strict execution-safety gate",
+            cost_assumptions="the overshoot reversal must exceed 2×taker fee + (elevated) slippage",
+            failure_modes=(
+                "the displacement is genuine repricing, not exhaustion (no reversion)",
+                "thin post-cascade liquidity inflates slippage past the captured reversion",
+                "a second cascade leg runs the position over",
+            ),
+            validation_tests=("walk-forward", "fee ×2 stress", "slippage +50% stress"),
+            promotion_criteria="WF + FEE + SLIP PASS on the surviving side(s); else shelve",
+            exit_profile="mean_reversion",
+            notes="Research-grade event edge; trade after the spike, never into it (Section 12.D).",
+        )
+
+    def evaluate(self, row: dict) -> Signal | None:
+        ret = float(row.get("ret_short", 0.0))
+        oi_change = float(row.get("oi_change", 0.0))
+        rv = float(row.get("rv_short", 0.0))
+        move_thr = self.params.extra["abnormal_move"]
+        oi_flush = self.params.extra["oi_flush_frac"]
+        vol_thr = self.params.extra["vol_spike"]
+        # Require the full flush signature: OI collapse (forced closes) + a volatility spike.
+        if oi_change > -oi_flush or rv < vol_thr:
+            return None
+        if ret <= -move_thr:  # down-flush ⇒ fade long (expect the bounce)
+            return self._sided(+1, f"down-flush ret={ret:+.4f} oi={oi_change:+.3f} fade long", row)
+        if ret >= move_thr:  # up-flush ⇒ fade short
+            return self._sided(-1, f"up-flush ret={ret:+.4f} oi={oi_change:+.3f} ⇒ fade short", row)
+        return None
+
+
+# --------------------------------------------------------------------------- #
 # Factory                                                                      #
 # --------------------------------------------------------------------------- #
 _BY_FAMILY = {
     "A": LeadLagStrategy,
     "B": BasisReversionStrategy,
+    "C": FundingCarryStrategy,
+    "D": LiquidationReversalStrategy,
     "G": CrossSectionalRSStrategy,
 }
 
@@ -359,4 +473,4 @@ def build_strategy(
 
 
 def is_portfolio_family(family: str) -> bool:
-    return family in {"A", "G"}
+    return family in {"A", "C", "G"}  # C (funding carry) is cross-sectional like A/G

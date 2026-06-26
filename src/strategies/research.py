@@ -191,7 +191,13 @@ def validate_all(
     strat_cfg = strat_cfg or load_strategies_config()
     cfg = cfg or load_backtest_config()
     meta = meta or load_metadata_config()
-    return [validate_candidate(c, strat_cfg, cfg, meta) for c in strat_cfg.enabled_candidates()]
+    # lake_only candidates have no synthetic fixture — they are validated on REAL lake data
+    # (validate_all_on_lake), so the synthetic-fixture path skips them.
+    return [
+        validate_candidate(c, strat_cfg, cfg, meta)
+        for c in strat_cfg.enabled_candidates()
+        if not c.lake_only
+    ]
 
 
 _VALIDATIONS_CACHE: dict[tuple[str, str, str], list[CandidateValidation]] = {}

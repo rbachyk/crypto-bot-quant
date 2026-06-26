@@ -92,6 +92,10 @@ class CandidateConfig:
     exit_profile: str
     params: StrategyParams
     fixture: FixtureConfig
+    # Validated on REAL lake data only (skips the synthetic-fixture phase-5 path). For structural
+    # edges (funding carry, liquidation flow) whose phenomenon has no clean synthetic analog — the
+    # real-data walk-forward + locked hold-out + deflated-Sharpe gate is the proper test.
+    lake_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +171,7 @@ def load_strategies_config(path: str | None = None) -> StrategiesConfig:
             exit_profile=str(c["exit_profile"]),
             params=_parse_params(c["params"]),
             fixture=_parse_fixture(c["fixture"]),
+            lake_only=bool(c.get("lake_only", False)),
         )
         for c in data["candidates"]
     )

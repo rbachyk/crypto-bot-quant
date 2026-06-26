@@ -183,3 +183,61 @@ strategies:
         idio_rho: 0.92                # persistence of idiosyncratic relative strength
         idio_shock: 0.0014            # idiosyncratic innovation scale (dispersion source)
         idio_noise: 0.0016
+
+    # ----------------------------------------------------------------------- #
+    # Family C — Funding-Dispersion Carry (Section 12.C) — lake-only           #
+    # ----------------------------------------------------------------------- #
+    # Structural CARRY (not prediction): long perps paid funding / short those charged, ranked
+    # cross-sectionally. Validated on REAL lake data only (lake_only) — funding dispersion has no
+    # clean synthetic analog; the real-data WF + hold-out + deflated-Sharpe gate is the test.
+    # Thresholds are STARTING GUESSES to tune on the lake. Added without touching A/B/G.
+    - id: funding_carry
+      family: C
+      enabled: true
+      lake_only: true
+      exit_profile: mean_reversion
+      params:
+        funding_rank_threshold: 0.5   # |funding_z − cross-mean| to fire (z-score units)
+        stop_frac: 0.020              # ATR-scaled below; bounds idiosyncratic price risk
+        tp_frac: 0.010
+        hold_bars: 6                  # carry horizon — hold to collect funding settlements
+        atr_stop_mult: 2.0
+        atr_tp_mult: 1.0
+        block_no_trade_regimes: true
+        risk_scale: 0.5               # basket only partially beta-hedged in a per-trade engine
+        allow_long: true
+        allow_short: true
+      fixture:                        # unused (lake_only) — present only to satisfy the loader
+        seed: funding_carry_v1
+        bars: 3000
+        timeframe: "5m"
+        symbols: ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
+
+    # ----------------------------------------------------------------------- #
+    # Family D — Liquidation / OI-Flush Reversal (Section 12.D) — lake-only     #
+    # ----------------------------------------------------------------------- #
+    # Fade a forced-flow overshoot: abnormal move + OI collapse + vol spike ⇒ enter against the
+    # flush. The gross move is large, so it clears costs even taker — the one directional edge
+    # expected to survive faster horizons. Thresholds are STARTING GUESSES to tune on the lake.
+    - id: liquidation_reversal
+      family: D
+      enabled: true
+      lake_only: true
+      exit_profile: mean_reversion
+      params:
+        abnormal_move: 0.020          # |ret_short| flagging a flush
+        oi_flush_frac: 0.020          # OI must drop ≥ this (forced liquidations)
+        vol_spike: 0.010              # rv_short floor (volatility-spike confirmation)
+        stop_frac: 0.010              # tight SL (fast reversal)
+        tp_frac: 0.008
+        hold_bars: 4                  # short hold — the bounce is quick
+        atr_stop_mult: 1.5
+        atr_tp_mult: 1.0
+        block_no_trade_regimes: true  # R6 liquidation IS tradeable; still blocks R4/R7/R8 (safety)
+        allow_long: true
+        allow_short: true
+      fixture:                        # unused (lake_only)
+        seed: liq_reversal_v1
+        bars: 3000
+        timeframe: "5m"
+        symbols: ["BTC/USDT:USDT"]
