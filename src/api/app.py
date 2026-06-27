@@ -235,10 +235,35 @@ pre{background:#0b0e16;padding:13px;border-radius:10px;overflow-x:auto;font-size
   color:var(--text);font-size:11.5px;padding:6px 9px;border-radius:7px;pointer-events:none;opacity:0;
   white-space:nowrap;z-index:5;box-shadow:0 4px 14px rgba(0,0,0,.5);transition:opacity .08s}
 
+/* ---- responsive: tablet / phone ---- */
 @media(max-width:820px){
-  .sidebar{position:static;width:100%;height:auto;border-right:none;border-bottom:1px solid var(--border)}
+  /* Stack the shell: the fixed left sidebar becomes a compact horizontal nav strip you swipe,
+     instead of a full-height column or a tall stacked list that buries the content. */
+  .app{display:block}
+  .sidebar{position:static;width:auto;height:auto;display:flex;align-items:center;gap:4px;
+    overflow-x:auto;overflow-y:hidden;white-space:nowrap;padding:6px 10px;background:#10141f;
+    border-right:none;border-bottom:1px solid var(--border);-webkit-overflow-scrolling:touch}
   .main{margin-left:0}
-  .brand{position:static}
+  .brand{position:static;flex:0 0 auto;margin:0 6px 0 0;padding:0;background:none}
+  .brand .sub{display:none}
+  .navgroup{display:none}                 /* group labels don't fit a one-row strip */
+  .navlink{flex:0 0 auto;padding:7px 10px;margin:0}
+  .navlink.active::before{display:none}
+  /* Wide tables scroll INSIDE their card instead of forcing the whole page wider than the screen
+     (the #1 reason the desktop layout felt unusable on a phone). */
+  .card{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  table{min-width:540px}
+  .container{padding:16px 14px 44px}
+  .topbar{padding:0 14px;height:54px}
+  .topbar h1{font-size:16px}
+}
+@media(max-width:560px){
+  .container{padding:12px 10px 36px}
+  .card{padding:14px 13px}
+  .kpis{grid-template-columns:repeat(auto-fit,minmax(132px,1fr))}
+  table{font-size:12px}
+  th,td{padding:8px 9px}
+  .topbar .crumb{display:none}
 }
 </style>
 """
