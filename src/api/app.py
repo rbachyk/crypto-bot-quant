@@ -688,6 +688,28 @@ def _cross_sectional_candidate_ids() -> list[str]:
     return out
 
 
+def _has_active_job(job_type: str, *, strategy: str | None = None) -> bool:
+    """True if a QUEUED/RUNNING job of this type (optionally pinned to ``strategy``) already exists.
+    Guards a duplicate Start from double-booking the same continuous session (two loops for one
+    strategy would book twice)."""
+    from src.db.models import JobStatus
+
+    with session_scope() as session:
+        rows = (
+            session.execute(
+                select(Job).where(
+                    Job.job_type == job_type,
+                    Job.status.in_((JobStatus.QUEUED, JobStatus.RUNNING)),
+                )
+            )
+            .scalars()
+            .all()
+        )
+    if strategy is None:
+        return bool(rows)
+    return any((j.input_params or {}).get("strategy") == strategy for j in rows)
+
+
 def _period_selector(action: str, period: str) -> str:
     """A custom segmented pill control that re-renders the page per time period (Section 25).
 
@@ -1582,9 +1604,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         timeframe: str = "", user: str = Depends(require_dashboard_auth)
     ) -> RedirectResponse:
         """Start a dashboard-driven live/demo/testnet session on the dedicated live worker, on the
-        chosen decision ``timeframe``."""
+        chosen decision ``timeframe``. One live session covers the whole per-symbol promoted
+        ensemble, so refuse to start a second (it would double-trade the same strategies)."""
         from src.jobs import JobQueue
 
+        if _has_active_job("run_live_session"):
+            raise HTTPException(
+                status_code=409, detail="a live session is already running; stop it first"
+            )
         params = {"requested_by": user}
         if _valid_timeframe(timeframe):
             params["timeframe"] = timeframe
@@ -3392,6 +3419,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         if strategy not in _cross_sectional_candidate_ids():
             raise HTTPException(status_code=400, detail=f"{strategy!r} is not a basket strategy")
+        if _has_active_job("run_basket_paper_session", strategy=strategy):
+            raise HTTPException(
+                status_code=409, detail=f"a basket session for {strategy!r} is already running"
+            )
         params: dict = {"strategy": strategy, "requested_by": user}
         if _valid_timeframe(timeframe):
             params["timeframe"] = timeframe

@@ -99,6 +99,12 @@ class Settings(BaseSettings):
     worker_heartbeat_ttl_sec: int = 30
     worker_reaper_interval_sec: int = 30
     worker_queues: str = ""
+    # How many jobs ONE worker process runs at once (a thread pool over its served queues). 1 = the
+    # classic one-job-at-a-time worker. Raise it for the `live` queue so several CONTINUOUS sessions
+    # (run_live_session + run_basket_paper_session — long-lived loops) run in parallel instead of
+    # head-of-line blocking each other on a single loop. Each job still claims atomically + fences,
+    # so concurrency is safe (Appendix B.13). Transient-job workers can stay at 1.
+    worker_concurrency: int = 1
     object_storage_url: str = ""  # empty => use local data lake path below
     data_lake_path: Path = REPO_ROOT / "var" / "datalake"
     artifact_path: Path = REPO_ROOT / "var" / "artifacts"

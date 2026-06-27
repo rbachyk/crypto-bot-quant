@@ -152,6 +152,48 @@ def test_basket_paper_session_routes_to_live_worker_and_is_registered() -> None:
 
 
 @requires_redis
+def test_worker_runs_jobs_concurrently() -> None:
+    """A worker with concurrency > 1 runs jobs in PARALLEL — the fix that lets several continuous
+    sessions (live + basket paper) overlap instead of head-of-line blocking. Proven by a 2-party
+    barrier: both handlers only get past it if they execute at the SAME time (a serial worker would
+    block on the first until the barrier times out and that job fails). Run the worker in the
+    background and poll, so stray jobs from other tests don't affect the assertion."""
+    import threading
+    import time
+
+    from src.jobs.registry import registry
+    from src.jobs.routing import queue_key
+
+    barrier = threading.Barrier(2, timeout=8)
+
+    def _barrier_handler(ctx, params):  # type: ignore[no-untyped-def]
+        barrier.wait()  # returns only if a SECOND instance is running concurrently
+        return {"ok": True}
+
+    # Name it onto the `rl` class (no other test uses it) and serve ONLY that queue, drained first,
+    # so the two barrier jobs are the only work — stray jobs can't divert a worker thread.
+    registry.register("rl_test_barrier", _barrier_handler)
+    q = JobQueue()
+    q.redis.delete(queue_key("rl"))
+    ids = [q.enqueue("rl_test_barrier", {}, requested_by="t") for _ in range(2)]
+    worker = Worker(queues="rl", concurrency=2)
+    t = threading.Thread(target=worker.run, daemon=True)
+    t.start()
+    try:
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            if all(_load(jid).status is JobStatus.SUCCEEDED for jid in ids):
+                break
+            time.sleep(0.2)
+    finally:
+        worker.stop()
+        t.join(timeout=5)
+
+    # both reached SUCCEEDED ⇒ the barrier released ⇒ they executed concurrently.
+    assert all(_load(jid).status is JobStatus.SUCCEEDED for jid in ids)
+
+
+@requires_redis
 def test_enqueue_routes_to_class_queue() -> None:
     # Heavy ML / data / gate jobs are routed to dedicated class queues (B.13 isolation),
     # so a heavy job never lands on a light worker's queue.

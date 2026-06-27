@@ -105,8 +105,10 @@ def reap_orphaned_jobs(redis_client: redis.Redis, settings: Settings | None = No
 
 
 class Worker:
-    """Single-process job worker. Concurrency is one job at a time per process;
-    scale by running multiple worker processes (B.13)."""
+    """A job worker process. By default it runs one job at a time; with ``concurrency`` > 1 it runs
+    that many jobs in parallel (a thread pool over its served queues) so long-lived CONTINUOUS jobs
+    (live/basket sessions) don't head-of-line block each other. Scale further by running multiple
+    worker processes (B.13). Each job still claims atomically and fences, so parallelism is safe."""
 
     def __init__(
         self,
@@ -114,6 +116,7 @@ class Worker:
         redis_client: redis.Redis | None = None,
         *,
         queues: str | None = None,
+        concurrency: int | None = None,
     ):
         self.settings = settings or get_settings()
         self._redis = redis_client or redis.Redis.from_url(
@@ -122,12 +125,23 @@ class Worker:
         self._queues = parse_queue_classes(
             queues if queues is not None else self.settings.worker_queues
         )
+        self._concurrency = max(
+            1, int(concurrency if concurrency is not None else self.settings.worker_concurrency)
+        )
         service = os.environ.get("SERVICE_NAME", "worker")
         self._worker_id = f"{service}:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self._processing_key = processing_key(self._worker_id)
         self._stop = False
         self._hb_stop = threading.Event()
         self._hb_thread: threading.Thread | None = None
+        self._budget: int | None = None  # shared max_jobs across consume threads (None = unbounded)
+        self._claimed = 0  # slots reserved (RESERVE-before-pop so concurrent loops never overshoot)
+        self._processed = 0
+        self._budget_lock = threading.Lock()
+
+    @property
+    def concurrency(self) -> int:
+        return self._concurrency
 
     @property
     def queues(self) -> list[str]:
@@ -151,34 +165,59 @@ class Worker:
 
     # -- main loop ------------------------------------------------------- #
     def run(self, *, max_jobs: int | None = None) -> int:
-        """Run the consume loop. ``max_jobs`` bounds it (used by tests)."""
+        """Run the consume loop(s). ``max_jobs`` bounds the TOTAL processed (used by tests). With
+        ``concurrency`` > 1, that many consume loops run in parallel threads, each claiming and
+        processing a DIFFERENT job (atomic redis pop + DB claim), so continuous sessions overlap."""
         self._beat()  # publish liveness before reaping so our own list is never reaped
         self._hb_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
         self._hb_thread.start()
         reap_orphaned_jobs(self._redis, self.settings)  # recover peers that died while we were off
-        last_reap = time.monotonic()
-        processed = 0
+        self._budget = max_jobs
+        self._claimed = 0
+        self._processed = 0
         try:
-            while not self._stop:
-                if max_jobs is not None and processed >= max_jobs:
-                    break
-                if time.monotonic() - last_reap >= self.settings.worker_reaper_interval_sec:
-                    reap_orphaned_jobs(self._redis, self.settings)
-                    last_reap = time.monotonic()
-                job_id = self._pop(timeout=2)
-                if job_id is None:
-                    if max_jobs is not None:
-                        break
-                    continue
-                self.process_job(job_id)
-                processed += 1
+            if self._concurrency <= 1:
+                self._consume()
+            else:
+                threads = [
+                    threading.Thread(target=self._consume, daemon=True)
+                    for _ in range(self._concurrency)
+                ]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
         finally:
             self._hb_stop.set()
             if self._hb_thread is not None:
                 self._hb_thread.join(timeout=2)
             with suppress(redis.RedisError):
                 self._redis.delete(worker_key(self._worker_id))
-        return processed
+        return self._processed
+
+    def _consume(self) -> None:
+        """One consume loop: claim → process → repeat until stopped / the shared budget is spent.
+        Run as the sole loop (concurrency 1) or as one of ``concurrency`` parallel threads."""
+        last_reap = time.monotonic()
+        while not self._stop:
+            with self._budget_lock:
+                # RESERVE a slot before popping so K parallel loops never exceed the budget (a
+                # check-then-pop would let two threads both pass when one slot remained).
+                if self._budget is not None and self._claimed >= self._budget:
+                    break
+                if self._budget is not None:
+                    self._claimed += 1
+            if time.monotonic() - last_reap >= self.settings.worker_reaper_interval_sec:
+                reap_orphaned_jobs(self._redis, self.settings)  # lock-guarded → safe across threads
+                last_reap = time.monotonic()
+            job_id = self._pop(timeout=2)
+            if job_id is None:
+                if self._budget is not None:
+                    break  # bounded run (tests) with nothing left to claim → done
+                continue
+            self.process_job(job_id)
+            with self._budget_lock:
+                self._processed += 1
 
     def stop(self) -> None:
         self._stop = True

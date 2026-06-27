@@ -2795,6 +2795,8 @@ Recommended initial concurrency:
 - paper trading engine: dedicated process;
 - live trading engine: dedicated process.
 
+**Implemented per-worker concurrency (`src/jobs/worker.py`, `WORKER_CONCURRENCY` / `--concurrency`).** A worker process runs `concurrency` jobs in parallel (a thread pool over its served queues; each job still claims atomically + fences, so overlap is safe). Default 1 (classic one-job-at-a-time). The **`live` worker runs at `LIVE_WORKER_CONCURRENCY` (default 4)** so the dashboard-started CONTINUOUS sessions — `run_live_session` (the per-symbol promoted ensemble) + each `run_basket_paper_session` (one basket) — run **simultaneously** instead of head-of-line blocking on a single loop. Each has its own dashboard Stop (cooperative cancel); a duplicate Start for a strategy already running is refused. Transient-job workers stay at 1.
+
 Rules:
 
 - Live engine must not share a worker process with research jobs.

@@ -113,6 +113,35 @@ def test_run_basket_rejects_non_cross_sectional_strategy() -> None:
 
 
 @requires_db
+def test_run_basket_rejects_duplicate_session() -> None:
+    """A second Start for a strategy that already has a running basket session is refused (409) —
+    so a strategy can't be double-booked once continuous sessions run concurrently."""
+    import uuid
+
+    from src.db.base import session_scope
+    from src.db.models import Job, JobStatus
+
+    jid = "test-dup-" + uuid.uuid4().hex[:8]
+    with session_scope() as s:
+        s.add(Job(
+            job_id=jid, job_type="run_basket_paper_session", status=JobStatus.RUNNING,
+            input_params={"strategy": "funding_carry"},
+        ))
+    try:
+        r = client.post(
+            "/api/paper/run-basket",
+            params={"strategy": "funding_carry", "timeframe": ""},
+            auth=AUTH, headers={"sec-fetch-site": "same-origin"},
+        )
+        assert r.status_code == 409
+    finally:
+        with session_scope() as s:
+            obj = s.get(Job, jid)
+            if obj is not None:
+                s.delete(obj)
+
+
+@requires_db
 def test_dashboard_paper_offers_basket_start_form() -> None:
     """The Paper page exposes the basket launch control with the cross-sectional candidates."""
     resp = client.get("/dashboard/paper", auth=AUTH)

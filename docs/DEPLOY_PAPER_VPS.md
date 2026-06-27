@@ -97,10 +97,13 @@ Three ways to run them (pick one):
    `PAPER_BASKET_FUNDING_STRATEGY` / `PAPER_BASKET_RESIDUAL_STRATEGY`). These run **independently**
    of `paper-live`, so lead_lag on 4h and the baskets on 1h all run at once.
 
-2. **Dashboard** — **Paper Trading** page → *Basket (cross-sectional) paper sessions* → pick a
-   strategy + timeframe → **Start basket paper session**. It enqueues a continuous job on the
-   `live` worker (so the core stack must be up); the same row has a **Stop** button. (Needs the
-   `worker-live` service — part of `docker compose up -d`.)
+2. **Dashboard (recommended for hands-on control)** — **Paper Trading** page → *Basket
+   (cross-sectional) paper sessions* → pick a strategy + timeframe → **Start basket paper session**;
+   the same row has a **Stop** button. The `live` worker runs sessions **concurrently**
+   (`LIVE_WORKER_CONCURRENCY`, default 4), so you can Start lead_lag's live session **and** both
+   basket sessions at once — each runs in parallel with its own Stop, no queueing. A second Start
+   for a strategy that's already running is refused (no double-booking). (Needs the `worker-live`
+   service — part of `docker compose up -d`.)
 
 3. **Manual CLI** (ad-hoc):
    ```

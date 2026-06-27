@@ -75,6 +75,9 @@ def worker(
     queues: str = typer.Option(
         "", "--queues", help="comma-separated queue classes to serve ('' = all / $WORKER_QUEUES)"
     ),
+    concurrency: int = typer.Option(
+        0, "--concurrency", help="parallel jobs per worker (0 = $WORKER_CONCURRENCY / 1)"
+    ),
 ) -> None:
     """Run a job worker process."""
     configure_logging()
@@ -82,8 +85,8 @@ def worker(
     from src.jobs.handlers import ensure_handlers_registered
 
     ensure_handlers_registered()
-    worker = Worker(queues=queues or None)
-    typer.echo(f"worker started (queues={worker.queues})")
+    worker = Worker(queues=queues or None, concurrency=concurrency or None)
+    typer.echo(f"worker started (queues={worker.queues}, concurrency={worker.concurrency})")
     worker.run(max_jobs=max_jobs or None)
 
 

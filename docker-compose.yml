@@ -190,15 +190,26 @@ services:
       redis:
         condition: service_healthy
 
-  # Dedicated worker for the dashboard-driven live/demo trading loop. A demo session is a
-  # long-lived loop, so it gets its own worker (it must never block — or be blocked by —
-  # backtest/data/gate jobs); the dashboard Start/Stop/Reset controls drive it end to end.
+  # Dedicated worker for the dashboard-driven live/demo + basket-paper sessions. These are
+  # long-lived loops, so it gets its own worker (never blocked by backtest/data/gate jobs) AND
+  # runs them CONCURRENTLY (--concurrency): lead_lag's live session + each basket paper session
+  # run in parallel here instead of queueing behind one another. Default 4 = lead_lag + a few
+  # baskets + headroom; raise LIVE_WORKER_CONCURRENCY for more simultaneous sessions. The
+  # dashboard Start/Stop controls drive each session end to end.
   worker-live:
     <<: *app-build
     environment:
       <<: *app-env
       SERVICE_NAME: worker-live
-    command: ["python", "-m", "src.cli.main", "worker", "--queues", "live"]
+    command:
+      - python
+      - -m
+      - src.cli.main
+      - worker
+      - --queues
+      - live
+      - --concurrency
+      - "${LIVE_WORKER_CONCURRENCY:-4}"
     depends_on:
       redis:
         condition: service_healthy
