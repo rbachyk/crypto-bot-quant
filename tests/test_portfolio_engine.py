@@ -126,3 +126,22 @@ def test_cross_sectional_routing_via_run_engine():
     meta = load_metadata_config()
     run = run_engine(cfg, meta, _universe(aligned=True), strategy=_carry_strategy())
     assert run.report.trade_count > 0  # produced a basket report through run_engine
+
+
+def test_cross_sectional_flag_marks_exactly_the_basket_candidates():
+    """The per-symbol live/paper ensemble (resolve_active_strategies) excludes strategies whose
+    `cross_sectional` flag is set — they run ONLY through the basket engine. Guard the predicate:
+    the basket candidates carry the flag, and the per-symbol portfolio ones (lead_lag, xsection)
+    do NOT, so a promoted basket can't leak into paper-live and crash / mis-route it."""
+    sc = load_strategies_config()
+
+    def flag(cid: str) -> bool:
+        return bool(getattr(build_strategy(sc.candidate(cid), sc.strategy_version),
+                            "cross_sectional", False))
+
+    assert flag("funding_carry") is True
+    assert flag("residual_momentum") is True
+    # cross-asset / cross-sectional-RS run on the per-symbol realtime feed (evaluate_portfolio),
+    # NOT the basket engine — they must stay in the per-symbol ensemble.
+    assert flag("lead_lag_xasset") is False
+    assert flag("xsection_rs") is False

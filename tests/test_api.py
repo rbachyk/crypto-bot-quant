@@ -119,6 +119,10 @@ def test_dashboard_paper_offers_basket_start_form() -> None:
     assert resp.status_code == 200
     assert "Start basket paper session" in resp.text
     assert "funding_carry" in resp.text  # a cross-sectional candidate in the dropdown
+    # the form must append the selects to the URL as QUERY params (the app's convention — the
+    # endpoint reads query params, not the POST body), or the strategy arrives empty.
+    assert "/api/paper/run-basket?strategy=" in resp.text
+    assert "basket-strat" in resp.text and "basket-tf" in resp.text
 
 
 def test_dashboard_killswitch_engage_and_recovery(tmp_path) -> None:

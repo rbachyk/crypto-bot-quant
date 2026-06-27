@@ -3464,11 +3464,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         strat_opts = "".join(f'<option value="{_esc(s)}">{_esc(s)}</option>' for s in basket_ids)
         tfs, _base = _data_timeframes()
         tf_opts = "".join(f'<option value="{_esc(t)}">{_esc(t)}</option>' for t in tfs)
+        # POST params travel as QUERY params (the app's convention — no Form()/multipart); the
+        # onsubmit appends both selects to the action URL so FastAPI reads them (see _tf_submit).
+        basket_submit = (
+            "onsubmit=\"this.action='/api/paper/run-basket?strategy='"
+            "+encodeURIComponent(document.getElementById('basket-strat').value)"
+            "+'&timeframe='+document.getElementById('basket-tf').value\""
+        )
         basket_start = (
             f"""
-  <form method="post" action="/api/paper/run-basket" style="margin:8px 0">
-    <select name="strategy">{strat_opts}</select>
-    <select name="timeframe">{tf_opts}</select>
+  <form method="post" action="/api/paper/run-basket" style="margin:8px 0" {basket_submit}>
+    <select id="basket-strat" name="strategy">{strat_opts}</select>
+    <select id="basket-tf" name="timeframe">{tf_opts}</select>
     <button class="btn" type="submit">&#9654; Start basket paper session</button>
   </form>"""
             if basket_ids

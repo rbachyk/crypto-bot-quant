@@ -225,6 +225,13 @@ def resolve_active_strategies(
             # not crash the live engine — skip it. It re-appears once re-validated.
             skipped.append(cid)
             continue
+        # Cross-sectional (basket) strategies — funding_carry (C), residual_momentum (I) — run only
+        # through the CrossSectionalEngine (the `paper-basket` path), never the per-symbol live loop.
+        # If a promoted basket leaked in here it would either run through the wrong per-symbol
+        # vehicle (funding_carry has a degraded evaluate_portfolio) or crash the feed entirely
+        # (residual_momentum has no per-symbol evaluate at all → NotImplementedError every tick).
+        if getattr(strategy, "cross_sectional", False):
+            continue
         out.append((strategy, sid, ver))
     return out, skipped
 
