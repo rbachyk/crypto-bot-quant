@@ -41,7 +41,16 @@ x-app-env: &app-env
   DASHBOARD_USERNAME: ${DASHBOARD_USERNAME:-admin}
   DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-change-me-in-env}
 
+# Cap every container's stdout/stderr log so a crash/retry loop can NEVER fill the host disk
+# (Docker's default json-file driver is UNBOUNDED). 10MB × 3 files = ≤30MB per container.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 x-app-build: &app-build
+  logging: *logging
   build:
     context: .
     dockerfile: Dockerfile
@@ -63,6 +72,7 @@ x-app-build: &app-build
 services:
   postgres:
     restart: unless-stopped
+    logging: *logging
     image: timescale/timescaledb:2.15.3-pg16
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -81,6 +91,7 @@ services:
 
   redis:
     restart: unless-stopped
+    logging: *logging
     image: redis:7-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     healthcheck:
@@ -367,6 +378,7 @@ services:
   caddy:
     profiles: ["proxy"]
     restart: unless-stopped
+    logging: *logging
     image: caddy:2-alpine
     depends_on:
       backend:
