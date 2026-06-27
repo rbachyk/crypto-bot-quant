@@ -113,6 +113,18 @@ def test_run_basket_rejects_non_cross_sectional_strategy() -> None:
 
 
 @requires_db
+def test_live_page_offers_offline_paper_start() -> None:
+    """The Live control offers an offline-PAPER start (mode=paper → SimulatedVenue: continuous, no
+    real orders, no account reconciliation to halt on) distinct from the real-venue start — so the
+    per-symbol ensemble can paper-trade on demo data instead of placing demo orders."""
+    resp = client.get("/dashboard/live", auth=AUTH)
+    assert resp.status_code == 200
+    assert "Start paper session" in resp.text
+    assert "mode=paper&timeframe=" in resp.text       # paper button passes the offline override
+    assert "session (real orders)" in resp.text       # the real-venue start remains available
+
+
+@requires_db
 def test_run_basket_rejects_duplicate_session() -> None:
     """A second Start for a strategy that already has a running basket session is refused (409) —
     so a strategy can't be double-booked once continuous sessions run concurrently."""

@@ -1553,15 +1553,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }.get(env, f"environment {_esc(env)}")
         running = bool(active_ids)
         start_disabled = " disabled" if running else ""
+        # Paper button appends mode=paper (offline SimulatedVenue — no real orders); the env-default
+        # button places real virtual-fund orders on the demo/testnet venue.
+        paper_submit = (
+            "onsubmit=\"this.action='/api/live/start?mode=paper&timeframe='"
+            "+document.getElementById('live-tf').value\""
+        )
         controls = (
-            '<div class="card"><h2>Demo / live control</h2>'
+            '<div class="card"><h2>Live / paper control</h2>'
             f'<p class="meta">Current environment: <b>{_esc(env)}</b> — {env_note}</p>'
             '<div class="form-row" style="margin-bottom:8px">' + _tf_select("live-tf")
             + '<span class="meta">the decision timeframe the strategies trade on</span></div>'
             + '<form method="post" action="/api/live/start" style="display:inline;margin-right:8px" '
+            + f'{paper_submit}><button class="btn" type="submit"{start_disabled}>'
+            "&#9654; Start paper session</button></form>"
+            + '<form method="post" action="/api/live/start" style="display:inline;margin-right:8px" '
             + _tf_submit("/api/live/start", "live-tf")
-            + f'><button class="btn" type="submit"{start_disabled}>&#9654; Start '
-            f"{_esc(env)} session</button></form>"
+            + f'><button class="btn btn-neutral" type="submit"{start_disabled}>&#9654; Start '
+            f"{_esc(env)} session (real orders)</button></form>"
             + (
                 '<form method="post" action="/api/live/reset" style="display:inline" '
                 "onsubmit=\"return confirm('Zero ALL demo statistics? This deletes every "
@@ -1626,11 +1635,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ----- live/demo session controls (dashboard-only operation) ---------- #
     @app.post("/api/live/start")
     def live_start(
-        timeframe: str = "", user: str = Depends(require_dashboard_auth)
+        timeframe: str = "", mode: str = "", user: str = Depends(require_dashboard_auth)
     ) -> RedirectResponse:
-        """Start a dashboard-driven live/demo/testnet session on the dedicated live worker, on the
-        chosen decision ``timeframe``. One live session covers the whole per-symbol promoted
-        ensemble, so refuse to start a second (it would double-trade the same strategies)."""
+        """Start a dashboard-driven live session on the dedicated live worker, on the chosen
+        decision ``timeframe``. ``mode=paper`` forces the OFFLINE SimulatedVenue (no real orders, no
+        account reconciliation, runs continuously like the basket paper sessions — the right choice
+        for paper-trading the per-symbol promoted ensemble on demo data); otherwise the venue is the
+        EXCHANGE_ENV default (demo/testnet = real virtual-fund orders). One live session covers the
+        whole per-symbol ensemble, so refuse to start a second (it would double-trade)."""
         from src.jobs import JobQueue
 
         if _has_active_job("run_live_session"):
@@ -1640,10 +1652,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         params = {"requested_by": user}
         if _valid_timeframe(timeframe):
             params["timeframe"] = timeframe
+        if mode == "paper":  # only the offline-paper override is operator-selectable here
+            params["mode"] = "paper"
         JobQueue(settings).enqueue("run_live_session", params, requested_by=user)
         _audit(
-            "run_live_session", target=settings.exchange_env, actor=user,
-            detail={"timeframe": timeframe},
+            "run_live_session", target=(mode or settings.exchange_env), actor=user,
+            detail={"timeframe": timeframe, "mode": mode or "env-default"},
         )
         return RedirectResponse(url="/dashboard/live", status_code=303)
 
