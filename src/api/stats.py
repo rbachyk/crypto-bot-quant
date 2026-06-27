@@ -47,6 +47,9 @@ def _session_bucket(hour: int) -> str:
 # src.live.loop.LiveLoop.env_label). "paper" = everything that is NOT a real-venue run.
 ENVIRONMENTS = ("paper", "demo", "testnet", "live")
 _REAL_ENV_PREFIXES = ("demo:", "testnet:", "live:")
+# Synthetic pipeline self-test runs (fabricated candidates) — excluded from the headline "paper"
+# stats so a self-test can never pollute the real paper-trading numbers.
+_SELFTEST_PREFIX = "selftest:"
 
 
 _MAX_SERIES_POINTS = 600
@@ -93,8 +96,8 @@ def _apply_env(query, env: str | None):
     if not env or env == "all":
         return query
     if env == "paper":
-        # Paper = NOT a demo/testnet/live session.
-        for pfx in _REAL_ENV_PREFIXES:
+        # Paper = NOT a demo/testnet/live session AND not a synthetic self-test.
+        for pfx in (*_REAL_ENV_PREFIXES, _SELFTEST_PREFIX):
             query = query.where(~PaperTradeRecord.session_id.like(f"{pfx}%"))
         return query
     if env == "real":

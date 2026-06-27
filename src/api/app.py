@@ -3437,13 +3437,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ----- paper trading --------------------------------------------------- #
     @app.post("/api/paper/run")
     def run_paper(user: str = Depends(require_dashboard_auth)) -> dict:
-        """Enqueue a background paper session over the promoted strategies."""
+        """Enqueue the pipeline SELF-TEST: a one-shot run over SYNTHETIC fabricated candidates (not
+        live data, no timeframe) that exercises the paper engine end to end. Its session is prefixed
+        ``selftest:`` so it is excluded from the headline paper stats — it can never pollute the real
+        paper-trading numbers. NOT continuous paper trading (use Live/basket Start for that)."""
         from src.jobs import JobQueue
 
         job_id = JobQueue(settings).enqueue(
-            "run_paper_session", {"session_name": "dashboard_paper"}, requested_by=user
+            "run_paper_session", {"session_name": "selftest:pipeline"}, requested_by=user
         )
-        _audit("run_paper_session", target="paper", actor=user, detail={})
+        _audit("run_paper_session", target="selftest", actor=user, detail={})
         return {"job_id": job_id}
 
     @app.post("/api/paper/run-basket")
@@ -3557,16 +3560,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         body = f"""
 <div class="card">
   <h2>Paper Trading ({len(rows)})</h2>
-  <form method="post" action="/api/paper/run" style="margin-bottom:12px">
-    <button class="btn" type="submit">&#9654; Run paper session</button>
+  <form method="post" action="/api/paper/run" style="margin-bottom:12px"
+        onsubmit="return confirm('Run the pipeline SELF-TEST? It books SYNTHETIC trades (not real paper trading) under a selftest: session, kept out of your paper stats.')">
+    <button class="btn btn-neutral" type="submit">&#9881; Run pipeline self-test (synthetic)</button>
   </form>
-  <p class="meta">Runs execute in the background and source candidates only from
-     <b>promoted</b> strategies (the research promotion registry); trades persist to
-     <code>paper_trades</code>.</p>
+  <p class="meta"><b>Self-test only</b> — a one-shot run over <b>synthetic</b> fabricated candidates
+     to verify the paper engine works end to end. NOT live paper trading and NOT timeframe-based; its
+     <code>selftest:</code> session is excluded from the stats above. For real paper trading use
+     <b>Live → Start paper session</b> (e.g. 4h) and <b>Start basket paper session</b> (e.g. 1h) below.</p>
   <table>
     <tr><th>Session</th><th>Created</th><th>Executed</th><th>Rejected</th><th>Net PnL</th>
         <th>Expectancy R</th><th>Win Rate</th><th>Strategies</th></tr>
-    {body_rows or '<tr><td colspan="8" class="meta">No paper sessions yet — click Run paper session.</td></tr>'}
+    {body_rows or '<tr><td colspan="8" class="meta">No paper sessions yet — start one from Live → Start paper session, or a basket session below.</td></tr>'}
   </table>
 </div>
 <div class="card">

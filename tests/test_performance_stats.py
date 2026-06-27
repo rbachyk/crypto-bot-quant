@@ -39,6 +39,26 @@ def seeded_trades():
         s.query(PaperTradeRecord).filter_by(session_id=_SID).delete()
 
 
+def test_selftest_session_excluded_from_paper_stats() -> None:
+    """A synthetic pipeline self-test (session_id ``selftest:…``) must NOT count toward the headline
+    paper stats — only toward env='all'. Guards the run-paper-session footgun isolation."""
+    strat = "iso_test_strategy"
+    with session_scope() as s:
+        s.query(PaperTradeRecord).filter_by(strategy=strat).delete()
+        for sid, tid in (("paper_iso", "real"), ("selftest:iso", "synthetic")):
+            s.add(PaperTradeRecord(
+                session_id=sid, trade_id=f"pt_{tid}", symbol="BTC/USDT:USDT", strategy=strat,
+                side=1, pnl=10.0, pnl_r=1.0, fee=0.0, slippage_cost=0.0, regime="range",
+            ))
+    try:
+        window = resolve_window("all", None, None)
+        assert compute_trading_stats(window, env="paper", strategy=strat).total_trades == 1
+        assert compute_trading_stats(window, env=None, strategy=strat).total_trades == 2  # all
+    finally:
+        with session_scope() as s:
+            s.query(PaperTradeRecord).filter_by(strategy=strat).delete()
+
+
 def test_trading_stats_core_metrics(seeded_trades) -> None:
     t = compute_trading_stats(resolve_window("all", None, None), strategy=_STRAT)
     assert t.total_trades == 4
