@@ -11,6 +11,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+# Notional equity every PAPER account is seeded at (per-symbol engine + basket loop) and that the
+# dashboard reconstructs its equity curve on. ONE source so all paper P&L / % returns share a base
+# (the backtest's larger account.initial_equity is a size-invariant numeraire, used only there).
+PAPER_BASE_EQUITY = 10_000.0
+
 
 @dataclass(slots=True)
 class PaperTrade:

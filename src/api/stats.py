@@ -29,9 +29,10 @@ from src.db.models import (
     UniverseVersion,
 )
 
-# Paper sessions seed each account at this notional equity (src/paper/run.py),
-# so drawdown is expressed as a fraction of this base.
-_PAPER_BASE_EQUITY = 10_000.0
+# Paper sessions (per-symbol engine AND basket loop) seed each account at this notional equity, so
+# the reconstructed equity curve / drawdown share one base across strategies. Single source in
+# src.paper.session so the basket loop and the dashboard can never drift apart again.
+from src.paper.session import PAPER_BASE_EQUITY as _PAPER_BASE_EQUITY  # noqa: E402
 
 
 def _session_bucket(hour: int) -> str:

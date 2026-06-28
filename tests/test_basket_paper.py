@@ -119,6 +119,23 @@ def test_basket_loop_residual_momentum_forms_a_basket() -> None:
     assert any(t.side > 0 for t in session.trades) and any(t.side < 0 for t in session.trades)
 
 
+def test_basket_loop_seeds_paper_base_equity() -> None:
+    """The PAPER basket loop must seed at the shared paper base (so its $ P&L / equity curve line up
+    with the per-symbol engine + dashboard), while the default keeps the config numeraire."""
+    from src.paper.session import PAPER_BASE_EQUITY
+
+    cfg = load_backtest_config()
+    meta = load_metadata_config()
+    strat = build_strategy(load_strategies_config().candidate("funding_carry"),
+                           load_strategies_config().strategy_version)
+    sess = PaperSession(session_id="t")
+    paper = BasketPaperLoop(cfg, meta, strat, bar_interval_ms=IV, session=sess,
+                            initial_equity=PAPER_BASE_EQUITY)
+    assert paper._equity == PAPER_BASE_EQUITY == 10_000.0
+    default = BasketPaperLoop(cfg, meta, strat, bar_interval_ms=IV, session=PaperSession("t2"))
+    assert default._equity == cfg.account.initial_equity  # backtest numeraire unchanged
+
+
 def test_basket_halt_check_honours_global_kill_switch(tmp_path) -> None:
     """The basket loop's stop condition must trip on the GLOBAL kill switch (emergency halt), not
     just the caller's Stop/job-cancel — or a kill switch would stop directional trading but leave

@@ -21,7 +21,7 @@ from src.backtest.config import BacktestConfig
 from src.backtest.engine import BacktestResult, SymbolInput, Trade
 from src.backtest.portfolio import CrossSectionalEngine
 from src.exchange.metadata import MetadataConfig
-from src.paper.session import PaperSession, PaperTrade
+from src.paper.session import PAPER_BASE_EQUITY, PaperSession, PaperTrade
 
 # A snapshot: (decision_ts, {symbol: bar}, {symbol: feature_row}) for one bar across the universe.
 Snapshot = tuple[int, dict[str, dict], dict[str, dict]]
@@ -74,6 +74,7 @@ class BasketPaperLoop:
         session: PaperSession,
         on_trade: Callable[[PaperTrade], None] | None = None,
         on_event: Callable[[str], None] | None = None,
+        initial_equity: float | None = None,
     ) -> None:
         self.engine = CrossSectionalEngine(cfg, meta, strategy)
         self.engine._grid_iv = max(1, int(bar_interval_ms))
@@ -82,9 +83,13 @@ class BasketPaperLoop:
         self.on_trade = on_trade
         self.on_event = on_event
         self._holdings: dict = {}
-        self._equity = cfg.account.initial_equity
+        # PAPER sessions seed at the shared paper base so basket $ P&L lines up with the per-symbol
+        # paper engine + the dashboard equity curve; the backtest path leaves this None and keeps
+        # the config's account.initial_equity (a size-invariant numeraire there).
+        eq = cfg.account.initial_equity if initial_equity is None else float(initial_equity)
+        self._equity = eq
         self._last_rebal: int | None = None
-        self._result = BacktestResult(initial_equity=cfg.account.initial_equity)
+        self._result = BacktestResult(initial_equity=eq)
         self._booked = 0
         self._rebal_ms = (
             int(self.engine.rebalance_hours * 3_600_000)
@@ -260,6 +265,7 @@ def run_basket_paper_session(
     session = PaperSession(session_id=f"paper:basket:{candidate_id}:{data_cfg.data_version}:{tf}")
     loop = BasketPaperLoop(
         cfg, meta, strategy, bar_interval_ms=timeframe_ms(tf), session=session, on_event=on_event,
+        initial_equity=PAPER_BASE_EQUITY,  # paper base → equity curve aligns with other sessions
     )
 
     last_bars: dict[str, dict] = {}
