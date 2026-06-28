@@ -125,6 +125,34 @@ def test_live_page_offers_offline_paper_start() -> None:
 
 
 @requires_db
+def test_open_positions_persist_and_render() -> None:
+    """The basket persist helper writes/clears live open positions and the dashboard renders them
+    with unrealized P&L (the feature: see held legs before they close)."""
+    from src.db.base import session_scope
+    from src.db.models import OpenPosition
+    from src.live.basket import _persist_open_positions
+
+    sid = "paper:basket:test_open:v:1h"
+    try:
+        _persist_open_positions(sid, [{
+            "symbol": "ETH/USDT:USDT", "strategy": "funding_carry", "side": 1, "qty": 1.0,
+            "entry_price": 100.0, "mark_price": 110.0, "notional": 100.0,
+            "unrealized_pnl": 10.0, "entry_ts": 1,
+        }])
+        with session_scope() as s:
+            rows = s.query(OpenPosition).filter_by(session_id=sid).all()
+            assert len(rows) == 1 and rows[0].unrealized_pnl == 10.0
+        resp = client.get("/dashboard/paper", auth=AUTH)
+        assert "Open positions" in resp.text and "ETH/USDT:USDT" in resp.text
+        _persist_open_positions(sid, [])  # empty snapshot clears the panel
+        with session_scope() as s:
+            assert s.query(OpenPosition).filter_by(session_id=sid).count() == 0
+    finally:
+        with session_scope() as s:
+            s.query(OpenPosition).filter_by(session_id=sid).delete()
+
+
+@requires_db
 def test_run_basket_rejects_duplicate_session() -> None:
     """A second Start for a strategy that already has a running basket session is refused (409) —
     so a strategy can't be double-booked once continuous sessions run concurrently."""

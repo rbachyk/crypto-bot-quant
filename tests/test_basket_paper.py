@@ -119,6 +119,27 @@ def test_basket_loop_residual_momentum_forms_a_basket() -> None:
     assert any(t.side > 0 for t in session.trades) and any(t.side < 0 for t in session.trades)
 
 
+def test_basket_loop_reports_open_positions() -> None:
+    """The loop must emit its held legs (marked to market, with unrealized P&L) via on_positions
+    while they're open, and clear them (empty list) when the session goes flat — what powers the
+    dashboard's live Open-positions panel."""
+    cfg = load_backtest_config()
+    meta = load_metadata_config()
+    sc = load_strategies_config()
+    strat = build_strategy(sc.candidate("funding_carry"), sc.strategy_version)
+    by_symbol, snaps = _fixture()
+    captured: list[list[dict]] = []
+    BasketPaperLoop(cfg, meta, strat, bar_interval_ms=IV, session=PaperSession("t"),
+                    on_positions=lambda p: captured.append(list(p))).run(snaps, by_symbol)
+
+    held = [snap for snap in captured if snap]
+    assert held, "loop should report open positions while legs are held"
+    pos = held[0][0]
+    assert {"symbol", "side", "qty", "entry_price", "mark_price", "unrealized_pnl", "strategy"} \
+        <= set(pos)
+    assert captured[-1] == []  # close_all flattened → panel cleared
+
+
 def test_basket_loop_seeds_paper_base_equity() -> None:
     """The PAPER basket loop must seed at the shared paper base (so its $ P&L / equity curve line up
     with the per-symbol engine + dashboard), while the default keeps the config numeraire."""

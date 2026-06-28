@@ -735,6 +735,56 @@ def _has_active_job(job_type: str, *, strategy: str | None = None) -> bool:
     return any((j.input_params or {}).get("strategy") == strategy for j in rows)
 
 
+def _open_positions_card() -> str:
+    """Live OPEN positions (held basket legs / live entries) marked to market — UNREALIZED P&L until
+    they close. Read from the open_positions table the running sessions refresh each tick."""
+    from src.db.models import OpenPosition
+
+    try:
+        with session_scope() as session:
+            rows = (
+                session.execute(
+                    select(OpenPosition).order_by(OpenPosition.strategy, OpenPosition.symbol)
+                )
+                .scalars()
+                .all()
+            )
+            data = [
+                (r.strategy, r.symbol, r.side, r.qty, r.entry_price, r.mark_price, r.unrealized_pnl)
+                for r in rows
+            ]
+    except Exception:  # noqa: BLE001 - degrade to empty (e.g. table not migrated yet), never 500
+        data = []
+    total = sum(d[6] for d in data)
+    if data:
+        body = "".join(
+            f"<tr><td><code>{_esc(strat)}</code></td><td>{_esc(sym)}</td>"
+            f"<td>{'LONG' if side > 0 else 'SHORT'}</td><td>{qty:.4f}</td><td>{entry:,.4f}</td>"
+            f"<td>{mark:,.4f}</td><td style=\"color:{'#3fb950' if upnl >= 0 else '#f85149'}\">"
+            f"{upnl:+,.2f}</td></tr>"
+            for (strat, sym, side, qty, entry, mark, upnl) in data
+        )
+    else:
+        body = (
+            "<tr><td colspan='7' class='meta'>No open positions — sessions are flat or between "
+            "rebalances.</td></tr>"
+        )
+    tcolor = "#3fb950" if total >= 0 else "#f85149"
+    return f"""
+<div class="card">
+  <h2>Open positions ({len(data)})</h2>
+  <p class="meta">Live held legs marked to market — <b>unrealized</b> P&amp;L, refreshed each tick.
+     A leg drops off here and becomes a realized trade when it closes.</p>
+  <table>
+    <tr><th>Strategy</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Mark</th>
+        <th>Unrealized P&amp;L</th></tr>
+    {body}
+  </table>
+  <p class="meta" style="margin-top:8px">Total unrealized:
+     <b style="color:{tcolor}">{total:+,.2f}</b></p>
+</div>"""
+
+
 def _period_selector(action: str, period: str) -> str:
     """A custom segmented pill control that re-renders the page per time period (Section 25).
 
@@ -3574,6 +3624,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     {body_rows or '<tr><td colspan="8" class="meta">No paper sessions yet — start one from Live → Start paper session, or a basket session below.</td></tr>'}
   </table>
 </div>
+{_open_positions_card()}
 <div class="card">
   <h2>Basket (cross-sectional) paper sessions</h2>
   <p class="meta">Carry / factor baskets (funding_carry, residual_momentum) run through the

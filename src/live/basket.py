@@ -74,6 +74,7 @@ class BasketPaperLoop:
         session: PaperSession,
         on_trade: Callable[[PaperTrade], None] | None = None,
         on_event: Callable[[str], None] | None = None,
+        on_positions: Callable[[list[dict]], None] | None = None,
         initial_equity: float | None = None,
     ) -> None:
         self.engine = CrossSectionalEngine(cfg, meta, strategy)
@@ -82,6 +83,7 @@ class BasketPaperLoop:
         self.session = session
         self.on_trade = on_trade
         self.on_event = on_event
+        self.on_positions = on_positions
         self._holdings: dict = {}
         # PAPER sessions seed at the shared paper base so basket $ P&L lines up with the per-symbol
         # paper engine + the dashboard equity curve; the backtest path leaves this None and keeps
@@ -143,6 +145,23 @@ class BasketPaperLoop:
                     "(need more history for the feature window)"
                 )
         self._flush()
+        if self.on_positions is not None:
+            self.on_positions(self._open_positions(bars_at))
+
+    def _open_positions(self, bars_at: dict[str, dict]) -> list[dict]:
+        """Mark every held leg to the latest bar and return its unrealized P&L — what the dashboard
+        shows as live open positions until the leg closes (then it becomes a realized trade)."""
+        out: list[dict] = []
+        for sym, leg in self._holdings.items():
+            bar = bars_at.get(sym)
+            mark = float(bar["close"]) if bar is not None else leg.entry_price
+            unreal = leg.side * (mark - leg.entry_price) * leg.qty - leg.entry_fee - leg.funding
+            out.append({
+                "symbol": sym, "strategy": self.engine.name, "side": leg.side, "qty": leg.qty,
+                "entry_price": leg.entry_price, "mark_price": mark, "notional": leg.notional,
+                "unrealized_pnl": unreal, "entry_ts": leg.entry_ts,
+            })
+        return out
 
     def close_all(self, ts: int, bars_at: dict[str, dict]) -> None:
         """Flatten every leg at the latest bar (session end / stop)."""
@@ -152,6 +171,8 @@ class BasketPaperLoop:
                 self._equity += self.engine._close_leg(leg, bar, "end_of_data", self._result)
         self._holdings.clear()
         self._flush()
+        if self.on_positions is not None:
+            self.on_positions([])  # session flat → clear the dashboard's open-positions panel
 
     def run(
         self, snapshots: Iterable[Snapshot], by_symbol: dict[str, SymbolInput]
@@ -195,6 +216,25 @@ def _halt_check(
         return bool(caller_stop and caller_stop())
 
     return _should_stop
+
+
+def _persist_open_positions(session_id: str, positions: list[dict]) -> None:
+    """Replace this session's live open-position rows with the current marked-to-market snapshot
+    (delete + insert) so the dashboard always shows exactly what's held right now. An empty list
+    clears them (the session went flat). Best-effort: a DB blip must not crash the trading loop."""
+    from datetime import UTC, datetime
+
+    from src.db.base import session_scope
+    from src.db.models import OpenPosition
+
+    try:
+        with session_scope() as s:
+            s.query(OpenPosition).filter_by(session_id=session_id).delete()
+            now = datetime.now(UTC)
+            for p in positions:
+                s.add(OpenPosition(session_id=session_id, updated_at=now, **p))
+    except Exception:  # noqa: BLE001 - position display must never take down the session
+        pass
 
 
 def run_basket_paper_session(
@@ -266,6 +306,7 @@ def run_basket_paper_session(
     loop = BasketPaperLoop(
         cfg, meta, strategy, bar_interval_ms=timeframe_ms(tf), session=session, on_event=on_event,
         initial_equity=PAPER_BASE_EQUITY,  # paper base → equity curve aligns with other sessions
+        on_positions=lambda positions: _persist_open_positions(session.session_id, positions),
     )
 
     last_bars: dict[str, dict] = {}

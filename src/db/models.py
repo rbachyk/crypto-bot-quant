@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     Enum,
@@ -516,6 +517,30 @@ class PaperTradeRecord(Base):
     # created_at is the primary window-filter + sort key for every stats query; index it so the
     # dashboard doesn't full-scan + sort paper_trades on each render as the table grows.
     __table_args__ = (Index("ix_paper_trades_created_at", "created_at"),)
+
+
+class OpenPosition(Base):
+    """A currently-OPEN position (a held basket leg / a live entry), marked to market so the
+    dashboard can show UNREALIZED P&L until it closes. Live state, not history: the running session
+    replaces its rows each tick and clears them when the position closes or the session ends. A
+    closed position becomes a :class:`PaperTradeRecord` (realized) — these two never overlap."""
+
+    __tablename__ = "open_positions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(80), index=True)
+    strategy: Mapped[str] = mapped_column(String(64), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    side: Mapped[int] = mapped_column(Integer, default=0)
+    qty: Mapped[float] = mapped_column(default=0.0)
+    entry_price: Mapped[float] = mapped_column(default=0.0)
+    mark_price: Mapped[float] = mapped_column(default=0.0)
+    notional: Mapped[float] = mapped_column(default=0.0)
+    unrealized_pnl: Mapped[float] = mapped_column(default=0.0)
+    entry_ts: Mapped[int] = mapped_column(BigInteger, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (Index("ix_open_positions_session", "session_id"),)
 
 
 class ShadowLog(Base):
