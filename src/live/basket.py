@@ -73,12 +73,14 @@ class BasketPaperLoop:
         bar_interval_ms: int,
         session: PaperSession,
         on_trade: Callable[[PaperTrade], None] | None = None,
+        on_event: Callable[[str], None] | None = None,
     ) -> None:
         self.engine = CrossSectionalEngine(cfg, meta, strategy)
         self.engine._grid_iv = max(1, int(bar_interval_ms))
         self.strategy = strategy
         self.session = session
         self.on_trade = on_trade
+        self.on_event = on_event
         self._holdings: dict = {}
         self._equity = cfg.account.initial_equity
         self._last_rebal: int | None = None
@@ -100,11 +102,18 @@ class BasketPaperLoop:
                 leg.next_funding_idx = eng._charge_funding(leg, by_symbol[sym], ts)
         # 2) Rebalance on cadence.
         if self._last_rebal is None or ts - self._last_rebal >= self._rebal_ms:
+            # Score EXACTLY as the backtest engine does (the Parity Rule): residual modes
+            # (residual_momentum) score from the rolling RETURNS series via _residual_score — the
+            # per-row strategy.score() is a no-op marker for them, so calling it would yield zero
+            # scores and the basket would NEVER form. Rebuild the returns from the live rolling
+            # window so _residual_score behaves identically to the backtest.
+            if eng._residual:
+                eng._prepare_returns([si for si in by_symbol.values() if getattr(si, "bars", None)])
             scores: dict[str, float] = {}
             for sym, row in rows_at.items():
                 if sym not in bars_at:
                     continue
-                sc = self.strategy.score(row)  # type: ignore[attr-defined]
+                sc = eng._residual_score(sym, ts) if eng._residual else self.strategy.score(row)
                 if sc is not None:
                     f = float(sc)
                     if f == f and abs(f) != float("inf"):  # finite
@@ -112,11 +121,22 @@ class BasketPaperLoop:
             if len(scores) >= eng.min_universe:
                 bars_by_ts = {s: {ts: b} for s, b in bars_at.items()}
                 rows_by_ts = {s: {ts: r} for s, r in rows_at.items()}
+                before = len(self._result.trades)
                 self._equity = eng._rebalance(
                     self._holdings, scores, bars_by_ts, rows_by_ts, by_symbol, ts, self._equity,
                     self._result,
                 )
                 self._last_rebal = ts
+                if self.on_event is not None:
+                    self.on_event(
+                        f"rebalanced: {len(self._holdings)} legs held, "
+                        f"{len(self._result.trades) - before} closed, equity={self._equity:.2f}"
+                    )
+            elif self.on_event is not None:
+                self.on_event(
+                    f"rebalance skipped: only {len(scores)}/{eng.min_universe} symbols scored "
+                    "(need more history for the feature window)"
+                )
         self._flush()
 
     def close_all(self, ts: int, bars_at: dict[str, dict]) -> None:
@@ -181,6 +201,8 @@ def run_basket_paper_session(
     max_ticks: int | None = None,
     settings=None,
     should_stop: Callable[[], bool] | None = None,
+    on_event: Callable[[str], None] | None = None,
+    on_tick: Callable[[int, str], None] | None = None,
 ) -> int:
     """Continuous PAPER session for ONE cross-sectional (basket) strategy on the live REST feed.
 
@@ -236,12 +258,16 @@ def run_basket_paper_session(
     meta = load_metadata_for(data_cfg.exchange_id)
     cfg = load_backtest_config()
     session = PaperSession(session_id=f"paper:basket:{candidate_id}:{data_cfg.data_version}:{tf}")
-    loop = BasketPaperLoop(cfg, meta, strategy, bar_interval_ms=timeframe_ms(tf), session=session)
+    loop = BasketPaperLoop(
+        cfg, meta, strategy, bar_interval_ms=timeframe_ms(tf), session=session, on_event=on_event,
+    )
 
     last_bars: dict[str, dict] = {}
-    for ts, bars_at, rows_at in feed.snapshots():
+    for ticks, (ts, bars_at, rows_at) in enumerate(feed.snapshots(), start=1):
         last_bars = bars_at
         loop.step(ts, bars_at, rows_at, feed.symbol_inputs())
+        if on_tick is not None:
+            on_tick(ticks, f"tick {ticks}: {len(session.trades)} legs, {len(bars_at)} symbols")
     loop.close_all(int(max((b["ts"] for b in last_bars.values()), default=0)), last_bars)
 
     persist_paper_session(session, build_paper_report(session), settings)

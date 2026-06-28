@@ -830,6 +830,10 @@ def _run_basket_paper_session(ctx: JobContext, params: dict) -> dict:
         # Stop on a dashboard Stop (cancel flag) OR if this run was superseded (another worker
         # now owns the requeued job) — so two basket loops never run at once.
         should_stop=lambda: ctx.is_cancelled() or not ctx.still_owns(),
+        # Surface rebalances / skips to the job log and per-tick progress to the dashboard, so a
+        # basket that never forms (e.g. too little history for the feature window) is VISIBLE.
+        on_event=ctx.log,
+        on_tick=lambda i, msg: ctx.progress(i, max_ticks or 0, msg),
     )
     ctx.progress(max_ticks or 0, max_ticks or 0, f"stopped: {n_trades} paper legs booked")
     return {
