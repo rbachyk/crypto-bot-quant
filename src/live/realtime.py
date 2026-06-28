@@ -152,13 +152,13 @@ class LiveCandidateFeed:
         end = (end // iv) * iv
         start = end - self.window_bars * iv
         base_iv = self.data_cfg.base_timeframe
+        total_bars = 0
         for sym in self.symbols:
-            self._reader.seed_ohlcv(
-                sym,
-                src.fetch(
-                    SeriesKey(self.data_cfg.exchange_id, OHLCV, sym, self.timeframe), start, end
-                ),
+            bars = src.fetch(
+                SeriesKey(self.data_cfg.exchange_id, OHLCV, sym, self.timeframe), start, end
             )
+            self._reader.seed_ohlcv(sym, bars)
+            total_bars += len(bars)
             for dt in _POINT_IN_TIME:
                 tf = (
                     self.data_cfg.oi_grid
@@ -170,6 +170,12 @@ class LiveCandidateFeed:
                     dt,
                     src.fetch(SeriesKey(self.data_cfg.exchange_id, dt, sym, tf), start, end),
                 )
+        # A seed that returns NO OHLCV means the feed can never advance → the session sits at tick 0
+        # (the silent-startup symptom). Surface the bar count so it's diagnosable, loud if empty.
+        (_log.warning if total_bars == 0 else _log.info)(
+            "live_feed_seeded", symbols=len(self.symbols), ohlcv_bars=total_bars,
+            timeframe=self.timeframe, exchange_env=self.settings.exchange_env,
+        )
 
     def _rest(self) -> DataSource:
         if self.rest_source is not None:
