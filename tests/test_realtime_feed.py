@@ -86,6 +86,26 @@ def test_live_feed_yields_well_formed_candidates_from_stream() -> None:
         assert int(cand.decision_ts) == decision_ts
 
 
+def test_live_feed_emits_per_cycle_heartbeat() -> None:
+    """on_cycle fires every poll cycle (signal or not), so a quiet selective strategy is visibly
+    alive on the dashboard instead of frozen at tick 0."""
+    beats: list[dict] = []
+    feed = LiveCandidateFeed(
+        _cfg(),
+        feed_source=ScriptedFeedSource(_new_bars()),
+        rest_source=DeterministicSource(EX),
+        timeframe=TF,
+        symbols=[SYM],
+        seed_end_ms=SEED_END,
+        max_groups=5,
+        on_cycle=beats.append,
+    )
+    list(feed.groups())
+    assert beats, "the feed must emit a per-cycle heartbeat"
+    assert {"cycles", "advanced", "signals", "last_ts"} <= set(beats[-1])
+    assert beats[-1]["cycles"] >= 1
+
+
 def test_live_loop_runs_the_realtime_feed() -> None:
     result = LiveLoop(mode="paper").run(_feed(), session_name="rt")
     assert result.ticks  # processed live decision times

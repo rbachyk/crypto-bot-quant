@@ -418,6 +418,7 @@ def run_replay_session(
     transport: str | None = None,
     realtime: bool = False,
     on_tick: Callable[[LiveTick, int], None] | None = None,
+    on_heartbeat: Callable[[dict], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> LiveRunResult:
     """Run the live loop over a snapshot **replay** or the **real-time** live feed in ``mode``.
@@ -485,6 +486,7 @@ def run_replay_session(
             max_groups=max_ticks,
             poll_sec=poll_sec,  # >0 → continuous session (waits for new bars)
             should_stop=should_stop,  # responsive Stop during the wait
+            on_cycle=on_heartbeat,  # per-cycle liveness (even when no signal fires)
         )
         # The real-time feed owns the data-manager halt; don't double-poll at the loop level.
         loop = LiveLoop(mode=mode, settings=settings, guard=guard)

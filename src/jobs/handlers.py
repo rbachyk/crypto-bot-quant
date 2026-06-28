@@ -927,10 +927,32 @@ def _run_live_session(ctx: JobContext, params: dict) -> dict:
     )
     ctx.progress(0, prog_total, "starting live loop (press Stop to end)")
 
-    def _on_tick(tick, i: int) -> None:
+    # Liveness: a selective strategy (lead_lag) only emits a "tick" on a SIGNAL, so between setups
+    # the session looks frozen at tick 0 even when healthy. Show an "alive" heartbeat — bars
+    # evaluated + signals/exec/rej — updated each poll cycle (throttled), so quiet != dead.
+    import time as _time
+
+    hb = {"bars": 0, "signals": 0, "exec": 0, "rej": 0, "last": 0.0}
+
+    def _write_progress(*, force: bool = False) -> None:
+        now = _time.monotonic()
+        if not force and now - hb["last"] < 15:
+            return
+        hb["last"] = now
         ctx.progress(
-            i + 1, prog_total, f"tick {i + 1}: {tick.executed} exec / {tick.rejected} rej"
+            hb["signals"], prog_total,
+            f"alive · {hb['bars']} bars evaluated · {hb['signals']} signals · "
+            f"{hb['exec']} exec / {hb['rej']} rej",
         )
+
+    def _on_tick(tick, i: int) -> None:
+        hb["exec"], hb["rej"], hb["signals"] = tick.executed, tick.rejected, i + 1
+        _write_progress(force=True)  # a signal is notable → update immediately
+
+    def _on_heartbeat(stats: dict) -> None:
+        hb["bars"] += int(stats.get("advanced", 0))
+        hb["signals"] = max(hb["signals"], int(stats.get("signals", 0)))
+        _write_progress()  # throttled per-cycle liveness
 
     result = run_replay_session(
         data_cfg,
@@ -944,6 +966,7 @@ def _run_live_session(ctx: JobContext, params: dict) -> dict:
         max_ticks=max_ticks,
         poll_sec=poll_sec,
         on_tick=_on_tick,
+        on_heartbeat=_on_heartbeat,
         # Stop on a dashboard Stop (cancel flag) OR if this run was superseded (a false-reap
         # requeued the job and another worker now owns it) — so two live loops never run at once.
         should_stop=lambda: ctx.is_cancelled() or not ctx.still_owns(),

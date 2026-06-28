@@ -90,6 +90,7 @@ class LiveCandidateFeed:
         seed_end_ms: int | None = None,
         equity: float = 10_000.0,
         should_stop=None,
+        on_cycle=None,
     ) -> None:
         self.settings = settings or get_settings()
         self.data_cfg = data_cfg
@@ -106,6 +107,11 @@ class LiveCandidateFeed:
         self.seed_end_ms = seed_end_ms
         self.equity = equity
         self._should_stop = should_stop  # polled during the wait so Stop is responsive
+        # Heartbeat: called once per poll cycle (even when no signal fires) so a healthy-but-QUIET
+        # session is visibly alive instead of frozen at "tick 0" (a selective strategy like lead_lag
+        # only yields on a signal, so without this it looks dead between setups).
+        self._on_cycle = on_cycle
+        self._cycles = 0
         self._reader = RollingReader(max_bars=window_bars * 2)
 
         from src.backtest.config import load_backtest_config
@@ -298,6 +304,14 @@ class LiveCandidateFeed:
                 yield (int(row["decision_ts"]), cands)
                 if self.max_groups is not None and emitted >= self.max_groups:
                     return
+            # Heartbeat AFTER processing the cycle — fires every cycle, signal or not, so the
+            # dashboard can show the session is alive + how many bars it has evaluated.
+            self._cycles += 1
+            if self._on_cycle is not None:
+                self._on_cycle({
+                    "cycles": self._cycles, "advanced": len(advanced), "signals": emitted,
+                    "last_ts": max((int(r["decision_ts"]) for _, _, r in advanced), default=0),
+                })
             if not progressed:
                 if self.poll_sec > 0:
                     if self._sleep_or_stop():
