@@ -1958,19 +1958,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         to_ts: str | None = None,
         strategy: str | None = None,
         session: str | None = None,
+        env: str | None = None,
+        qbot_env: str = Cookie("all"),
         user: str = Depends(require_dashboard_auth),
     ) -> dict[str, Any]:
         from src.api.stats import get_aggregate_stats
 
+        # Honour the env selector (query param or the dashboard's qbot_env cookie) like the HTML
+        # pages — otherwise this JSON endpoint blends paper/demo/testnet/live (and self-test).
+        env = env or qbot_env
         return get_aggregate_stats(
-            period, from_ts, to_ts, strategy=strategy, session_id=session
+            period, from_ts, to_ts,
+            env=None if env == "all" else env, strategy=strategy, session_id=session,
         ).to_dict()
 
     @app.get("/api/stats/scopes")
-    def stats_scopes(user: str = Depends(require_dashboard_auth)) -> dict[str, list[str]]:
+    def stats_scopes(
+        env: str | None = None,
+        qbot_env: str = Cookie("all"),
+        user: str = Depends(require_dashboard_auth),
+    ) -> dict[str, list[str]]:
         from src.api.stats import get_trade_scopes
 
-        return get_trade_scopes()
+        env = env or qbot_env
+        return get_trade_scopes(env=None if env == "all" else env)
 
     @app.get("/api/stats/symbols")
     def stats_symbols(user: str = Depends(require_dashboard_auth)) -> list[str]:
@@ -1984,11 +1995,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         period: str = "all",
         from_ts: str | None = None,
         to_ts: str | None = None,
+        env: str | None = None,
+        qbot_env: str = Cookie("all"),
         user: str = Depends(require_dashboard_auth),
     ) -> dict[str, Any]:
         from src.api.stats import get_per_symbol_stats
 
-        return get_per_symbol_stats(symbol, period, from_ts, to_ts)
+        env = env or qbot_env
+        return get_per_symbol_stats(
+            symbol, period, from_ts, to_ts, env=None if env == "all" else env
+        )
 
     # ----- stats dashboard pages ------------------------------------------- #
     @app.get("/dashboard/stats", response_class=HTMLResponse)

@@ -158,6 +158,37 @@ def test_open_positions_persist_and_render() -> None:
 
 
 @requires_db
+def test_api_stats_respects_env_selector() -> None:
+    """The /api/stats JSON endpoint must honour the env selector (query param / qbot_env cookie)
+    like the HTML pages — otherwise it blends paper/demo/testnet/live into one number that
+    disagrees with the dashboard's per-env view."""
+    from src.db.base import session_scope
+    from src.db.models import PaperTradeRecord
+
+    strat = "apienv_strat"
+    with session_scope() as s:
+        s.query(PaperTradeRecord).filter_by(strategy=strat).delete()
+        s.add(PaperTradeRecord(
+            session_id="paper_apienv", trade_id="p0", symbol="BTC/USDT:USDT", strategy=strat,
+            side=1, pnl=1.0, pnl_r=0.1, fee=0.0, slippage_cost=0.0, regime="r",
+            exit_reason="take_profit",
+        ))
+        s.add(PaperTradeRecord(
+            session_id="demo:apienv", trade_id="d0", symbol="BTC/USDT:USDT", strategy=strat,
+            side=1, pnl=2.0, pnl_r=0.1, fee=0.0, slippage_cost=0.0, regime="r",
+            exit_reason="take_profit",
+        ))
+    try:
+        paper = client.get(f"/api/stats?env=paper&strategy={strat}", auth=AUTH).json()["trading"]
+        demo = client.get(f"/api/stats?env=demo&strategy={strat}", auth=AUTH).json()["trading"]
+        assert paper["total_trades"] == 1 and paper["realized_pnl"] == 1.0  # paper only
+        assert demo["total_trades"] == 1 and demo["realized_pnl"] == 2.0  # demo only, not blended
+    finally:
+        with session_scope() as s:
+            s.query(PaperTradeRecord).filter_by(strategy=strat).delete()
+
+
+@requires_db
 def test_open_positions_panel_excludes_real_venue_sessions() -> None:
     """The Paper page Open-positions panel must NOT show demo/testnet/live real-venue legs — the
     per-symbol live loop persists OpenPosition rows for those too, and mixing them into the paper
