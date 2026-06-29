@@ -576,7 +576,12 @@ def get_environment_summary() -> list[dict[str, Any]]:
                 func.coalesce(
                     func.sum(case((PaperTradeRecord.pnl > 0, 1), else_=0)), 0
                 ).label("wins"),
-            ).group_by(env_expr)
+            )
+            # Exclude self-test runs: they fall into the else_="paper" bucket and would inflate the
+            # paper row, while the headline KPI cards (via _apply_env) exclude them — so the two
+            # paper numbers on the Overview disagreed. Keep them out of the env summary entirely.
+            .where(~PaperTradeRecord.session_id.like(f"{_SELFTEST_PREFIX}%"))
+            .group_by(env_expr)
         ).all()
     by_env = {r.env: r for r in rows}
     out: list[dict[str, Any]] = []

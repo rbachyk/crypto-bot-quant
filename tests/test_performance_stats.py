@@ -59,6 +59,30 @@ def test_selftest_session_excluded_from_paper_stats() -> None:
             s.query(PaperTradeRecord).filter_by(strategy=strat).delete()
 
 
+def test_environment_summary_excludes_selftest_from_paper_row() -> None:
+    """The Overview env-summary 'paper' row must exclude self-test trades (the else_='paper' bucket
+    used to catch them), matching the headline KPI definition — otherwise the two paper numbers on
+    one page disagreed. Delta-based so it's robust to other rows in the shared DB."""
+    from src.api.stats import get_environment_summary
+
+    sid = "selftest:envsel"
+    with session_scope() as s:
+        s.query(PaperTradeRecord).filter_by(session_id=sid).delete()
+    before = {e["env"]: e for e in get_environment_summary()}["paper"]
+    with session_scope() as s:
+        s.add(PaperTradeRecord(
+            session_id=sid, trade_id="se0", symbol="BTC/USDT:USDT", strategy="X", side=1,
+            pnl=123.0, pnl_r=0.1, fee=0.0, slippage_cost=0.0, regime="range",
+        ))
+    try:
+        after = {e["env"]: e for e in get_environment_summary()}["paper"]
+        assert after["trades"] == before["trades"]  # the selftest row did not inflate paper
+        assert after["net_pnl"] == before["net_pnl"]  # +123 selftest pnl excluded
+    finally:
+        with session_scope() as s:
+            s.query(PaperTradeRecord).filter_by(session_id=sid).delete()
+
+
 def test_trading_stats_core_metrics(seeded_trades) -> None:
     t = compute_trading_stats(resolve_window("all", None, None), strategy=_STRAT)
     assert t.total_trades == 4
