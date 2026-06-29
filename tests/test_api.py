@@ -158,6 +158,30 @@ def test_open_positions_persist_and_render() -> None:
 
 
 @requires_db
+def test_open_positions_panel_excludes_real_venue_sessions() -> None:
+    """The Paper page Open-positions panel must NOT show demo/testnet/live real-venue legs — the
+    per-symbol live loop persists OpenPosition rows for those too, and mixing them into the paper
+    panel (and its unrealized total) misreports paper exposure."""
+    from src.db.base import session_scope
+    from src.db.models import OpenPosition
+    from src.live.basket import _persist_open_positions
+
+    demo_sid = "demo:bybit_0002:20260629T120000-aa11"
+    try:
+        _persist_open_positions(demo_sid, [{
+            "symbol": "ZECDEMO/USDT:USDT", "strategy": "lead_lag_xasset", "side": 1, "qty": 1.0,
+            "entry_price": 100.0, "mark_price": 110.0, "notional": 100.0,
+            "unrealized_pnl": 10.0, "entry_ts": 1,
+        }])
+        frag = client.get("/api/open-positions", auth=AUTH)
+        assert frag.status_code == 200
+        assert "ZECDEMO/USDT:USDT" not in frag.text  # real-venue leg excluded from the paper panel
+    finally:
+        with session_scope() as s:
+            s.query(OpenPosition).filter_by(session_id=demo_sid).delete()
+
+
+@requires_db
 def test_run_basket_rejects_duplicate_session() -> None:
     """A second Start for a strategy that already has a running basket session is refused (409) —
     so a strategy can't be double-booked once continuous sessions run concurrently."""

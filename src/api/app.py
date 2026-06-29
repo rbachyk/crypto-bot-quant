@@ -744,17 +744,19 @@ def _open_positions_table() -> str:
     """The refreshable INNER content of the Open-positions panel: per-position rows grouped by
     strategy with a per-strategy subtotal, plus a grand total. Served standalone to the auto-refresh
     poll so the panel updates without a full page reload."""
+    from src.api.stats import _REAL_ENV_PREFIXES, _SELFTEST_PREFIX
     from src.db.models import OpenPosition
 
     try:
         with session_scope() as session:
-            rows = (
-                session.execute(
-                    select(OpenPosition).order_by(OpenPosition.strategy, OpenPosition.symbol)
-                )
-                .scalars()
-                .all()
-            )
+            # Scope to PAPER sessions only — the per-symbol live loop persists OpenPosition rows for
+            # demo/testnet/live real-venue runs too, and without this filter their held legs (and
+            # unrealized P&L) leak into the Paper page's panel + grand total. Mirrors stats' paper
+            # definition: everything that is NOT a real-venue or self-test session.
+            q = select(OpenPosition).order_by(OpenPosition.strategy, OpenPosition.symbol)
+            for pfx in (*_REAL_ENV_PREFIXES, _SELFTEST_PREFIX):
+                q = q.where(~OpenPosition.session_id.like(f"{pfx}%"))
+            rows = session.execute(q).scalars().all()
             data = [
                 (r.strategy, r.symbol, r.side, r.qty, r.entry_price, r.mark_price, r.unrealized_pnl)
                 for r in rows
