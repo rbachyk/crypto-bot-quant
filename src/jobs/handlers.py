@@ -946,7 +946,11 @@ def _run_live_session(ctx: JobContext, params: dict) -> dict:
         )
 
     def _on_tick(tick, i: int) -> None:
-        hb["exec"], hb["rej"], hb["signals"] = tick.executed, tick.rejected, i + 1
+        # tick.executed/rejected are PER-TICK deltas — accumulate so the message shows the running
+        # TOTAL executions/rejections, not just the most recent tick.
+        hb["exec"] += tick.executed
+        hb["rej"] += tick.rejected
+        hb["signals"] = i + 1
         _write_progress(force=True)  # a signal is notable → update immediately
 
     def _on_heartbeat(stats: dict) -> None:
