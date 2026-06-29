@@ -310,9 +310,15 @@ def run_basket_paper_session(
     )
 
     last_bars: dict[str, dict] = {}
+    persisted = 0
     for ticks, (ts, bars_at, rows_at) in enumerate(feed.snapshots(), start=1):
         last_bars = bars_at
         loop.step(ts, bars_at, rows_at, feed.symbol_inputs())
+        # Persist as soon as legs CLOSE (a rebalance), not just at session end — otherwise closed
+        # trades stay invisible on the dashboard until the session is stopped.
+        if len(session.trades) > persisted:
+            persist_paper_session(session, build_paper_report(session), settings)
+            persisted = len(session.trades)
         if on_tick is not None:
             on_tick(ticks, f"tick {ticks}: {len(session.trades)} legs, {len(bars_at)} symbols")
     loop.close_all(int(max((b["ts"] for b in last_bars.values()), default=0)), last_bars)

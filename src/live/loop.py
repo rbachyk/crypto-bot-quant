@@ -326,6 +326,8 @@ class LiveLoop:
         max_ticks: int | None = None,
         on_tick: Callable[[LiveTick, int], None] | None = None,
         should_stop: Callable[[], bool] | None = None,
+        on_positions: Callable[[str, list[dict]], None] | None = None,
+        price_of: Callable[[str], float | None] | None = None,
     ) -> LiveRunResult:
         """Process feed groups one tick at a time; halt on kill switch / foreign orders.
 
@@ -400,6 +402,13 @@ class LiveLoop:
             result.ticks.append(tick)
             if on_tick is not None:
                 on_tick(tick, i)
+            # Publish the live open positions (marked to market) so the dashboard shows them with
+            # unrealized P&L, refreshed each tick — same panel the basket sessions feed.
+            if on_positions is not None:
+                on_positions(
+                    session.session_id,
+                    self.engine.open_positions(price_of or (lambda _s: None)),
+                )
         return result
 
 
@@ -419,6 +428,7 @@ def run_replay_session(
     realtime: bool = False,
     on_tick: Callable[[LiveTick, int], None] | None = None,
     on_heartbeat: Callable[[dict], None] | None = None,
+    on_positions: Callable[[str, list[dict]], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> LiveRunResult:
     """Run the live loop over a snapshot **replay** or the **real-time** live feed in ``mode``.
@@ -513,6 +523,8 @@ def run_replay_session(
         max_ticks=max_ticks,
         on_tick=on_tick,
         should_stop=should_stop,
+        on_positions=on_positions,
+        price_of=getattr(feed, "latest_price", None),  # only the realtime feed marks live prices
     )
 
 

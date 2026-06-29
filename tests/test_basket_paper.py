@@ -140,6 +140,26 @@ def test_basket_loop_reports_open_positions() -> None:
     assert captured[-1] == []  # close_all flattened → panel cleared
 
 
+def test_engine_open_positions_snapshot_marks_to_market() -> None:
+    """The per-symbol engine snapshots its open positions marked to market (with strategy + entry
+    ts) — wiring lead_lag into the same live open-positions panel the baskets feed."""
+    from src.paper.engine import PaperTradingEngine
+    from src.risk.portfolio import Position
+
+    eng = PaperTradingEngine()
+    eng._open_positions["ETH/USDT:USDT"] = Position(
+        symbol="ETH/USDT:USDT", side=1, qty=2.0, entry_price=100.0, risk_amount=10.0,
+        beta_to_btc=1.0, regime="R1",
+    )
+    eng._position_meta["ETH/USDT:USDT"] = ("lead_lag_xasset", 123)
+
+    p = eng.open_positions(lambda _s: 110.0)[0]
+    assert p["strategy"] == "lead_lag_xasset" and p["entry_ts"] == 123
+    assert p["mark_price"] == 110.0 and p["unrealized_pnl"] == 20.0  # +1 × (110-100) × 2
+    # no price available → mark at entry → 0 unrealized (never a bogus number)
+    assert eng.open_positions(lambda _s: None)[0]["unrealized_pnl"] == 0.0
+
+
 def test_basket_loop_seeds_paper_base_equity() -> None:
     """The PAPER basket loop must seed at the shared paper base (so its $ P&L / equity curve line up
     with the per-symbol engine + dashboard), while the default keeps the config numeraire."""

@@ -735,9 +735,14 @@ def _has_active_job(job_type: str, *, strategy: str | None = None) -> bool:
     return any((j.input_params or {}).get("strategy") == strategy for j in rows)
 
 
-def _open_positions_card() -> str:
-    """Live OPEN positions (held basket legs / live entries) marked to market — UNREALIZED P&L until
-    they close. Read from the open_positions table the running sessions refresh each tick."""
+def _pnl_color(v: float) -> str:
+    return "#3fb950" if v >= 0 else "#f85149"
+
+
+def _open_positions_table() -> str:
+    """The refreshable INNER content of the Open-positions panel: per-position rows grouped by
+    strategy with a per-strategy subtotal, plus a grand total. Served standalone to the auto-refresh
+    poll so the panel updates without a full page reload."""
     from src.db.models import OpenPosition
 
     try:
@@ -755,34 +760,65 @@ def _open_positions_card() -> str:
             ]
     except Exception:  # noqa: BLE001 - degrade to empty (e.g. table not migrated yet), never 500
         data = []
+
+    by_strat: dict[str, list] = {}
+    for d in data:
+        by_strat.setdefault(d[0], []).append(d)
     total = sum(d[6] for d in data)
-    if data:
-        body = "".join(
+
+    body = ""
+    for strat in sorted(by_strat):
+        legs = by_strat[strat]
+        body += "".join(
             f"<tr><td><code>{_esc(strat)}</code></td><td>{_esc(sym)}</td>"
             f"<td>{'LONG' if side > 0 else 'SHORT'}</td><td>{qty:.4f}</td><td>{entry:,.4f}</td>"
-            f"<td>{mark:,.4f}</td><td style=\"color:{'#3fb950' if upnl >= 0 else '#f85149'}\">"
-            f"{upnl:+,.2f}</td></tr>"
-            for (strat, sym, side, qty, entry, mark, upnl) in data
+            f"<td>{mark:,.4f}</td>"
+            f'<td style="color:{_pnl_color(upnl)}">{upnl:+,.2f}</td></tr>'
+            for (_st, sym, side, qty, entry, mark, upnl) in legs
         )
-    else:
+        sub = sum(r[6] for r in legs)
+        body += (
+            "<tr style='border-top:1px solid var(--border)'>"
+            f"<td colspan='6' style='text-align:right' class='meta'>{_esc(strat)} "
+            f"subtotal ({len(legs)})</td>"
+            f'<td style="color:{_pnl_color(sub)}"><b>{sub:+,.2f}</b></td></tr>'
+        )
+    if not data:
         body = (
             "<tr><td colspan='7' class='meta'>No open positions — sessions are flat or between "
             "rebalances.</td></tr>"
         )
-    tcolor = "#3fb950" if total >= 0 else "#f85149"
+    return f"""
+<table>
+  <tr><th>Strategy</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Mark</th>
+      <th>Unrealized P&amp;L</th></tr>
+  {body}
+</table>
+<p class="meta" style="margin-top:8px">Total unrealized ({len(data)} open):
+   <b style="color:{_pnl_color(total)}">{total:+,.2f}</b></p>"""
+
+
+def _open_positions_card() -> str:
+    """Live OPEN positions (held basket legs / live entries) marked to market — UNREALIZED P&L until
+    they close, grouped by strategy with subtotals. Auto-refreshes every 15s via a fragment poll."""
     return f"""
 <div class="card">
-  <h2>Open positions ({len(data)})</h2>
-  <p class="meta">Live held legs marked to market — <b>unrealized</b> P&amp;L, refreshed each tick.
-     A leg drops off here and becomes a realized trade when it closes.</p>
-  <table>
-    <tr><th>Strategy</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Mark</th>
-        <th>Unrealized P&amp;L</th></tr>
-    {body}
-  </table>
-  <p class="meta" style="margin-top:8px">Total unrealized:
-     <b style="color:{tcolor}">{total:+,.2f}</b></p>
-</div>"""
+  <h2>Open positions</h2>
+  <p class="meta">Live held legs marked to market — <b>unrealized</b> P&amp;L, refreshed each tick
+     (auto-updates here every 15s). A leg drops off and becomes a realized trade when it closes.</p>
+  <div id="open-pos-body">{_open_positions_table()}</div>
+</div>
+<script>
+(function(){{
+  function refresh(){{
+    fetch('/api/open-positions',{{headers:{{'sec-fetch-site':'same-origin'}}}})
+      .then(function(r){{return r.ok?r.text():null;}})
+      .then(function(h){{if(h!==null){{document.getElementById('open-pos-body').innerHTML=h;}}}})
+      .catch(function(){{}});
+  }}
+  setInterval(refresh, 15000);
+}})();
+</script>"""
 
 
 def _period_selector(action: str, period: str) -> str:
@@ -3524,6 +3560,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             detail={"timeframe": timeframe},
         )
         return RedirectResponse(url="/dashboard/paper", status_code=303)
+
+    @app.get("/api/open-positions", response_class=HTMLResponse)
+    def open_positions_fragment(user: str = Depends(require_dashboard_auth)) -> str:
+        """The Open-positions panel's refreshable inner HTML — polled by the Paper page so the
+        live unrealized P&L updates without a full page reload."""
+        return _open_positions_table()
 
     @app.get("/dashboard/paper", response_class=HTMLResponse)
     def dashboard_paper(user: str = Depends(require_dashboard_auth)) -> str:

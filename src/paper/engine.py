@@ -129,6 +129,9 @@ class PaperTradingEngine:
         # (previously the risk manager always saw an EMPTY portfolio, so the Section-17
         # portfolio caps were dead in paper/demo). Kept in lock-step with the venue book.
         self._open_positions: dict[str, Position] = {}
+        # (strategy, entry_ts) per open symbol — the Position drops them, but the dashboard's live
+        # open-positions panel wants to label each held position by strategy and entry time.
+        self._position_meta: dict[str, tuple[str, int]] = {}
         # Realized PnL accumulated across the session (from CLOSED trades), fed to the loss
         # breakers so they can actually trip (Section 17). Per-symbol for the per-symbol breaker.
         self._realized_pnl: float = 0.0
@@ -147,6 +150,23 @@ class PaperTradingEngine:
 
     def new_session(self, session_id: str | None = None) -> PaperSession:
         return PaperSession(session_id=session_id or str(uuid.uuid4()))
+
+    def open_positions(self, price_of) -> list[dict]:
+        """Snapshot the currently-open positions marked to market — for the dashboard's live
+        open-positions panel. ``price_of(symbol)`` returns the latest price (None → mark at entry,
+        i.e. 0 unrealized). Matches the basket loop's position-dict shape."""
+        out: list[dict] = []
+        for sym, pos in self._open_positions.items():
+            mark = price_of(sym)
+            mark = pos.entry_price if mark is None else float(mark)
+            strat, entry_ts = self._position_meta.get(sym, ("", 0))
+            out.append({
+                "symbol": sym, "strategy": strat, "side": pos.side, "qty": pos.qty,
+                "entry_price": pos.entry_price, "mark_price": mark, "notional": pos.notional,
+                "unrealized_pnl": pos.side * (mark - pos.entry_price) * pos.qty,
+                "entry_ts": entry_ts,
+            })
+        return out
 
     def process_candidates(
         self,
@@ -458,8 +478,12 @@ class PaperTradingEngine:
                 beta_to_btc=self._risk.cfg.beta_to_btc(candidate.symbol),
                 regime=candidate.regime,
             )
+            self._position_meta[candidate.symbol] = (
+                candidate.strategy, int(getattr(candidate, "decision_ts", 0) or 0)
+            )
         else:
             self._open_positions.pop(candidate.symbol, None)
+            self._position_meta.pop(candidate.symbol, None)
             self._venue.positions.pop(candidate.symbol, None)
             # The trade closed → its PnL is REALIZED. Accumulate it for the loss breakers so a
             # losing session halts new entries on the next candidate (Section 17).

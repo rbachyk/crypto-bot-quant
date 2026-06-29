@@ -144,6 +144,11 @@ def test_open_positions_persist_and_render() -> None:
             assert len(rows) == 1 and rows[0].unrealized_pnl == 10.0
         resp = client.get("/dashboard/paper", auth=AUTH)
         assert "Open positions" in resp.text and "ETH/USDT:USDT" in resp.text
+        # the auto-refresh fragment shows the position with a per-strategy subtotal + total
+        frag = client.get("/api/open-positions", auth=AUTH)
+        assert frag.status_code == 200
+        assert "ETH/USDT:USDT" in frag.text and "funding_carry subtotal" in frag.text
+        assert "Total unrealized" in frag.text
         _persist_open_positions(sid, [])  # empty snapshot clears the panel
         with session_scope() as s:
             assert s.query(OpenPosition).filter_by(session_id=sid).count() == 0

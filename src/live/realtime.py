@@ -394,6 +394,11 @@ class LiveCandidateFeed:
             )
         return out
 
+    def latest_price(self, symbol: str) -> float | None:
+        """Latest known close for a symbol (to mark open positions) — None if unseen yet."""
+        bars = self._reader.ohlcv(symbol)
+        return float(bars[-1]["close"]) if bars else None
+
     def _sleep_or_stop(self) -> bool:
         """Wait ``poll_sec`` (or 1s if not polling) in 1s slices so a dashboard Stop is honoured
         fast. Returns True if the operator pressed Stop during the wait."""
