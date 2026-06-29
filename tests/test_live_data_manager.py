@@ -31,6 +31,20 @@ def _mgr(src) -> LiveDataManager:
     return LiveDataManager(src, SYMS, interval_ms=IV, stale_after_intervals=2)
 
 
+def test_get_data_source_routes_testnet_seed_to_sandbox() -> None:
+    """REGRESSION (R2): the seed/PIT/backfill REST source must read the SAME environment as the
+    streaming feed — testnet→sandbox — so a testnet session doesn't seed mainnet history and then
+    advance on testnet bars (a mainnet→testnet seam across the feature lookback). demo/live stay
+    mainnet."""
+    from src.data.source import get_data_source
+
+    tn = get_data_source("bybit", exchange_env="testnet")._ex
+    assert tn.urls["api"] == tn.urls["test"]  # testnet/sandbox endpoints
+    for env in ("demo", "live"):
+        ex = get_data_source("bybit", exchange_env=env)._ex
+        assert ex.urls["api"] != ex.urls["test"]  # mainnet seed data
+
+
 def test_polling_source_routes_testnet_to_sandbox_demo_stays_mainnet() -> None:
     """REGRESSION (E1): the REST data feed applies the exchange env so TESTNET reads testnet klines
     (matching the venue its orders hit), while DEMO/LIVE keep MAINNET data — Bybit's demo endpoint

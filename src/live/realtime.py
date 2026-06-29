@@ -238,7 +238,13 @@ class LiveCandidateFeed:
             return self.rest_source
         from src.data.source import get_data_source
 
-        self.rest_source = get_data_source(self.data_cfg.exchange_id)
+        # Seed / point-in-time / refresh REST must read the SAME environment as the streaming feed
+        # (testnet→testnet) — otherwise a testnet session seeds mainnet history then advances on
+        # testnet bars, leaving a mainnet→testnet seam across the feature lookback. demo/live →
+        # mainnet (demo serves no klines).
+        self.rest_source = get_data_source(
+            self.data_cfg.exchange_id, exchange_env=self.settings.exchange_env
+        )
         return self.rest_source
 
     def _candidates_for(self, sym: str, bar: dict, row: dict) -> list[PaperCandidateInput]:

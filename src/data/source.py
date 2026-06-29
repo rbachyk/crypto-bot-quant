@@ -153,16 +153,20 @@ _BUILDERS = {
 }
 
 
-def get_data_source(exchange_id: str | None = None) -> DataSource:
+def get_data_source(exchange_id: str | None = None, *, exchange_env: str = "live") -> DataSource:
     """Return the active data source for ``exchange_id``.
 
     ``skeleton`` (the default, used by tests + the offline data gates) returns the deterministic
     offline source; any real exchange id (e.g. ``bybit``) returns the live ccxt-backed source.
     Real downloads are opt-in via config/CLI (``configs/data.yaml`` ships ``skeleton``).
+
+    ``exchange_env`` routes the ccxt client: testnet reads testnet klines (matching its venue),
+    demo/live read mainnet (Bybit's demo endpoint serves no public klines). Passed so a live
+    session's SEED/backfill REST reads the same environment as its streaming feed.
     """
     eid = exchange_id or "skeleton"
     if eid == "skeleton":
         return DeterministicSource(eid)
     from src.data.ccxt_source import CcxtDataSource
 
-    return CcxtDataSource(eid)
+    return CcxtDataSource(eid, exchange_env=exchange_env)

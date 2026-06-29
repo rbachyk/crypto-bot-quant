@@ -151,7 +151,9 @@ class WebsocketFeedSource:
         if src is None:
             from src.data.ccxt_source import CcxtDataSource
 
-            src = CcxtDataSource(self.exchange_id)
+            # Reconnect gap-fill must read the SAME environment as the websocket (testnet→testnet),
+            # not mainnet, or the backfilled bars come from a different venue than the live stream.
+            src = CcxtDataSource(self.exchange_id, exchange_env=self.exchange_env)
             self._rest_source = src
         return src.fetch(
             SeriesKey(self.exchange_id, OHLCV, symbol, self.timeframe), since_ms, end_ms
