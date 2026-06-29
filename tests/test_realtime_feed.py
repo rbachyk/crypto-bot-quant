@@ -170,6 +170,28 @@ def test_held_positions_remark_on_signalless_bar() -> None:
     assert pos["mark_price"] == 110.0 and pos["unrealized_pnl"] == 20.0  # +1 × (110-100) × 2
 
 
+def test_bar_iv_pins_to_timeframe_and_does_not_shrink() -> None:
+    """REGRESSION (B4): the time-stop bar interval comes from the configured timeframe (or the
+    FIRST observed gap) and must NOT shrink to a later anomalous small gap — a reconnect/backfill
+    out-of-order bar otherwise latched a tiny interval and fired every time-stop far too early."""
+
+    class _GapFeed:
+        def __init__(self, gaps):
+            self._gaps = gaps
+
+        def groups(self):
+            for ts in self._gaps:
+                yield (ts, [])
+
+    loop = LiveLoop(mode="paper")
+    loop.run(_GapFeed([0, 60_000, 60_001]), session_name="iv-infer")  # 1ms anomaly last
+    assert loop._bar_iv == 60_000  # locked on the first positive gap, not the 1ms anomaly
+
+    loop2 = LiveLoop(mode="paper")
+    loop2.run(_GapFeed([0, 60_000, 60_001]), session_name="iv-explicit", bar_iv=4 * 3_600_000)
+    assert loop2._bar_iv == 4 * 3_600_000  # explicit (configured timeframe) pinned, inference off
+
+
 def test_run_stamp_is_unique_and_keeps_env_prefix() -> None:
     """A live/basket session_id is made unique per run (so a restart never deletes the prior run's
     persisted trades via the delete-then-insert path), while keeping the leading env: segment that

@@ -329,12 +329,19 @@ class LiveLoop:
         on_positions: Callable[[str, list[dict]], None] | None = None,
         on_flush: Callable[[PaperSession], None] | None = None,
         price_of: Callable[[str], float | None] | None = None,
+        bar_iv: int = 0,
     ) -> LiveRunResult:
         """Process feed groups one tick at a time; halt on kill switch / foreign orders.
 
         ``on_tick(tick, index)`` is called after each processed tick (for live progress
         reporting); ``should_stop()`` is polled before each tick so an external operator
-        (e.g. a dashboard Stop button via the job-cancel flag) can halt the loop cleanly."""
+        (e.g. a dashboard Stop button via the job-cancel flag) can halt the loop cleanly.
+        ``bar_iv`` (ms) pins the bar interval used by the time-stops; pass the configured
+        timeframe so a single anomalous decision-ts gap can't latch a tiny interval."""
+        # Authoritative bar interval (the configured timeframe) when given — the spacing inference
+        # below is only a fallback for callers that don't know it.
+        if bar_iv > 0:
+            self._bar_iv = bar_iv
         session = self.engine.new_session(f"{self.env_label}:{session_name}")
         result = LiveRunResult(session=session, mode=self.mode)
 
@@ -365,10 +372,12 @@ class LiveLoop:
             # Infer the bar interval from the decision-time spacing (min positive gap, like the
             # backtest grid), then flatten any position that has reached its hold_bars horizon
             # BEFORE considering new entries this bar (exit-then-enter, matching the backtest).
-            if self._prev_decision_ts is not None:
+            if self._prev_decision_ts is not None and self._bar_iv <= 0:
                 gap = decision_ts - self._prev_decision_ts
-                if gap > 0 and (self._bar_iv <= 0 or gap < self._bar_iv):
-                    self._bar_iv = gap
+                if gap > 0:
+                    self._bar_iv = gap  # lock on the first positive gap; do NOT shrink to a later
+                    # anomalous smaller gap (a reconnect/backfill out-of-order bar would otherwise
+                    # latch a tiny interval and fire every time-stop far too early)
             self._prev_decision_ts = decision_ts
             self._apply_time_stops(decision_ts, session)
             # Paper mode: simulate the exchange-side bracket/time-stop exits the SimulatedVenue does
@@ -514,10 +523,11 @@ def run_replay_session(
 
         guard = LiveActivationGuard(settings)
 
+    from src.data.schema import timeframe_ms
+
     source = None
     data_manager = None
     if transport or realtime:
-        from src.data.schema import timeframe_ms
         from src.live.data_manager import LiveDataManager
         from src.live.websocket_feed import live_feed_source
 
@@ -579,6 +589,7 @@ def run_replay_session(
         on_positions=on_positions,
         on_flush=on_flush,
         price_of=getattr(feed, "latest_price", None),  # only the realtime feed marks live prices
+        bar_iv=timeframe_ms(tf),  # pin the time-stop interval to the configured timeframe
     )
 
 
