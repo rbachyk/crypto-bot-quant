@@ -192,6 +192,23 @@ class PaperTradingEngine:
         rate = spec.fields.get("taker_fee", 0.0)
         return abs(notional) * float(rate if isinstance(rate, (int, float)) else 0.0)
 
+    def _roll_loss_windows(self, ts: int) -> None:
+        """Snapshot the lifetime realized total at each UTC day / week boundary so the daily/weekly
+        loss breakers see only THIS day's / week's realized P&L. Called BEFORE any realized P&L is
+        booked for ``ts`` (both the bar's exits and its entries) so a loss closed on the first bar
+        of a new day is attributed to the new day, not snapshotted away from it. The week is aligned
+        to Monday 00:00 UTC (the Unix epoch is a Thursday, so a raw //7d would roll on Thursdays)."""
+        if ts <= 0:
+            return
+        day = ts // 86_400_000
+        week = (ts - 4 * 86_400_000) // (7 * 86_400_000)  # epoch Thu → shift 4d to a Monday anchor
+        if self._day_key != day:
+            self._day_key = day
+            self._day_start_realized = self._realized_pnl
+        if self._week_key != week:
+            self._week_key = week
+            self._week_start_realized = self._realized_pnl
+
     def simulate_paper_exits(
         self, price_of, now_ts: int, session: PaperSession, *, bar_iv: int = 0
     ) -> int:
@@ -203,6 +220,9 @@ class PaperTradingEngine:
         ``price_of(symbol)`` returns the latest close; a close-based check is conservative (it can
         miss an intrabar wick) but never invents a fill. Returns the number of positions closed.
         Real venues manage exits themselves, so the loop only calls this in paper mode."""
+        # Roll the daily/weekly loss windows for THIS bar before booking any exit, so a loss closed
+        # on the first bar of a new day counts toward the new day's daily-loss breaker (B2/R3).
+        self._roll_loss_windows(now_ts)
         closed = 0
         for sym in list(self._open_positions):
             price = price_of(sym)
@@ -429,16 +449,7 @@ class PaperTradingEngine:
         else:
             # Roll the daily/weekly windows at UTC day/week boundaries (off the decision time) so a
             # multi-day session does not charge old losses against today's limit forever (B2).
-            ts = int(getattr(candidate, "decision_ts", 0) or 0)
-            if ts > 0:
-                day = ts // 86_400_000
-                week = ts // (7 * 86_400_000)
-                if self._day_key != day:
-                    self._day_key = day
-                    self._day_start_realized = self._realized_pnl  # fresh daily window
-                if self._week_key != week:
-                    self._week_key = week
-                    self._week_start_realized = self._realized_pnl  # fresh weekly window
+            self._roll_loss_windows(int(getattr(candidate, "decision_ts", 0) or 0))
             # Equity reflects realized P&L (B3) so the drawdown breaker actually moves and the
             # daily-loss fraction scales off current equity, not the static seed.
             bk_equity = inp.equity + self._realized_pnl

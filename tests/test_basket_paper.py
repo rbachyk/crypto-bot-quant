@@ -293,6 +293,42 @@ def test_funding_settled_by_timestamp_survives_event_list_rebuild() -> None:
     assert leg.funding == 3 * one  # exactly one more (24h), not two
 
 
+def test_loss_on_first_bar_of_new_day_counts_toward_daily_window() -> None:
+    """REGRESSION (R3): a position closed at a LOSS on the first bar of a new UTC day must count
+    toward that day's daily-loss breaker. The window roll runs BEFORE simulate_paper_exits books the
+    exit, so the loss isn't snapshotted out of the new day's window (it previously escaped both
+    yesterday's closed window and today's freshly-snapshotted one)."""
+    from src.paper.engine import PaperTradingEngine
+    from src.paper.session import PaperSession, PaperTrade
+    from src.risk.portfolio import Position
+
+    DAY = 86_400_000
+    eng = PaperTradingEngine()
+    sess = PaperSession(session_id="t")
+    eng._roll_loss_windows(5 * DAY + 1000)  # establish the prior day's window at realized=0
+    assert eng._day_start_realized == 0.0
+
+    sym = "ETH/USDT:USDT"
+    eng._open_positions[sym] = Position(symbol=sym, side=1, qty=2.0, entry_price=100.0,
+                                        risk_amount=10.0, beta_to_btc=1.0, regime="R1")
+    eng._position_meta[sym] = ("lead_lag_xasset", 5 * DAY)
+    eng._exit_levels[sym] = (95.0, 110.0, 0, 5 * DAY)  # stop 95, tp 110
+    sess.trades.append(PaperTrade(
+        trade_id="e", symbol=sym, strategy="lead_lag_xasset", side=1, qty=2.0, entry_price=100.0,
+        stop_price=95.0, tp_price=110.0, regime="R1", session=0, decision_ts=5 * DAY,
+        entry_ts=5 * DAY, exit_ts=5 * DAY, exit_price=100.0, exit_reason="open", fee=0.2,
+        slippage_cost=0.0, pnl=-0.2, pnl_r=0.0, has_exchange_side_stop=True,
+        execution_route="maker", spread_bps_at_entry=0.0, slippage_frac=0.0,
+    ))
+
+    new_day_ts = 6 * DAY + 1000  # first bar of the NEXT UTC day; price gaps below the stop
+    assert eng.simulate_paper_exits(lambda _s: 90.0, new_day_ts, sess) == 1
+    assert eng._day_key == new_day_ts // DAY  # rolled to the new day
+    assert eng._day_start_realized == 0.0  # snapshot taken BEFORE booking the loss
+    # today's daily-window P&L = realized - day_start = the loss → it counts (didn't escape)
+    assert eng._realized_pnl < 0 and (eng._realized_pnl - eng._day_start_realized) < 0
+
+
 def test_basket_loop_seeds_paper_base_equity() -> None:
     """The PAPER basket loop must seed at the shared paper base (so its $ P&L / equity curve line up
     with the per-symbol engine + dashboard), while the default keeps the config numeraire."""
