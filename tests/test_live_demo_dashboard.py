@@ -213,6 +213,34 @@ def test_reset_env_stats_only_touches_target_env(tmp_path) -> None:
     assert summarize_env_stats("demo").total == 0
 
 
+@requires_db
+def test_reset_paper_stats_does_not_touch_selftest_rows() -> None:
+    """Reset of the PAPER environment must NOT delete self-test runs — they are not paper trading,
+    and the dashboard stats already exclude them, so the admin scope must stay aligned (else the
+    confirm dialog under-reports what's removed and self-test data is collaterally wiped)."""
+    from sqlalchemy import select
+    from src.db.base import session_scope
+    from src.db.models import PaperRun
+    from src.live.admin import reset_env_stats
+
+    paper_sid = f"paper_resetsel_{uuid.uuid4().hex[:6]}"
+    self_sid = "selftest:resetsel"
+    with session_scope() as db:
+        db.add(PaperRun(session_id=paper_sid))
+        db.add(PaperRun(session_id=self_sid))
+    try:
+        reset_env_stats("paper")
+        with session_scope() as db:
+            sids = set(db.execute(select(PaperRun.session_id)).scalars().all())
+        assert paper_sid not in sids  # the real paper run was reset
+        assert self_sid in sids  # the self-test run was NOT touched
+    finally:
+        with session_scope() as db:
+            db.query(PaperRun).filter(PaperRun.session_id.in_((paper_sid, self_sid))).delete(
+                synchronize_session=False
+            )
+
+
 # --- routing + venue-mode mapping ------------------------------------------- #
 def test_live_jobs_route_to_dedicated_live_worker() -> None:
     assert queue_class("run_live_session") == "live"

@@ -3617,10 +3617,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     if active
                     else "-"
                 )
+                status_val = str(j.status.value if hasattr(j.status, "value") else j.status)
                 basket_rows.append(
                     f"<tr><td><code>{_esc(strat)}</code></td><td>{_esc(tf)}</td>"
-                    f"<td>{_esc(str(j.status.value if hasattr(j.status, 'value') else j.status))}"
-                    f"</td><td>{j.created_at.strftime('%Y-%m-%d %H:%M')}</td><td>{stop}</td></tr>"
+                    # SSE-updatable badge (data-job) so a basket session's queued→running→done
+                    # transition + its Stop button update in place, like the Live page — not stuck
+                    # until a manual reload (the primary state indicator for a multi-day session).
+                    f"<td>{_job_badge(status_val, j.job_id)}</td>"
+                    f"<td>{j.created_at.strftime('%Y-%m-%d %H:%M')}</td><td>{stop}</td></tr>"
                 )
 
         body_rows = "".join(

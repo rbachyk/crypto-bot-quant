@@ -29,15 +29,18 @@ _SESSION_TABLES = (PaperRun, PaperTradeRecord, DecisionLog, TradeExplainabilityR
 
 # Real-venue env prefixes; everything else is the "paper" environment (matches src.api.stats).
 _REAL_ENV_PREFIXES = ("demo:", "testnet:", "live:")
+_SELFTEST_PREFIX = "selftest:"
 
 
 def _scope_env(query, model, env: str):
     """Scope a query on ``model`` to one environment by session_id — the SAME definition the
-    dashboard stats use: ``paper`` = NOT a demo/testnet/live session; else ``{env}:`` prefix."""
+    dashboard stats use: ``paper`` = NOT a demo/testnet/live (or self-test) session; else
+    ``{env}:`` prefix. Self-test runs are excluded from ``paper`` so Reset Paper does not also
+    delete them (they're not paper trading, and stats already exclude them — keep scopes aligned)."""
     if not env or env == "all":
         return query
     if env == "paper":
-        for pfx in _REAL_ENV_PREFIXES:
+        for pfx in (*_REAL_ENV_PREFIXES, _SELFTEST_PREFIX):
             query = query.where(~model.session_id.like(f"{pfx}%"))
         return query
     return query.where(model.session_id.like(f"{env}:%"))
