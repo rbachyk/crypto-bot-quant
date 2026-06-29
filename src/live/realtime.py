@@ -112,6 +112,11 @@ class LiveCandidateFeed:
         # only yields on a signal, so without this it looks dead between setups).
         self._on_cycle = on_cycle
         self._cycles = 0
+        # Point-in-time series (funding / OI / spread) are seeded once; without periodic refresh
+        # they FREEZE — funding_z then never changes, so funding_carry holds a static basket and
+        # the carry charged on held legs goes stale. Re-fetch them on this wall-clock cadence.
+        self._pit_refresh_ms = 3_600_000  # 1h (funding posts every ~8h; OI/spread faster)
+        self._last_pit_refresh = 0
         self._reader = RollingReader(max_bars=window_bars * 2)
 
         from src.backtest.config import load_backtest_config
@@ -157,7 +162,6 @@ class LiveCandidateFeed:
         end = self.seed_end_ms if self.seed_end_ms is not None else int(time.time() * 1000)
         end = (end // iv) * iv
         start = end - self.window_bars * iv
-        base_iv = self.data_cfg.base_timeframe
         total_bars = 0
         for sym in self.symbols:
             bars = src.fetch(
@@ -165,6 +169,20 @@ class LiveCandidateFeed:
             )
             self._reader.seed_ohlcv(sym, bars)
             total_bars += len(bars)
+        self._seed_point_in_time(src, start, end)
+        self._last_pit_refresh = int(time.time() * 1000)
+        # A seed that returns NO OHLCV means the feed can never advance → the session sits at tick 0
+        # (the silent-startup symptom). Surface the bar count so it's diagnosable, loud if empty.
+        (_log.warning if total_bars == 0 else _log.info)(
+            "live_feed_seeded", symbols=len(self.symbols), ohlcv_bars=total_bars,
+            timeframe=self.timeframe, exchange_env=self.settings.exchange_env,
+        )
+
+    def _seed_point_in_time(self, src: DataSource, start: int, end: int) -> None:
+        """Fetch funding / OI / spread for every symbol over ``[start, end]`` — the point-in-time
+        series funding_z / premium / oi_change read. Shared by the initial seed and the refresh."""
+        base_iv = self.data_cfg.base_timeframe
+        for sym in self.symbols:
             for dt in _POINT_IN_TIME:
                 tf = (
                     self.data_cfg.oi_grid
@@ -176,12 +194,22 @@ class LiveCandidateFeed:
                     dt,
                     src.fetch(SeriesKey(self.data_cfg.exchange_id, dt, sym, tf), start, end),
                 )
-        # A seed that returns NO OHLCV means the feed can never advance → the session sits at tick 0
-        # (the silent-startup symptom). Surface the bar count so it's diagnosable, loud if empty.
-        (_log.warning if total_bars == 0 else _log.info)(
-            "live_feed_seeded", symbols=len(self.symbols), ohlcv_bars=total_bars,
-            timeframe=self.timeframe, exchange_env=self.settings.exchange_env,
-        )
+
+    def _maybe_refresh_point_in_time(self) -> None:
+        """Re-fetch funding / OI / spread on the wall-clock cadence so funding_z (and the carry)
+        stay CURRENT — without this they freeze at seed time and funding_carry never turns over."""
+        now = int(time.time() * 1000)
+        if now - self._last_pit_refresh < self._pit_refresh_ms:
+            return
+        iv = timeframe_ms(self.timeframe)
+        end = (now // iv) * iv
+        start = end - self.window_bars * iv
+        try:
+            self._seed_point_in_time(self._rest(), start, end)
+            self._last_pit_refresh = now
+            _log.info("live_feed_pit_refreshed", funding_tf=self.data_cfg.funding_timeframe)
+        except Exception:  # noqa: BLE001 - a refresh fetch error must not kill the stream
+            _log.warning("live_feed_pit_refresh_error", exc_info=True)
 
     def _rest(self) -> DataSource:
         if self.rest_source is not None:
@@ -250,6 +278,7 @@ class LiveCandidateFeed:
         while self.max_groups is None or emitted < self.max_groups:
             if self._should_stop is not None and self._should_stop():
                 return  # operator pressed Stop (dashboard) → end the stream cleanly
+            self._maybe_refresh_point_in_time()  # keep funding/OI/spread current (funding_z, carry)
             now = int(time.time() * 1000)
             try:
                 halted = (
@@ -331,6 +360,7 @@ class LiveCandidateFeed:
         while self.max_groups is None or emitted < self.max_groups:
             if self._should_stop is not None and self._should_stop():
                 return
+            self._maybe_refresh_point_in_time()  # keep funding/OI/spread current (funding_z, carry)
             now = int(time.time() * 1000)
             try:
                 halted = self.data_manager is not None and self.data_manager.poll(now).exchange_halt

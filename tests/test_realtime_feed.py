@@ -86,6 +86,35 @@ def test_live_feed_yields_well_formed_candidates_from_stream() -> None:
         assert int(cand.decision_ts) == decision_ts
 
 
+def test_feed_refreshes_point_in_time_on_cadence() -> None:
+    """Funding/OI/spread are re-fetched on the wall-clock cadence so funding_z (and the carry) don't
+    FREEZE at seed time — the bug behind funding_carry never turning over. Throttled in between."""
+    import time
+
+    class _Counting(DeterministicSource):
+        def __init__(self, ex: str) -> None:
+            super().__init__(ex)
+            self.fetches = 0
+
+        def fetch(self, *a, **k):  # type: ignore[no-untyped-def]
+            self.fetches += 1
+            return super().fetch(*a, **k)
+
+    src = _Counting(EX)
+    feed = LiveCandidateFeed(
+        _cfg(), feed_source=ScriptedFeedSource(_new_bars()), rest_source=src,
+        timeframe=TF, symbols=[SYM], seed_end_ms=SEED_END,
+    )
+    feed.seed()
+    after_seed = src.fetches
+    feed._last_pit_refresh = int(time.time() * 1000)  # just refreshed → throttled
+    feed._maybe_refresh_point_in_time()
+    assert src.fetches == after_seed  # no extra fetch within the cadence
+    feed._last_pit_refresh = 0  # cadence elapsed
+    feed._maybe_refresh_point_in_time()
+    assert src.fetches > after_seed  # re-fetched the point-in-time series
+
+
 def test_live_feed_emits_per_cycle_heartbeat() -> None:
     """on_cycle fires every poll cycle (signal or not), so a quiet selective strategy is visibly
     alive on the dashboard instead of frozen at tick 0."""
