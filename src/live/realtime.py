@@ -163,12 +163,20 @@ class LiveCandidateFeed:
         end = (end // iv) * iv
         start = end - self.window_bars * iv
         total_bars = 0
+        empty_syms: list[str] = []
         for sym in self.symbols:
             bars = src.fetch(
                 SeriesKey(self.data_cfg.exchange_id, OHLCV, sym, self.timeframe), start, end
             )
             self._reader.seed_ohlcv(sym, bars)
             total_bars += len(bars)
+            if not bars:
+                empty_syms.append(sym)
+        if empty_syms:
+            # Per-symbol visibility: a symbol that seeds 0 bars stays feature-dark (its lookbacks
+            # never fill from a single live bar) — surface exactly WHICH symbols, not just an
+            # aggregate count, so a partial seed isn't invisible.
+            _log.warning("live_feed_seed_empty_symbols", symbols=empty_syms)
         self._seed_point_in_time(src, start, end)
         self._last_pit_refresh = int(time.time() * 1000)
         # Seed the cross-asset PEER view from the backfilled window: a portfolio strategy (lead_lag)
@@ -285,7 +293,10 @@ class LiveCandidateFeed:
         return (sym, bar, row)
 
     def groups(self) -> Iterator[tuple[int, list[PaperCandidateInput]]]:
-        if not self._reader.ohlcv(self.symbols[0]):
+        # Seed if ANY symbol is unseeded — not just symbols[0]. A prior partial seed (a per-symbol
+        # REST outage) would otherwise leave some symbols permanently feature-dark while symbols[0]
+        # looked fine, so they'd silently never trade.
+        if not all(self._reader.ohlcv(s) for s in self.symbols):
             self.seed()
         last_ts = dict.fromkeys(self.symbols, -1)
         emitted = 0
@@ -375,7 +386,7 @@ class LiveCandidateFeed:
         {sym: feature_row})`` each cycle — for the basket (cross-sectional) paper loop, which needs
         the whole universe at one bar rather than per-symbol candidate groups. Same poll / halt /
         Stop / transient-fault handling as ``groups``."""
-        if not self._reader.ohlcv(self.symbols[0]):
+        if not all(self._reader.ohlcv(s) for s in self.symbols):  # seed if ANY symbol is unseeded
             self.seed()
         last_ts = dict.fromkeys(self.symbols, -1)
         emitted = 0

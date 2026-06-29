@@ -86,6 +86,25 @@ def test_live_feed_yields_well_formed_candidates_from_stream() -> None:
         assert int(cand.decision_ts) == decision_ts
 
 
+def test_partial_seed_is_reseeded_not_left_dark() -> None:
+    """REGRESSION (E3): the seed guard checks EVERY symbol, not just symbols[0]. A prior PARTIAL
+    seed (symbols[0] filled but another symbol empty after a per-symbol REST outage) must trigger a
+    re-seed when the stream starts, so the empty symbol isn't left permanently feature-dark and
+    silently non-trading."""
+    syms = [SYM, "ETH/USDT:USDT"]
+    feed = LiveCandidateFeed(
+        _cfg(), feed_source=ScriptedFeedSource(_new_bars()), rest_source=DeterministicSource(EX),
+        timeframe=TF, symbols=syms, seed_end_ms=SEED_END, max_groups=1,
+    )
+    # simulate a partial prior seed: only symbols[0] has a window, the second symbol is empty
+    feed._reader.seed_ohlcv(
+        SYM, DeterministicSource(EX).fetch(SeriesKey(EX, OHLCV, SYM, TF), SEED_END - 300 * IV, SEED_END)
+    )
+    assert feed._reader.ohlcv(SYM) and not feed._reader.ohlcv("ETH/USDT:USDT")
+    list(feed.groups())  # entering the stream must re-seed the empty symbol (guard checks ALL)
+    assert feed._reader.ohlcv("ETH/USDT:USDT")  # no longer dark
+
+
 def test_seed_populates_peer_rows_for_all_symbols() -> None:
     """REGRESSION (E2): the cross-asset peer view must be complete from cycle 0. seed() now computes
     each symbol's latest feature row, so a portfolio strategy (lead_lag) doesn't evaluate a symbol
