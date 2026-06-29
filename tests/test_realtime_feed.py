@@ -135,6 +135,41 @@ def test_live_feed_emits_per_cycle_heartbeat() -> None:
     assert beats[-1]["cycles"] >= 1
 
 
+def test_held_positions_remark_on_signalless_bar() -> None:
+    """REGRESSION: a held position must re-price on EVERY new bar, not only when the strategy
+    signals again. The feed interleaves an empty (signal-less) group per advanced bar and the loop
+    re-marks open positions on it — so a slow-timeframe position's unrealized P&L tracks the latest
+    close instead of freezing for hours between signals (the lead_lag '0.00, not changing' symptom).
+    """
+    from src.risk.portfolio import Position
+
+    class _SignallessBarFeed:
+        """Yields one bar that produced no signal — an empty group, exactly what the live feed
+        emits when a new bar closes but no strategy fires."""
+
+        def groups(self):
+            yield (1_000, [])
+
+    loop = LiveLoop(mode="paper")
+    loop.engine._open_positions["ETH/USDT:USDT"] = Position(
+        symbol="ETH/USDT:USDT", side=1, qty=2.0, entry_price=100.0, risk_amount=10.0,
+        beta_to_btc=1.0, regime="R1",
+    )
+    loop.engine._position_meta["ETH/USDT:USDT"] = ("lead_lag_xasset", 0)
+
+    captured: list[list[dict]] = []
+    result = loop.run(
+        _SignallessBarFeed(), session_name="remark",
+        on_positions=lambda _sid, pos: captured.append(pos),
+        price_of=lambda _s: 110.0,
+    )
+
+    assert not result.ticks  # an empty bar is NOT a signal tick
+    assert captured, "held positions must re-mark on a signal-less bar"
+    pos = captured[-1][0]
+    assert pos["mark_price"] == 110.0 and pos["unrealized_pnl"] == 20.0  # +1 × (110-100) × 2
+
+
 def test_live_loop_runs_the_realtime_feed() -> None:
     result = LiveLoop(mode="paper").run(_feed(), session_name="rt")
     assert result.ticks  # processed live decision times

@@ -333,6 +333,14 @@ class LiveCandidateFeed:
                 yield (int(row["decision_ts"]), cands)
                 if self.max_groups is not None and emitted >= self.max_groups:
                     return
+            # A bar advanced but NO strategy signalled this cycle: in a CONTINUOUS session emit an
+            # empty group so the loop still re-marks held positions against the new close. Without
+            # this a held position only re-prices when the strategy fires again — so on a slow
+            # timeframe (e.g. 4h lead_lag) its unrealized P&L freezes for hours between signals.
+            # Does NOT count toward `emitted`/max_groups (it isn't a signal) so finite/test streams
+            # that gate on a candidate count are unaffected.
+            if advanced and not progressed and self.poll_sec > 0:
+                yield (max(int(r["decision_ts"]) for _, _, r in advanced), [])
             # Heartbeat AFTER processing the cycle — fires every cycle, signal or not, so the
             # dashboard can show the session is alive + how many bars it has evaluated.
             self._cycles += 1

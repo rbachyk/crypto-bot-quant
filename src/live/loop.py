@@ -347,9 +347,10 @@ class LiveLoop:
             session.foreign_order_halt_triggered = True
             return result
 
-        for i, (decision_ts, group) in enumerate(feed.groups()):
-            if max_ticks is not None and i >= max_ticks:
-                break
+        # The feed interleaves empty groups (a new bar with no signal) so held positions re-mark
+        # every bar; only non-empty (signal) groups count toward max_ticks and the on_tick index.
+        signal_idx = -1
+        for decision_ts, group in feed.groups():
             if should_stop is not None and should_stop():
                 result.halted = True
                 break
@@ -381,8 +382,18 @@ class LiveLoop:
                 if self.mode != "paper"
                 else self.engine.run_reconciliation(session)
             )
+            # Re-mark and publish open positions on EVERY bar (signal or not) so a held position's
+            # unrealized P&L tracks the latest close instead of freezing between signals — same
+            # panel the basket sessions feed.
+            if on_positions is not None:
+                on_positions(
+                    session.session_id,
+                    self.engine.open_positions(price_of or (lambda _s: None)),
+                )
             if tick_halt:
                 result.halted = True
+            if group:  # a real signal bar: record a tick and report progress
+                signal_idx += 1
                 tick = LiveTick(
                     decision_ts,
                     len(group),
@@ -391,24 +402,9 @@ class LiveLoop:
                 )
                 result.ticks.append(tick)
                 if on_tick is not None:
-                    on_tick(tick, i)
+                    on_tick(tick, signal_idx)
+            if result.halted or (max_ticks is not None and signal_idx + 1 >= max_ticks):
                 break
-            tick = LiveTick(
-                decision_ts,
-                len(group),
-                session.executed_count - before_exec,
-                session.rejected_count - before_rej,
-            )
-            result.ticks.append(tick)
-            if on_tick is not None:
-                on_tick(tick, i)
-            # Publish the live open positions (marked to market) so the dashboard shows them with
-            # unrealized P&L, refreshed each tick — same panel the basket sessions feed.
-            if on_positions is not None:
-                on_positions(
-                    session.session_id,
-                    self.engine.open_positions(price_of or (lambda _s: None)),
-                )
         return result
 
 
