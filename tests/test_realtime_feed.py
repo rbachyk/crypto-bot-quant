@@ -86,6 +86,20 @@ def test_live_feed_yields_well_formed_candidates_from_stream() -> None:
         assert int(cand.decision_ts) == decision_ts
 
 
+def test_seed_populates_peer_rows_for_all_symbols() -> None:
+    """REGRESSION (E2): the cross-asset peer view must be complete from cycle 0. seed() now computes
+    each symbol's latest feature row, so a portfolio strategy (lead_lag) doesn't evaluate a symbol
+    against a PARTIAL universe on the first cycle (peers were otherwise filled only as symbols
+    advanced, so early cross-sectional signals saw missing peers)."""
+    syms = [SYM, "ETH/USDT:USDT"]
+    feed = LiveCandidateFeed(
+        _cfg(), feed_source=ScriptedFeedSource(_new_bars()), rest_source=DeterministicSource(EX),
+        timeframe=TF, symbols=syms, seed_end_ms=SEED_END,
+    )
+    feed.seed()
+    assert set(feed._latest_rows) == set(syms)  # every symbol's row present before any tick
+
+
 def test_feed_refreshes_point_in_time_on_cadence() -> None:
     """Funding/OI/spread are re-fetched on the wall-clock cadence so funding_z (and the carry) don't
     FREEZE at seed time — the bug behind funding_carry never turning over. Throttled in between."""

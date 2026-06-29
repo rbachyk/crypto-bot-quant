@@ -171,10 +171,24 @@ class LiveCandidateFeed:
             total_bars += len(bars)
         self._seed_point_in_time(src, start, end)
         self._last_pit_refresh = int(time.time() * 1000)
+        # Seed the cross-asset PEER view from the backfilled window: a portfolio strategy (lead_lag)
+        # evaluates symbol vs its peers, but _latest_rows is otherwise only filled as each symbol
+        # ADVANCES — so on the first cycle (and any partial-advance cycle) peers would be missing the
+        # symbols that haven't ticked yet, and the cross-section would be evaluated against an
+        # incomplete universe. Compute each symbol's latest feature row up front so peers are
+        # complete from cycle 0. A per-symbol error is skipped (best-effort warm-up).
+        for sym in self.symbols:
+            try:
+                frame = compute_features(sym, self._reader, self.feat_cfg)
+                if frame.rows:
+                    self._latest_rows[sym] = frame.rows[-1]
+            except Exception:  # noqa: BLE001 - one bad symbol must not abort the seed
+                _log.warning("live_feed_seed_features_error", symbol=sym, exc_info=True)
         # A seed that returns NO OHLCV means the feed can never advance → the session sits at tick 0
         # (the silent-startup symptom). Surface the bar count so it's diagnosable, loud if empty.
         (_log.warning if total_bars == 0 else _log.info)(
             "live_feed_seeded", symbols=len(self.symbols), ohlcv_bars=total_bars,
+            peer_rows=len(self._latest_rows),
             timeframe=self.timeframe, exchange_env=self.settings.exchange_env,
         )
 
