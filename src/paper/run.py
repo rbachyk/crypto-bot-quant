@@ -78,6 +78,19 @@ def build_promoted_inputs(version: str, per_strategy: int = 8) -> list[PaperCand
     return inputs
 
 
+def _trade_created_at(t) -> datetime:
+    """The trade's own time (close ts, else entry ts) as a tz-aware datetime, for a STABLE
+    ``created_at`` that survives the incremental flush's delete+reinsert. Falls back to now() for a
+    trade with no usable timestamp (or an out-of-range one)."""
+    ms = int(getattr(t, "exit_ts", 0) or 0) or int(getattr(t, "entry_ts", 0) or 0)
+    if ms > 0:
+        try:
+            return datetime.fromtimestamp(ms / 1000, UTC)
+        except (OverflowError, OSError, ValueError):
+            pass
+    return datetime.now(UTC)
+
+
 def persist_paper_session(
     session: PaperSession,
     report: PaperReport | None = None,
@@ -148,6 +161,12 @@ def persist_paper_session(
                 PaperTradeRecord(
                     session_id=session.session_id,
                     trade_id=t.trade_id,
+                    # Stamp the row with the trade's OWN time (close, else entry), not insert-time
+                    # now(). The incremental flush deletes+reinserts every ~20s, so a now()-default
+                    # created_at re-stamped every trade to "now" on a multi-day session — collapsing
+                    # the equity-curve time axis and the today/last_7d window filters. exit_ts is the
+                    # real close epoch for a closed live trade; persisting it is idempotent.
+                    created_at=_trade_created_at(t),
                     symbol=t.symbol,
                     strategy=t.strategy,
                     side=t.side,

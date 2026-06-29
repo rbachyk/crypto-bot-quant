@@ -240,8 +240,11 @@ class LiveLoop:
                 venue.positions.pop(sym, None)
                 # Also drop it from the ENGINE's risk mirror so the Section-17 concurrency / heat /
                 # net-beta caps release the slot — otherwise they over-count forever in a real run
-                # (the engine's simulated exit path never fires when exits are exchange-side).
+                # (the engine's simulated exit path never fires when exits are exchange-side). Drop
+                # the position's metadata + bracket levels too, so they don't leak unbounded.
                 self.engine._open_positions.pop(sym, None)
+                self.engine._position_meta.pop(sym, None)
+                self.engine._exit_levels.pop(sym, None)
                 self._absent_ticks.pop(sym, None)
         # Sync owned resting orders to the real book (drop our filled/cancelled orders the exchange
         # no longer lists, so the mirror doesn't grow unbounded over a multi-day run).

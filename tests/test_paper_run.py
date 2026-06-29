@@ -48,6 +48,47 @@ def _promote(candidate_id: str, version: str) -> None:
 
 
 @requires_db
+def test_persisted_created_at_is_trade_time_and_stable_across_reflush() -> None:
+    """REGRESSION (R8): created_at comes from the trade's OWN time (close, else entry), so the
+    equity-curve time axis and the today/last_7d window filters are correct AND stable across the
+    incremental flush's delete+reinsert — a now()-default re-stamped every trade to 'now' on each
+    flush, collapsing a multi-day session's whole history onto the latest flush time."""
+    from datetime import UTC, datetime
+
+    from src.paper.run import persist_paper_session
+    from src.paper.session import PaperSession, PaperTrade
+
+    exit_ms = 1_700_000_000_000
+    expected = datetime.fromtimestamp(exit_ms / 1000, UTC)
+    sid = f"paper:r8:{uuid.uuid4().hex[:8]}"
+    sess = PaperSession(session_id=sid)
+    sess.trades.append(PaperTrade(
+        trade_id="c1", symbol="BTC/USDT:USDT", strategy="lead_lag_xasset", side=1, qty=1.0,
+        entry_price=100.0, stop_price=95.0, tp_price=110.0, regime="R1", session=0,
+        decision_ts=exit_ms, entry_ts=exit_ms - 3_600_000, exit_ts=exit_ms, exit_price=110.0,
+        exit_reason="take_profit", fee=0.1, slippage_cost=0.0, pnl=9.9, pnl_r=1.0,
+        has_exchange_side_stop=True, execution_route="taker", spread_bps_at_entry=0.0,
+        slippage_frac=0.0,
+    ))
+    try:
+        persist_paper_session(sess, write_report=False, write_logs=False)
+        with session_scope() as s:
+            row = s.execute(
+                select(PaperTradeRecord).where(PaperTradeRecord.session_id == sid)
+            ).scalars().one()
+            assert abs((row.created_at - expected).total_seconds()) < 1  # stamped with close time
+        persist_paper_session(sess, write_report=False, write_logs=False)  # re-flush
+        with session_scope() as s:
+            row = s.execute(
+                select(PaperTradeRecord).where(PaperTradeRecord.session_id == sid)
+            ).scalars().one()
+            assert abs((row.created_at - expected).total_seconds()) < 1  # unchanged → no churn
+    finally:
+        with session_scope() as s:
+            s.query(PaperTradeRecord).filter_by(session_id=sid).delete()
+
+
+@requires_db
 def test_incremental_persist_writes_trades_without_report_file() -> None:
     """Incremental persistence (write_report/write_logs=False) upserts the run + trade rows so a
     long-running live session is visible mid-run and survives a worker restart, but does NOT dump a

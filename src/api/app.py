@@ -1784,7 +1784,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         env_scope = env if env != "all" else None
         window = resolve_window(period, None, None)
         with session_scope() as s:
-            q = _apply_env(select(PaperTradeRecord), env_scope)
+            # Realized trades only — exclude still-open entry rows so this card's count / maker% /
+            # exchange-side-stop% / fees match the KPI row above it (which goes through
+            # compute_trading_stats), instead of being diluted by held positions' entry rows.
+            q = _apply_env(select(PaperTradeRecord), env_scope).where(
+                PaperTradeRecord.exit_reason != "open"
+            )
             if window.start:
                 q = q.where(PaperTradeRecord.created_at >= window.start)
             if window.end:
