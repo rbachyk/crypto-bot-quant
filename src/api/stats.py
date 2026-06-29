@@ -306,7 +306,14 @@ def compute_trading_stats(
             q = q.where(PaperTradeRecord.strategy == strategy)
         if session_id:
             q = q.where(PaperTradeRecord.session_id == session_id)
-        rows = list(session.execute(q.order_by(PaperTradeRecord.created_at)).scalars().all())
+        # id tiebreaker: since R8 stamps created_at from the trade's bar time, trades closed on the
+        # SAME bar share a timestamp — order by insert id too so the equity curve / drawdown are
+        # deterministic (insert order ≈ close order) rather than DB-dependent.
+        rows = list(
+            session.execute(
+                q.order_by(PaperTradeRecord.created_at, PaperTradeRecord.id)
+            ).scalars().all()
+        )
 
     st.total_trades = len(rows)
     if not rows:
