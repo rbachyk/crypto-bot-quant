@@ -160,6 +160,63 @@ def test_engine_open_positions_snapshot_marks_to_market() -> None:
     assert eng.open_positions(lambda _s: None)[0]["unrealized_pnl"] == 0.0
 
 
+def test_engine_simulates_paper_bracket_and_time_stop_exits() -> None:
+    """A held PAPER position (exit_move_frac=0, so the engine never closes it inline) must be
+    flattened by simulate_paper_exits when a new bar breaches its stop/TP/time-stop — the offline
+    SimulatedVenue never fills the resting bracket, so without this paper positions never close and
+    the session books no realized P&L. The existing open trade record is closed IN PLACE (not
+    duplicated) and realized P&L is accumulated."""
+    from src.paper.engine import PaperTradingEngine
+    from src.paper.session import PaperSession, PaperTrade
+    from src.risk.portfolio import Position
+
+    def _seed(eng: PaperTradingEngine, sess: PaperSession, sym: str, side: int,
+              stop: float, tp: float, hold: int) -> None:
+        eng._open_positions[sym] = Position(
+            symbol=sym, side=side, qty=2.0, entry_price=100.0, risk_amount=10.0,
+            beta_to_btc=1.0, regime="R1",
+        )
+        eng._position_meta[sym] = ("lead_lag_xasset", 1_000)
+        eng._exit_levels[sym] = (stop, tp, hold, 1_000)
+        sess.trades.append(PaperTrade(
+            trade_id=sym[:3], symbol=sym, strategy="lead_lag_xasset", side=side, qty=2.0,
+            entry_price=100.0, stop_price=stop, tp_price=tp, regime="R1", session=0,
+            decision_ts=1_000, entry_ts=1_000, exit_ts=1_000, exit_price=100.0, exit_reason="open",
+            fee=0.2, slippage_cost=0.0, pnl=-0.2, pnl_r=0.0, has_exchange_side_stop=True,
+            execution_route="maker", spread_bps_at_entry=0.0, slippage_frac=0.0,
+        ))
+
+    # --- long: take-profit breach closes in place with a realized profit ---
+    eng = PaperTradingEngine()
+    sess = PaperSession(session_id="t")
+    _seed(eng, sess, "ETH/USDT:USDT", 1, 95.0, 110.0, 0)
+    assert eng.simulate_paper_exits(lambda _s: 102.0, 2_000, sess) == 0  # inside the bracket
+    assert "ETH/USDT:USDT" in eng._open_positions
+    assert eng.simulate_paper_exits(lambda _s: 111.0, 3_000, sess) == 1  # TP breached
+    assert "ETH/USDT:USDT" not in eng._open_positions  # risk slot released
+    assert len(sess.trades) == 1  # closed in place, NOT duplicated
+    t = sess.trades[0]
+    assert t.exit_reason == "take_profit" and t.exit_price == 111.0 and t.exit_ts == 3_000
+    assert t.pnl > 0 and eng._realized_pnl == t.pnl  # +1×(111−100)×2 − fees, realized
+
+    # --- short: a price RISE to the stop (above entry) closes for a loss ---
+    eng = PaperTradingEngine()
+    sess = PaperSession(session_id="t")
+    _seed(eng, sess, "SOL/USDT:USDT", -1, 105.0, 90.0, 0)
+    assert eng.simulate_paper_exits(lambda _s: 104.0, 2_000, sess) == 0
+    assert eng.simulate_paper_exits(lambda _s: 106.0, 3_000, sess) == 1  # short stop breached
+    assert sess.trades[0].exit_reason == "stop" and sess.trades[0].pnl < 0
+
+    # --- time-stop: no bracket breach, but the hold horizon elapses ---
+    eng = PaperTradingEngine()
+    sess = PaperSession(session_id="t")
+    _seed(eng, sess, "BTC/USDT:USDT", 1, 1.0, 1e9, hold=3)  # bracket never breached
+    iv = 60_000
+    assert eng.simulate_paper_exits(lambda _s: 100.0, 1_000 + 2 * iv, sess, bar_iv=iv) == 0
+    assert eng.simulate_paper_exits(lambda _s: 100.0, 1_000 + 3 * iv, sess, bar_iv=iv) == 1
+    assert sess.trades[0].exit_reason == "time_stop"
+
+
 def test_basket_loop_seeds_paper_base_equity() -> None:
     """The PAPER basket loop must seed at the shared paper base (so its $ P&L / equity curve line up
     with the per-symbol engine + dashboard), while the default keeps the config numeraire."""

@@ -132,6 +132,12 @@ class PaperTradingEngine:
         # (strategy, entry_ts) per open symbol — the Position drops them, but the dashboard's live
         # open-positions panel wants to label each held position by strategy and entry time.
         self._position_meta: dict[str, tuple[str, int]] = {}
+        # (stop_price, tp_price, hold_bars, entry_ts) per open symbol — the bracket levels a PAPER
+        # position is held against. Live candidates carry exit_move_frac=0 (real exits are
+        # exchange-side), but an offline SimulatedVenue never FILLS the resting stop/TP, so without
+        # an explicit simulator a paper position would never close. simulate_paper_exits reads these
+        # to flatten a held paper position when a new bar's price breaches its stop/TP/time-stop.
+        self._exit_levels: dict[str, tuple[float, float, int, int]] = {}
         # Realized PnL accumulated across the session (from CLOSED trades), fed to the loss
         # breakers so they can actually trip (Section 17). Per-symbol for the per-symbol breaker.
         self._realized_pnl: float = 0.0
@@ -167,6 +173,101 @@ class PaperTradingEngine:
                 "entry_ts": entry_ts,
             })
         return out
+
+    def _exit_fee(self, symbol: str, notional: float) -> float:
+        """Taker fee for a simulated reduce-only market close (mirrors SimulatedVenue._fee)."""
+        spec = self._meta.spec(symbol)
+        if spec is None:
+            return 0.0
+        rate = spec.fields.get("taker_fee", 0.0)
+        return abs(notional) * float(rate if isinstance(rate, (int, float)) else 0.0)
+
+    def simulate_paper_exits(
+        self, price_of, now_ts: int, session: PaperSession, *, bar_iv: int = 0
+    ) -> int:
+        """Close held PAPER positions whose bracket (stop / take-profit) or time-stop is breached
+        by the latest bar — the exchange-side exit a real venue would fill but the offline
+        SimulatedVenue does not. Without this a per-symbol paper position (exit_move_frac=0) opens
+        and is held forever, so the session books no closed trades and shows no realized P&L.
+
+        ``price_of(symbol)`` returns the latest close; a close-based check is conservative (it can
+        miss an intrabar wick) but never invents a fill. Returns the number of positions closed.
+        Real venues manage exits themselves, so the loop only calls this in paper mode."""
+        closed = 0
+        for sym in list(self._open_positions):
+            price = price_of(sym)
+            if price is None:
+                continue
+            price = float(price)
+            pos = self._open_positions[sym]
+            stop, tp, hold_bars, entry_ts = self._exit_levels.get(sym, (0.0, 0.0, 0, 0))
+            reason: str | None = None
+            if pos.side > 0:
+                if stop > 0 and price <= stop:
+                    reason = "stop"
+                elif tp > 0 and price >= tp:
+                    reason = "take_profit"
+            else:  # short: stop is ABOVE entry, take-profit BELOW
+                if stop > 0 and price >= stop:
+                    reason = "stop"
+                elif tp > 0 and price <= tp:
+                    reason = "take_profit"
+            if (
+                reason is None and bar_iv > 0 and hold_bars > 0 and entry_ts > 0
+                and now_ts - entry_ts >= hold_bars * bar_iv
+            ):
+                reason = "time_stop"
+            if reason is None:
+                continue
+            self._book_paper_exit(sym, price, reason, now_ts, session)
+            closed += 1
+        return closed
+
+    def _book_paper_exit(
+        self, symbol: str, exit_price: float, exit_reason: str, now_ts: int, session: PaperSession
+    ) -> None:
+        """Flatten one held paper position and CLOSE its existing open trade record in place.
+
+        The entry appended a PaperTrade with exit_reason='open' (its pnl was just the entry fee);
+        closing updates that same row (exit price/reason/ts, total fee, realized pnl) rather than
+        appending a duplicate, so executed_count stays one-per-position. Releases the risk slot and
+        cancels the resting stop/TP legs on the venue (no orphan orders)."""
+        pos = self._open_positions.pop(symbol, None)
+        if pos is None:
+            return
+        self._position_meta.pop(symbol, None)
+        self._exit_levels.pop(symbol, None)
+        self._venue.close_position(symbol)  # drop mirror + cancel the resting bracket legs
+        exit_fee = self._exit_fee(symbol, exit_price * pos.qty)
+        raw_pnl = (exit_price - pos.entry_price) * pos.side * pos.qty
+        trade = next(
+            (t for t in reversed(session.trades)
+             if t.symbol == symbol and t.exit_reason == "open"),
+            None,
+        )
+        if trade is not None:
+            total_fee = trade.fee + exit_fee  # entry fee (already on the record) + exit fee
+            pnl = raw_pnl - total_fee
+            trade.exit_price = exit_price
+            trade.exit_reason = exit_reason
+            trade.exit_ts = now_ts
+            trade.fee = total_fee
+            trade.pnl = pnl
+            trade.pnl_r = pnl / pos.risk_amount if pos.risk_amount > 0 else 0.0
+        else:  # no open record (shouldn't happen in the live path) — book a standalone close
+            pnl = raw_pnl - exit_fee
+            strat, entry_ts = self._position_meta.get(symbol, ("", 0))
+            session.trades.append(PaperTrade(
+                trade_id=str(uuid.uuid4())[:8], symbol=symbol, strategy=strat, side=pos.side,
+                qty=pos.qty, entry_price=pos.entry_price, stop_price=0.0, tp_price=0.0,
+                regime=pos.regime, session=0, decision_ts=entry_ts, entry_ts=entry_ts or now_ts,
+                exit_ts=now_ts, exit_price=exit_price, exit_reason=exit_reason, fee=exit_fee,
+                slippage_cost=0.0, pnl=pnl, pnl_r=pnl / pos.risk_amount if pos.risk_amount > 0 else 0.0,
+                has_exchange_side_stop=True, execution_route="taker", spread_bps_at_entry=0.0,
+                slippage_frac=0.0,
+            ))
+        self._realized_pnl += pnl
+        self._per_symbol_pnl[symbol] = self._per_symbol_pnl.get(symbol, 0.0) + pnl
 
     def process_candidates(
         self,
@@ -481,9 +582,14 @@ class PaperTradingEngine:
             self._position_meta[candidate.symbol] = (
                 candidate.strategy, int(getattr(candidate, "decision_ts", 0) or 0)
             )
+            self._exit_levels[candidate.symbol] = (
+                stop_price, tp_price, int(getattr(candidate, "hold_bars", 0) or 0),
+                int(getattr(candidate, "decision_ts", 0) or 0),
+            )
         else:
             self._open_positions.pop(candidate.symbol, None)
             self._position_meta.pop(candidate.symbol, None)
+            self._exit_levels.pop(candidate.symbol, None)
             self._venue.positions.pop(candidate.symbol, None)
             # The trade closed → its PnL is REALIZED. Accumulate it for the loss breakers so a
             # losing session halts new entries on the next candidate (Section 17).

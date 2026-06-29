@@ -370,6 +370,14 @@ class LiveLoop:
                     self._bar_iv = gap
             self._prev_decision_ts = decision_ts
             self._apply_time_stops(decision_ts, session)
+            # Paper mode: simulate the exchange-side bracket/time-stop exits the SimulatedVenue does
+            # not fill, BEFORE considering new entries (exit-then-enter). Held positions close when
+            # the new bar breaches their stop/TP/time-stop — otherwise a paper position (built with
+            # exit_move_frac=0) would never close and the session would book no realized P&L.
+            if self.mode == "paper" and price_of is not None:
+                self.engine.simulate_paper_exits(
+                    price_of, decision_ts, session, bar_iv=self._bar_iv
+                )
             before_exec = session.executed_count
             before_rej = session.rejected_count
             self.engine.process_candidates(group, session)
