@@ -142,6 +142,16 @@ class PaperTradingEngine:
         # breakers so they can actually trip (Section 17). Per-symbol for the per-symbol breaker.
         self._realized_pnl: float = 0.0
         self._per_symbol_pnl: dict[str, float] = {}
+        # Day/week rollover for the loss breakers: daily_pnl/weekly_pnl are "realized PnL so far
+        # today / this week", but _realized_pnl is a LIFETIME accumulator — feeding it raw made a
+        # multi-day session charge every prior day's loss against the DAILY limit, tripping it once
+        # and never recovering. Snapshot the lifetime total at each day/week boundary so the
+        # windowed P&L is (lifetime - boundary snapshot). Keyed off candidate decision_ts (UTC).
+        self._sim_peak_equity: float = 0.0  # running peak of simulated equity (drawdown breaker)
+        self._day_key: int | None = None
+        self._week_key: int | None = None
+        self._day_start_realized: float = 0.0
+        self._week_start_realized: float = 0.0
         # Real account state (a live/demo venue only): when present, the breakers reason over REAL
         # equity (daily-loss + drawdown) — the engine's simulated exit path is inert when exits
         # happen exchange-side, so this is what makes the loss breakers live in production.
@@ -417,10 +427,25 @@ class PaperTradingEngine:
             bk_daily = bk_equity - start
             bk_weekly = bk_daily
         else:
-            bk_equity = inp.equity
-            bk_peak = max(inp.peak_equity, inp.equity)
-            bk_daily = inp.daily_pnl + self._realized_pnl
-            bk_weekly = self._realized_pnl
+            # Roll the daily/weekly windows at UTC day/week boundaries (off the decision time) so a
+            # multi-day session does not charge old losses against today's limit forever (B2).
+            ts = int(getattr(candidate, "decision_ts", 0) or 0)
+            if ts > 0:
+                day = ts // 86_400_000
+                week = ts // (7 * 86_400_000)
+                if self._day_key != day:
+                    self._day_key = day
+                    self._day_start_realized = self._realized_pnl  # fresh daily window
+                if self._week_key != week:
+                    self._week_key = week
+                    self._week_start_realized = self._realized_pnl  # fresh weekly window
+            # Equity reflects realized P&L (B3) so the drawdown breaker actually moves and the
+            # daily-loss fraction scales off current equity, not the static seed.
+            bk_equity = inp.equity + self._realized_pnl
+            self._sim_peak_equity = max(self._sim_peak_equity, bk_equity, inp.peak_equity)
+            bk_peak = self._sim_peak_equity
+            bk_daily = inp.daily_pnl + (self._realized_pnl - self._day_start_realized)
+            bk_weekly = self._realized_pnl - self._week_start_realized
         portfolio = PortfolioState(
             equity=bk_equity, positions=tuple(self._open_positions.values())
         )

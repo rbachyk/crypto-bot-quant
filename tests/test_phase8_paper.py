@@ -325,6 +325,31 @@ class TestPaperTradingEngine:
         engine.process_candidates(inputs, session)
         assert session.total_candidates == 2
 
+    def test_breaker_windows_roll_over_and_equity_tracks_realized(self) -> None:
+        """REGRESSION (B2/B3): the daily/weekly loss windows must reset at UTC day/week boundaries
+        — _realized_pnl is a LIFETIME accumulator, so without rollover a multi-day session charged
+        prior days' losses against today's daily limit and tripped it permanently. And simulated
+        equity must reflect realized P&L so the drawdown breaker actually moves."""
+        import dataclasses
+
+        eng = PaperTradingEngine()
+        sess = eng.new_session()
+        eng._realized_pnl = -500.0  # simulate prior-day realized losses (lifetime total)
+        day1 = 1_700_000_000_000 + 86_400_000  # a UTC day AFTER the prior losses' day
+
+        cand = dataclasses.replace(_candidate("BTC/USDT:USDT", side=1), decision_ts=day1)
+        eng.process_candidates(
+            [PaperCandidateInput(candidate=cand, equity=10_000.0, exit_move_frac=0.0)], sess
+        )
+
+        # the daily/weekly windows snapshotted the lifetime total at the boundary → today starts
+        # fresh (windowed loss = lifetime - snapshot = 0), so the prior day's loss no longer counts.
+        assert eng._day_key == day1 // 86_400_000
+        assert eng._day_start_realized == -500.0
+        assert eng._week_start_realized == -500.0
+        # equity reflects realized P&L (seed + lifetime realized), feeding the drawdown breaker.
+        assert eng._sim_peak_equity == 9_500.0  # 10_000 seed + (-500) realized
+
     def test_short_exit_classifies_and_closes_not_open(self) -> None:
         """REGRESSION: a short must classify as take_profit/stop and CLOSE — the old exit_move sign
         guards were swapped for side<0, so every short stuck at 'open', pinned its concurrency slot
