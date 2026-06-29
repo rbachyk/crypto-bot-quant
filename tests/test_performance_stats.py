@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from src.api.stats import compute_trading_stats, resolve_window
 from src.db.base import session_scope
@@ -54,6 +56,34 @@ def test_selftest_session_excluded_from_paper_stats() -> None:
         window = resolve_window("all", None, None)
         assert compute_trading_stats(window, env="paper", strategy=strat).total_trades == 1
         assert compute_trading_stats(window, env=None, strategy=strat).total_trades == 2  # all
+    finally:
+        with session_scope() as s:
+            s.query(PaperTradeRecord).filter_by(strategy=strat).delete()
+
+
+def test_open_position_rows_excluded_from_trading_stats() -> None:
+    """REGRESSION (R1): a per-symbol live entry is persisted as an exit_reason='open' PaperTradeRecord
+    (pnl=-entry_fee) until it closes. It must NOT count as a (losing) trade in the realized stats,
+    nor double-count its live OpenPosition row — otherwise every held position corrupts win-rate /
+    P&L on the dashboard (continuously, once the live session flushes incrementally)."""
+    strat = f"open_excl_{uuid.uuid4().hex[:6]}"
+    with session_scope() as s:
+        s.query(PaperTradeRecord).filter_by(strategy=strat).delete()
+        s.add(PaperTradeRecord(
+            session_id="paper_openexcl", trade_id="o0", symbol="BTC/USDT:USDT", strategy=strat,
+            side=1, pnl=-0.1, pnl_r=0.0, fee=0.1, slippage_cost=0.0, regime="range",
+            exit_reason="open",
+        ))
+        s.add(PaperTradeRecord(
+            session_id="paper_openexcl", trade_id="c0", symbol="BTC/USDT:USDT", strategy=strat,
+            side=1, pnl=5.0, pnl_r=1.0, fee=0.1, slippage_cost=0.0, regime="range",
+            exit_reason="take_profit",
+        ))
+    try:
+        t = compute_trading_stats(resolve_window("all", None, None), strategy=strat)
+        assert t.total_trades == 1  # only the CLOSED trade counts
+        assert t.winning_trades == 1 and t.losing_trades == 0  # the open entry isn't a "loss"
+        assert t.realized_pnl == 5.0  # the -0.1 open-entry fee is excluded
     finally:
         with session_scope() as s:
             s.query(PaperTradeRecord).filter_by(strategy=strat).delete()

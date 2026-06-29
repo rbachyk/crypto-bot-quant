@@ -290,7 +290,11 @@ def compute_trading_stats(
     ``session_id`` (one specific run — covers "by paper/live session")."""
     st = TradingStats()
     with session_scope() as session:
-        q = select(PaperTradeRecord)
+        # Realized history only: a per-symbol live entry is booked immediately as an
+        # exit_reason="open" row (pnl = -entry_fee) and updated in place when it closes; counting
+        # it here would treat every still-open position as a losing trade and double-count its live
+        # OpenPosition row. Closed trades carry stop/take_profit/time_stop/end_of_data.
+        q = select(PaperTradeRecord).where(PaperTradeRecord.exit_reason != "open")
         if window.start:
             q = q.where(PaperTradeRecord.created_at >= window.start)
         if window.end:
@@ -581,6 +585,8 @@ def get_environment_summary() -> list[dict[str, Any]]:
             # paper row, while the headline KPI cards (via _apply_env) exclude them — so the two
             # paper numbers on the Overview disagreed. Keep them out of the env summary entirely.
             .where(~PaperTradeRecord.session_id.like(f"{_SELFTEST_PREFIX}%"))
+            # Realized history only — exclude still-open entry rows (see compute_trading_stats).
+            .where(PaperTradeRecord.exit_reason != "open")
             .group_by(env_expr)
         ).all()
     by_env = {r.env: r for r in rows}
