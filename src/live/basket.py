@@ -106,7 +106,7 @@ class BasketPaperLoop:
         # 1) Funding on every held leg (the carry).
         for sym, leg in list(self._holdings.items()):
             if sym in by_symbol:
-                leg.next_funding_idx = eng._charge_funding(leg, by_symbol[sym], ts)
+                leg.last_funding_ts = eng._charge_funding(leg, by_symbol[sym], ts)
         # 2) Rebalance on cadence.
         if self._last_rebal is None or ts - self._last_rebal >= self._rebal_ms:
             # Score EXACTLY as the backtest engine does (the Parity Rule): residual modes

@@ -217,6 +217,48 @@ def test_engine_simulates_paper_bracket_and_time_stop_exits() -> None:
     assert sess.trades[0].exit_reason == "time_stop"
 
 
+def test_funding_settled_by_timestamp_survives_event_list_rebuild() -> None:
+    """REGRESSION (C1): funding is settled by TIMESTAMP so the live loop rebuilding/sliding the
+    funding_events list between ticks never skips or double-charges carry — a positional index into
+    that list mis-pointed once the window slid (funding_carry's entire edge). Each funding event is
+    charged exactly once even as the list is replaced and old events drop off the front."""
+    from src.backtest.portfolio import CrossSectionalEngine, _Leg
+
+    cfg = load_backtest_config()
+    meta = load_metadata_config()
+    sc = load_strategies_config()
+    strat = build_strategy(sc.candidate("funding_carry"), sc.strategy_version)
+    eng = CrossSectionalEngine(cfg, meta, strat)
+
+    sym = "BTC/USDT:USDT"
+    H = 3_600_000
+    leg = _Leg(symbol=sym, side=1, qty=1.0, entry_ts=0, entry_price=100.0, notional=100.0,
+               risk_amount=1.0, entry_fee=0.0, funding=0.0, slippage_cost=0.0, regime="R1",
+               session=0, last_funding_ts=0)
+
+    def _sin(events):
+        return SymbolInput(symbol=sym, bars=[],
+                           frame=FeatureFrame(symbol=sym, timeframe="1h", feature_names=[], rows=[]),
+                           spread_samples=[], funding_events=events)
+
+    one = eng.funding.payment(side=1, notional=100.0, funding_rate=0.001)
+
+    # tick 1: events at 8h and 16h are in the window; both settle (ts <= 16h, after entry).
+    leg.last_funding_ts = eng._charge_funding(
+        leg, _sin([{"ts": 8 * H, "funding_rate": 0.001}, {"ts": 16 * H, "funding_rate": 0.001}]),
+        16 * H,
+    )
+    assert leg.funding == 2 * one  # both charged once
+
+    # tick 2: list REBUILT + SLID — the 8h event dropped off the front, a new 24h event appeared.
+    # By timestamp only the 24h event is new: 16h is NOT double-charged, the dropped 8h is NOT lost.
+    leg.last_funding_ts = eng._charge_funding(
+        leg, _sin([{"ts": 16 * H, "funding_rate": 0.001}, {"ts": 24 * H, "funding_rate": 0.001}]),
+        24 * H,
+    )
+    assert leg.funding == 3 * one  # exactly one more (24h), not two
+
+
 def test_basket_loop_seeds_paper_base_equity() -> None:
     """The PAPER basket loop must seed at the shared paper base (so its $ P&L / equity curve line up
     with the per-symbol engine + dashboard), while the default keeps the config numeraire."""

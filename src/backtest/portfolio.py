@@ -44,7 +44,11 @@ class _Leg:
     slippage_cost: float
     regime: str
     session: int
-    next_funding_idx: int
+    # Timestamp of the last funding event already settled on this leg. Funding is settled by
+    # TIMESTAMP, not a positional index into funding_events: in the live loop that list is rebuilt
+    # every tick and the point-in-time window slides, so a saved index would point at the wrong
+    # event after a refresh (skipping or double-charging carry — funding_carry's entire edge).
+    last_funding_ts: int
 
 
 class CrossSectionalEngine:
@@ -136,7 +140,7 @@ class CrossSectionalEngine:
         for ts in timeline:
             # 1) Funding on every held leg crossing a funding timestamp (the carry).
             for sym, leg in holdings.items():
-                leg.next_funding_idx = self._charge_funding(leg, by_symbol[sym], ts)
+                leg.last_funding_ts = self._charge_funding(leg, by_symbol[sym], ts)
             # 2) Rebalance on cadence.
             if last_rebal is None or ts - last_rebal >= rebal_ms:
                 scores: dict[str, float] = {}
@@ -254,7 +258,7 @@ class CrossSectionalEngine:
             slippage_cost=slip_cost,
             regime=_regime_of(row, spread_bps),
             session=int(row.get("session_code", 0)),
-            next_funding_idx=self._first_funding_after(sym_in, ts),
+            last_funding_ts=ts,  # settle only funding posted strictly after entry
         )
 
     def _close_leg(self, leg: _Leg, bar: dict, reason: str, result: BacktestResult) -> float:
@@ -301,22 +305,19 @@ class CrossSectionalEngine:
 
     # -- helpers (mirror the per-trade engine's funding/grid math) ------- #
     def _charge_funding(self, leg: _Leg, sym_in: SymbolInput, ts: int) -> int:
-        events = sym_in.funding_events
-        idx = leg.next_funding_idx
-        while idx < len(events) and events[idx]["ts"] <= ts:
-            ev = events[idx]
-            if ev["ts"] > leg.entry_ts:
+        """Settle every funding event posted in ``(last_funding_ts, ts]`` (and after entry) onto the
+        leg, by TIMESTAMP. Returns the new ``last_funding_ts`` watermark. Iterating the (bounded)
+        window each call is robust to the live loop rebuilding/sliding ``funding_events`` — a saved
+        positional index would mis-settle once the list changed under it."""
+        last = leg.last_funding_ts
+        for ev in sym_in.funding_events:
+            ets = int(ev["ts"])
+            if leg.entry_ts < ets <= ts and ets > last:
                 leg.funding += self.funding.payment(
                     side=leg.side, notional=leg.notional, funding_rate=float(ev["funding_rate"])
                 )
-            idx += 1
-        return idx
-
-    def _first_funding_after(self, sym_in: SymbolInput, ts: int) -> int:
-        for i, ev in enumerate(sym_in.funding_events):
-            if ev["ts"] > ts:
-                return i
-        return len(sym_in.funding_events)
+                last = ets
+        return last
 
     def _unrealized(self, holdings: dict[str, _Leg], bars_by_ts, ts: int) -> float:
         total = 0.0
