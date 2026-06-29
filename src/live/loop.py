@@ -327,6 +327,7 @@ class LiveLoop:
         on_tick: Callable[[LiveTick, int], None] | None = None,
         should_stop: Callable[[], bool] | None = None,
         on_positions: Callable[[str, list[dict]], None] | None = None,
+        on_flush: Callable[[PaperSession], None] | None = None,
         price_of: Callable[[str], float | None] | None = None,
     ) -> LiveRunResult:
         """Process feed groups one tick at a time; halt on kill switch / foreign orders.
@@ -398,6 +399,11 @@ class LiveLoop:
                     session.session_id,
                     self.engine.open_positions(price_of or (lambda _s: None)),
                 )
+            # Flush the session to the DB as it runs (throttled by the callback) so a continuous
+            # multi-day session's trades are visible on the dashboard and survive a worker
+            # restart — the per-symbol path otherwise only persisted at session end.
+            if on_flush is not None:
+                on_flush(session)
             if tick_halt:
                 result.halted = True
             if group:  # a real signal bar: record a tick and report progress
@@ -462,6 +468,7 @@ def run_replay_session(
     on_tick: Callable[[LiveTick, int], None] | None = None,
     on_heartbeat: Callable[[dict], None] | None = None,
     on_positions: Callable[[str, list[dict]], None] | None = None,
+    on_flush: Callable[[PaperSession], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> LiveRunResult:
     """Run the live loop over a snapshot **replay** or the **real-time** live feed in ``mode``.
@@ -557,6 +564,7 @@ def run_replay_session(
         on_tick=on_tick,
         should_stop=should_stop,
         on_positions=on_positions,
+        on_flush=on_flush,
         price_of=getattr(feed, "latest_price", None),  # only the realtime feed marks live prices
     )
 

@@ -959,6 +959,24 @@ def _run_live_session(ctx: JobContext, params: dict) -> dict:
         hb["signals"] = max(hb["signals"], int(stats.get("signals", 0)))
         _write_progress()  # throttled per-cycle liveness
 
+    # Incremental persistence: flush trades to the DB as the session runs (throttled) so the
+    # dashboard shows them mid-run and a worker restart doesn't lose them — the per-symbol path
+    # previously persisted only at session end. Cheap path: run summary + trade rows only (no
+    # report file / decision-log rewrite each call); the final persist_live_run writes those once.
+    flush_state = {"last": 0.0}
+
+    def _on_flush(session) -> None:
+        now = _time.monotonic()
+        if now - flush_state["last"] < 20:
+            return
+        flush_state["last"] = now
+        try:
+            from src.paper.run import persist_paper_session
+
+            persist_paper_session(session, settings=settings, write_report=False, write_logs=False)
+        except Exception:  # noqa: BLE001 - a transient DB blip must not kill a multi-day session
+            ctx.log("incremental persist skipped (will retry next flush)", level="WARNING")
+
     result = run_replay_session(
         data_cfg,
         mode=mode,
@@ -974,6 +992,7 @@ def _run_live_session(ctx: JobContext, params: dict) -> dict:
         on_heartbeat=_on_heartbeat,
         # Publish live open positions (marked to market) to the dashboard's panel each tick.
         on_positions=_persist_open_positions,
+        on_flush=_on_flush,  # incremental trade persistence (throttled)
         # Stop on a dashboard Stop (cancel flag) OR if this run was superseded (a false-reap
         # requeued the job and another worker now owns it) — so two live loops never run at once.
         should_stop=lambda: ctx.is_cancelled() or not ctx.still_owns(),

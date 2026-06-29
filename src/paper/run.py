@@ -79,26 +79,39 @@ def build_promoted_inputs(version: str, per_strategy: int = 8) -> list[PaperCand
 
 
 def persist_paper_session(
-    session: PaperSession, report: PaperReport, settings: Settings | None = None
+    session: PaperSession,
+    report: PaperReport | None = None,
+    settings: Settings | None = None,
+    *,
+    write_report: bool = True,
+    write_logs: bool = True,
 ) -> str:
     """Persist the session: write the report JSON to the lake, upsert a PaperRun summary, and
-    insert a PaperTradeRecord per executed trade. Returns the session_id."""
+    insert a PaperTradeRecord per executed trade. Returns the session_id.
+
+    For INCREMENTAL persistence during a long-running live session, pass ``write_report=False`` and
+    ``write_logs=False``: it then only upserts the run summary + trade rows (cheap, bounded) without
+    dumping a fresh timestamped report file every call (which would flood the lake over a multi-day
+    run) or re-writing the full decision-log/explainability history each time. The final persist
+    uses the defaults to write the report and logs once."""
     settings = settings or get_settings()
     trades = session.trades
     net_pnl = sum(t.pnl for t in trades)
     expectancy_r = (sum(t.pnl_r for t in trades) / len(trades)) if trades else 0.0
     win_rate = (len([t for t in trades if t.pnl > 0]) / len(trades)) if trades else 0.0
 
-    reports_dir = settings.reports_path / "paper"
-    reports_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
-    report_path = reports_dir / f"paper_{session.session_id}_{stamp}.json"
-    report_path.write_text(
-        json.dumps(
-            {"session": session.to_dict(), "report": report.to_dict()}, indent=2, default=str
-        ),
-        encoding="utf-8",
-    )
+    report_path: object = None
+    if write_report and report is not None:
+        reports_dir = settings.reports_path / "paper"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+        report_path = reports_dir / f"paper_{session.session_id}_{stamp}.json"
+        report_path.write_text(
+            json.dumps(
+                {"session": session.to_dict(), "report": report.to_dict()}, indent=2, default=str
+            ),
+            encoding="utf-8",
+        )
 
     with session_scope() as db:
         run = (
@@ -118,7 +131,8 @@ def persist_paper_session(
         run.win_rate = win_rate
         run.symbols = session.symbols
         run.strategies = sorted({t.strategy for t in trades})
-        run.report_path = str(report_path)
+        if report_path is not None:
+            run.report_path = str(report_path)
         run.related_versions = settings.versions()
         # Replace any prior trade rows for this session (idempotent re-run).
         for old in (
@@ -150,7 +164,8 @@ def persist_paper_session(
                     execution_route=t.execution_route,
                 )
             )
-        _persist_decision_and_explainability(db, session)
+        if write_logs:
+            _persist_decision_and_explainability(db, session)
     return session.session_id
 
 

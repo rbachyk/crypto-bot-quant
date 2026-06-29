@@ -48,6 +48,49 @@ def _promote(candidate_id: str, version: str) -> None:
 
 
 @requires_db
+def test_incremental_persist_writes_trades_without_report_file() -> None:
+    """Incremental persistence (write_report/write_logs=False) upserts the run + trade rows so a
+    long-running live session is visible mid-run and survives a worker restart, but does NOT dump a
+    fresh timestamped report file each call (which would flood the lake over a multi-day run). The
+    final persist writes the report once."""
+    from src.paper.report import build_paper_report
+    from src.paper.run import persist_paper_session
+    from src.paper.session import PaperSession, PaperTrade
+
+    sid = f"paper:incr:{uuid.uuid4().hex[:8]}"
+    sess = PaperSession(session_id=sid)
+    sess.trades.append(PaperTrade(
+        trade_id="a1", symbol="ETH/USDT:USDT", strategy="lead_lag_xasset", side=1, qty=1.0,
+        entry_price=100.0, stop_price=95.0, tp_price=110.0, regime="R1", session=0,
+        decision_ts=1, entry_ts=1, exit_ts=2, exit_price=110.0, exit_reason="take_profit",
+        fee=0.1, slippage_cost=0.0, pnl=9.9, pnl_r=1.0, has_exchange_side_stop=True,
+        execution_route="taker", spread_bps_at_entry=0.0, slippage_frac=0.0,
+    ))
+    try:
+        persist_paper_session(sess, write_report=False, write_logs=False)  # incremental flush
+        with session_scope() as s:
+            run = s.execute(select(PaperRun).where(PaperRun.session_id == sid)).scalars().first()
+            assert run is not None and not run.report_path  # no report file dumped yet
+            rows = s.execute(
+                select(PaperTradeRecord).where(PaperTradeRecord.session_id == sid)
+            ).scalars().all()
+            assert len(rows) == 1 and rows[0].exit_reason == "take_profit"  # trade visible mid-run
+        persist_paper_session(sess, build_paper_report(sess))  # final persist
+        with session_scope() as s:
+            run = s.execute(select(PaperRun).where(PaperRun.session_id == sid)).scalars().first()
+            assert run.report_path  # report written once at the end
+    finally:
+        with session_scope() as s:
+            for old in s.execute(
+                select(PaperTradeRecord).where(PaperTradeRecord.session_id == sid)
+            ).scalars().all():
+                s.delete(old)
+            run = s.execute(select(PaperRun).where(PaperRun.session_id == sid)).scalars().first()
+            if run is not None:
+                s.delete(run)
+
+
+@requires_db
 def test_build_promoted_inputs_only_promoted_and_approved() -> None:
     ver = get_settings().strategy_version
     strat = f"paper_strat_{uuid.uuid4().hex[:6]}"
