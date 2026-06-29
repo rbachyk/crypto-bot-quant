@@ -305,9 +305,16 @@ def run_basket_paper_session(
         should_stop=halt,
     )
 
+    from src.live.loop import _run_stamp
+
     meta = load_metadata_for(data_cfg.exchange_id)
     cfg = load_backtest_config()
-    session = PaperSession(session_id=f"paper:basket:{candidate_id}:{data_cfg.data_version}:{tf}")
+    # Unique per run so a restart/re-Start does not delete the prior run's persisted legs (the
+    # delete-then-insert history-wipe). The paper:basket: prefix keeps env classification + the
+    # per-strategy grouping intact.
+    session = PaperSession(
+        session_id=f"paper:basket:{candidate_id}:{data_cfg.data_version}:{tf}:{_run_stamp()}"
+    )
     loop = BasketPaperLoop(
         cfg, meta, strategy, bar_interval_ms=timeframe_ms(tf), session=session, on_event=on_event,
         initial_equity=PAPER_BASE_EQUITY,  # paper base → equity curve aligns with other sessions

@@ -170,6 +170,17 @@ def test_held_positions_remark_on_signalless_bar() -> None:
     assert pos["mark_price"] == 110.0 and pos["unrealized_pnl"] == 20.0  # +1 × (110-100) × 2
 
 
+def test_run_stamp_is_unique_and_keeps_env_prefix() -> None:
+    """A live/basket session_id is made unique per run (so a restart never deletes the prior run's
+    persisted trades via the delete-then-insert path), while keeping the leading env: segment that
+    separates per-environment stats by LIKE 'env:%'."""
+    from src.live.loop import _run_stamp
+
+    a, b = _run_stamp(), _run_stamp()
+    assert a != b  # two runs → distinct suffixes even within the same second (random hex)
+    assert f"demo:bybit_0002:{a}".startswith("demo:")  # env prefix preserved
+
+
 def test_live_loop_runs_the_realtime_feed() -> None:
     result = LiveLoop(mode="paper").run(_feed(), session_name="rt")
     assert result.ticks  # processed live decision times

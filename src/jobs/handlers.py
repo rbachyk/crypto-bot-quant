@@ -998,6 +998,13 @@ def _run_live_session(ctx: JobContext, params: dict) -> dict:
         should_stop=lambda: ctx.is_cancelled() or not ctx.still_owns(),
     )
     session_id = persist_live_run(result, settings)
+    # Clear this run's live open-positions panel rows when it ends — with a unique session_id per
+    # run they would otherwise linger and accumulate across restarts (the basket path clears via
+    # its end-of-run close_all). A stopped paper session has no live positions to display.
+    try:
+        _persist_open_positions(result.session.session_id, [])
+    except Exception:  # noqa: BLE001 - cleanup must not fail the handler
+        pass
     net = sum(t.pnl for t in result.session.trades)
     status = "halted/stopped" if result.halted else "completed"
     ctx.progress(len(result.ticks), prog_total, f"{status}: {result.executed} executed")

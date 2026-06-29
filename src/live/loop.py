@@ -422,6 +422,15 @@ class LiveLoop:
         return result
 
 
+def _run_stamp() -> str:
+    """A short, unique-per-run suffix (UTC timestamp + 4 random hex) for a live session_id, so a
+    restart starts a NEW session instead of overwriting the previous run's persisted trades."""
+    import uuid
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:4]
+
+
 def _resolve_live_timeframe(settings: Settings, data_cfg: DataConfig, candidate_id: str | None) -> str:
     """Decide the decision timeframe a live/paper session runs on when none is given explicitly.
 
@@ -559,7 +568,11 @@ def run_replay_session(
         loop = LiveLoop(mode=mode, settings=settings, guard=guard, data_manager=data_manager)
     return loop.run(
         feed,
-        session_name=data_cfg.data_version,
+        # Unique per run (timestamp + short random) so a restart/re-Start NEVER deletes the prior
+        # run's trade history — persist_paper_session replaces rows for a session_id, and a
+        # deterministic env:data_version id made every restart wipe days of paper data. The env:
+        # prefix is preserved so per-environment stats still separate by LIKE 'env:%'.
+        session_name=f"{data_cfg.data_version}:{_run_stamp()}",
         max_ticks=max_ticks,
         on_tick=on_tick,
         should_stop=should_stop,
