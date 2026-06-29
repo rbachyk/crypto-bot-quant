@@ -13,6 +13,7 @@ from src.strategies.promotion import (
     is_strategy_promoted,
     persist_validations,
     promoted_strategies,
+    promoted_timeframe,
     reference_only_active_ids,
 )
 from src.strategies.research import CandidateValidation, SideDecision
@@ -83,6 +84,29 @@ def test_persist_and_query_promotions() -> None:
     # Upsert is idempotent per (candidate_id, version) — no duplicate row.
     assert persist_validations([good]) == 1
     assert promoted_strategies(ver).count("good_one") == 1
+
+
+@requires_db
+def test_promoted_timeframe_round_trips_for_live_resolution() -> None:
+    """The decision timeframe a candidate was validated on is persisted and read back, so the
+    live/paper loop runs each promoted strategy on its OWN timeframe (e.g. 4h) instead of silently
+    defaulting to the base grid. Mixed/unrecorded timeframes resolve to None (caller falls back)."""
+    ver = f"strat_tf_{uuid.uuid4().hex[:6]}"
+    persist_validations([_validation("lead_lag_xasset", ver, promoted=True)],
+                        data_source="lake", timeframe="4h")
+    assert promoted_timeframe(ver, candidate_ids=["lead_lag_xasset"]) == "4h"
+    assert promoted_timeframe(ver) == "4h"  # single promoted strategy → its tf
+
+    # A second promotion on a DIFFERENT timeframe → mixed → None (no single live tf to assume).
+    persist_validations([_validation("residual_momentum", ver, promoted=True)],
+                        data_source="lake", timeframe="1h")
+    assert promoted_timeframe(ver, candidate_ids=["residual_momentum"]) == "1h"
+    assert promoted_timeframe(ver) is None  # 4h + 1h → mixed
+
+    # A legacy promotion with no recorded timeframe resolves to None (caller falls back + logs).
+    legacy = f"strat_legacy_{uuid.uuid4().hex[:6]}"
+    persist_validations([_validation("old_one", legacy, promoted=True)])  # no timeframe=
+    assert promoted_timeframe(legacy) is None
 
 
 @requires_db

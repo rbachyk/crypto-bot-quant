@@ -728,7 +728,7 @@ def _run_lake_strategy_validation(ctx: JobContext, params: dict) -> dict:
         emit=lambda msg: ctx.log(msg),
         progress=lambda done, total, msg: ctx.progress(done, max(total, 1), msg),
     )
-    written = persist_validations(validations, data_source="lake")
+    written = persist_validations(validations, data_source="lake", timeframe=tf)
     promoted = [v.candidate_id for v in validations if v.promoted]
     # Surface every verdict in the log — a shelve is a normal result, not a failure, and the
     # operator needs to SEE why nothing got promoted (e.g. "insufficient trades on real data").

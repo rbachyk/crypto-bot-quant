@@ -274,9 +274,14 @@ def run_basket_paper_session(
     from src.strategies.candidates import build_strategy
     from src.strategies.config import load_strategies_config
 
+    from src.live.loop import _resolve_live_timeframe
+
     settings = settings or get_settings()
     data_cfg = data_cfg or load_data_config()
-    tf = timeframe or data_cfg.base_timeframe
+    # Run the basket on the timeframe it was validated/promoted on (e.g. 1h), not the fine base
+    # grid — residual_momentum's signal/beta windows are counted in BARS, so the wrong timeframe
+    # silently changes the lookbacks. Explicit timeframe still wins.
+    tf = timeframe or _resolve_live_timeframe(settings, data_cfg, candidate_id)
     syms = data_cfg.active_symbols()
 
     sc = load_strategies_config()

@@ -39,13 +39,20 @@ def _json_safe(obj):  # type: ignore[no-untyped-def]
 
 
 def persist_validations(
-    validations: Iterable[CandidateValidation], *, data_source: str = "reference"
+    validations: Iterable[CandidateValidation],
+    *,
+    data_source: str = "reference",
+    timeframe: str = "",
 ) -> int:
     """Upsert a StrategyPromotion row per validation (keyed by candidate + version).
 
     ``data_source`` records the PROVENANCE of the verdict — ``reference`` (synthetic
     deterministic fixtures) vs ``lake`` (real downloaded market data) — so the dashboard can
-    show whether a promotion has been established on real prices, not just fixtures."""
+    show whether a promotion has been established on real prices, not just fixtures.
+
+    ``timeframe`` records the DECISION timeframe the candidate was validated on, persisted into
+    the summary so the live/paper loop runs each promoted strategy on the timeframe it was
+    promoted on instead of silently defaulting to the fine base grid (the wrong-timeframe bug)."""
     versions = get_settings().versions()
     written = 0
     with session_scope() as session:
@@ -78,6 +85,7 @@ def persist_validations(
                 {
                     "side_decision": v.side_decision.to_dict(),
                     "data_source": data_source,
+                    "timeframe": timeframe,
                     # Full per-run metrics bundle so a verdict is inspectable after the fact (equity
                     # & drawdown curves, gross P/L, avg win/loss R, planned vs realized RR,
                     # breakdowns by symbol/side/strategy/regime/session, cost split) plus the
@@ -110,6 +118,31 @@ def promoted_strategies(strategy_version: str | None = None) -> list[str]:
         if strategy_version:
             q = q.where(StrategyPromotion.strategy_version == strategy_version)
         return [r.candidate_id for r in session.execute(q).scalars().all()]
+
+
+def promoted_timeframe(
+    strategy_version: str | None = None, *, candidate_ids: list[str] | None = None
+) -> str | None:
+    """The decision timeframe the promoted strategies were validated on, if it is uniformly
+    recorded. Returns the single shared timeframe across the given candidates (or all promoted
+    ones when ``candidate_ids`` is None), or None when it is unrecorded or mixed — the live/paper
+    loop then falls back to the data-config default and logs that it could not pin a timeframe.
+
+    Persisted into the promotion summary by :func:`persist_validations`; legacy promotions made
+    before this was recorded return None until they are re-validated."""
+    with session_scope() as session:
+        q = select(StrategyPromotion).where(StrategyPromotion.promoted.is_(True))
+        if strategy_version:
+            q = q.where(StrategyPromotion.strategy_version == strategy_version)
+        rows = session.execute(q).scalars().all()
+        tfs = {
+            str(r.summary["timeframe"])
+            for r in rows
+            if (candidate_ids is None or r.candidate_id in candidate_ids)
+            and isinstance(r.summary, dict)
+            and r.summary.get("timeframe")
+        }
+    return next(iter(tfs)) if len(tfs) == 1 else None
 
 
 @dataclass(frozen=True, slots=True)

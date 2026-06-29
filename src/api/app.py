@@ -670,13 +670,14 @@ def _data_timeframes() -> tuple[list[str], str]:
 
 
 def _tf_select(select_id: str) -> str:
-    """A timeframe ``<select>`` (the strategy decision timeframe) defaulting to the base
-    timeframe. A run-action form reads it by ``select_id`` and appends ``?timeframe=`` to its
-    POST action on submit (no extra server dependency)."""
-    tfs, base = _data_timeframes()
-    opts = "".join(
-        f'<option value="{_esc(tf)}"{" selected" if tf == base else ""}>{_esc(tf)}</option>'
-        for tf in tfs
+    """A timeframe ``<select>`` (the strategy decision timeframe). Defaults to ``Auto`` (empty
+    value) so the server resolves the timeframe each promoted strategy was VALIDATED on, instead
+    of forcing the fine base grid — the wrong-timeframe bug. The operator can still pin a specific
+    timeframe. A run-action form reads it by ``select_id`` and appends ``?timeframe=`` to its POST
+    action on submit (no extra server dependency)."""
+    tfs, _base = _data_timeframes()
+    opts = '<option value="" selected>Auto (promoted timeframe)</option>' + "".join(
+        f'<option value="{_esc(tf)}">{_esc(tf)}</option>' for tf in tfs
     )
     return (
         '<label style="margin-right:6px">Decision timeframe</label>'

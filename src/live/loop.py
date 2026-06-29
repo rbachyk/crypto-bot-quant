@@ -416,6 +416,35 @@ class LiveLoop:
         return result
 
 
+def _resolve_live_timeframe(settings: Settings, data_cfg: DataConfig, candidate_id: str | None) -> str:
+    """Decide the decision timeframe a live/paper session runs on when none is given explicitly.
+
+    Uses the timeframe the active promoted strategies were VALIDATED on (so a 4h strategy runs on
+    4h bars, not the fine base grid that's only a resampling base) — the wrong-timeframe bug where
+    every live session silently ran at base_timeframe. Falls back to base_timeframe and logs loudly
+    when the promoted timeframe is unrecorded (legacy promotions) or mixed; the operator can pass an
+    explicit timeframe or re-validate to pin it."""
+    try:
+        from src.strategies.promotion import promoted_timeframe
+
+        ids = [candidate_id] if candidate_id else None
+        tf = promoted_timeframe(settings.strategy_version, candidate_ids=ids)
+    except Exception:  # noqa: BLE001 - a registry/DB hiccup must not block the session start
+        tf = None
+    if tf:
+        _log.info(
+            "live_timeframe_from_promotion", timeframe=tf,
+            candidate=candidate_id or "ensemble",
+        )
+        return tf
+    _log.warning(
+        "live_timeframe_unrecorded", fallback=data_cfg.base_timeframe,
+        hint="promoted strategy has no recorded timeframe — re-validate or pass an explicit "
+        "timeframe to pin the decision tf (running on the base grid otherwise)",
+    )
+    return data_cfg.base_timeframe
+
+
 def run_replay_session(
     data_cfg: DataConfig | None = None,
     *,
@@ -449,7 +478,7 @@ def run_replay_session(
     candidates (no trades) — faithful to live."""
     settings = settings or get_settings()
     data_cfg = data_cfg or load_data_config()
-    tf = timeframe or data_cfg.base_timeframe
+    tf = timeframe or _resolve_live_timeframe(settings, data_cfg, candidate_id)
     syms = symbols or data_cfg.active_symbols()
 
     # Section 13: any non-paper run (testnet/demo/live) places orders on a real account and
