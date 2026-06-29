@@ -440,7 +440,13 @@ def _run_stamp() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:4]
 
 
-def _resolve_live_timeframe(settings: Settings, data_cfg: DataConfig, candidate_id: str | None) -> str:
+def _resolve_live_timeframe(
+    settings: Settings,
+    data_cfg: DataConfig,
+    candidate_id: str | None,
+    *,
+    active_ids: list[str] | None = None,
+) -> str:
     """Decide the decision timeframe a live/paper session runs on when none is given explicitly.
 
     Uses the timeframe the active promoted strategies were VALIDATED on (so a 4h strategy runs on
@@ -451,7 +457,7 @@ def _resolve_live_timeframe(settings: Settings, data_cfg: DataConfig, candidate_
     try:
         from src.strategies.promotion import promoted_timeframe
 
-        ids = [candidate_id] if candidate_id else None
+        ids = [candidate_id] if candidate_id else active_ids
         tf = promoted_timeframe(settings.strategy_version, candidate_ids=ids)
     except Exception:  # noqa: BLE001 - a registry/DB hiccup must not block the session start
         tf = None
@@ -503,13 +509,13 @@ def run_replay_session(
     candidates (no trades) — faithful to live."""
     settings = settings or get_settings()
     data_cfg = data_cfg or load_data_config()
-    tf = timeframe or _resolve_live_timeframe(settings, data_cfg, candidate_id)
     syms = symbols or data_cfg.active_symbols()
 
     # Section 13: any non-paper run (testnet/demo/live) places orders on a real account and
     # may ONLY run strategies validated on real lake data — never synthetic/reference-only.
     require_real_data = mode != "paper"
     strategies = None
+    active_ids: list[str] | None = None
     if multi_strategy:
         from src.paper.lake import resolve_active_strategies
 
@@ -517,6 +523,13 @@ def run_replay_session(
             settings, require_real_data=require_real_data
         )
         strategies = active
+        active_ids = [sid for _s, sid, _v in active] or None
+    # Resolve the decision timeframe from the strategies that ACTUALLY run (the pinned candidate, or
+    # the active ensemble) — not every promoted row, so a benched promotion on a different timeframe
+    # can't force a fallback to the base grid when the active set is uniform.
+    tf = timeframe or _resolve_live_timeframe(
+        settings, data_cfg, candidate_id, active_ids=active_ids
+    )
     # Real-money mode is bounded by the activation guard (gates + sign-off + caps).
     if guard is None and mode == "live":
         from src.live.guard import LiveActivationGuard

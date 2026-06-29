@@ -110,6 +110,32 @@ def test_promoted_timeframe_round_trips_for_live_resolution() -> None:
 
 
 @requires_db
+def test_resolve_live_timeframe_uses_active_ids_not_all_promoted() -> None:
+    """REGRESSION (R5): the live timeframe resolver must consider only the strategies that ACTUALLY
+    run (the pinned candidate or the active ensemble), not every promoted row — a benched promotion
+    on a different timeframe must not force a fallback to the base grid when the active set is
+    uniform."""
+    from src.config import Settings
+    from src.data.config import load_data_config
+    from src.live.loop import _resolve_live_timeframe
+
+    ver = f"strat_r5_{uuid.uuid4().hex[:6]}"
+    settings = Settings(_env_file=None, strategy_version=ver)
+    persist_validations([_validation("lead_lag_xasset", ver, promoted=True)],
+                        data_source="lake", timeframe="4h")
+    persist_validations([_validation("residual_momentum", ver, promoted=True)],
+                        data_source="lake", timeframe="1h")
+    data_cfg = load_data_config("configs/data.bybit.yaml")
+
+    # all-promoted is mixed (4h + 1h) → without active_ids the resolver falls back to the base grid
+    assert _resolve_live_timeframe(settings, data_cfg, None) == data_cfg.base_timeframe
+    # the ACTIVE ensemble is just lead_lag (4h) → the resolver returns 4h, not the base grid
+    assert _resolve_live_timeframe(
+        settings, data_cfg, None, active_ids=["lead_lag_xasset"]
+    ) == "4h"
+
+
+@requires_db
 def test_demo_live_requires_real_lake_data() -> None:
     """A strategy promoted on synthetic/reference data only must be BLOCKED from demo/live;
     re-validating it on real lake data makes it eligible (Section 13)."""
