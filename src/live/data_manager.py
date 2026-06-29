@@ -175,6 +175,10 @@ class CcxtPollingSource:
         rows = self._src.fetch(
             SeriesKey(self._ex, OHLCV, symbol, self.timeframe), now - 5 * iv, now
         )
+        # Drop the still-FORMING candle: its open-ts (floor(now/iv)*iv) is < now so it passes the
+        # fetch's ts<end filter, and returning it would feed a partial bar into the feature pipeline
+        # (and a decision_ts in the future). Keep only bars whose close time has passed.
+        rows = [r for r in rows if int(r["ts"]) + iv <= now]
         if not rows:
             return None
         last = rows[-1]

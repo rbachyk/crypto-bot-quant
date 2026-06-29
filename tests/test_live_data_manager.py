@@ -31,6 +31,35 @@ def _mgr(src) -> LiveDataManager:
     return LiveDataManager(src, SYMS, interval_ms=IV, stale_after_intervals=2)
 
 
+def test_polling_source_returns_last_closed_bar_not_forming() -> None:
+    """REGRESSION: CcxtPollingSource.latest_bar must return the last CLOSED bar, never the
+    still-forming candle. The forming candle's open-ts is < now so it passes the fetch ts<end
+    filter; returning it fed a partial bar (and a decision_ts in the future) into the live pipeline,
+    freezing each symbol on its bar-open data for the whole period."""
+    import time as _t
+
+    from src.data.schema import timeframe_ms
+    from src.live.data_manager import CcxtPollingSource
+
+    tf = "5m"
+    iv = timeframe_ms(tf)
+    now = int(_t.time() * 1000)
+    grid = (now // iv) * iv
+    closed_ts, forming_ts = grid - iv, grid  # last closed, current forming (open <= now < close)
+
+    class _FakeSrc:
+        def fetch(self, key, start, end):  # type: ignore[no-untyped-def]
+            return [
+                {"ts": closed_ts, "open": 1, "high": 1, "low": 1, "close": 1.0, "volume": 1},
+                {"ts": forming_ts, "open": 2, "high": 2, "low": 2, "close": 2.0, "volume": 2},
+            ]
+
+    src = CcxtPollingSource.__new__(CcxtPollingSource)  # bypass ccxt client construction
+    src._src, src._ex, src.timeframe = _FakeSrc(), "bybit", tf
+    ts, bar = src.latest_bar("BTC/USDT:USDT")
+    assert ts == closed_ts and bar["close"] == 1.0  # forming bar dropped
+
+
 def test_fresh_then_stale_when_stream_stops() -> None:
     src = FakeSource()
     mgr = _mgr(src)

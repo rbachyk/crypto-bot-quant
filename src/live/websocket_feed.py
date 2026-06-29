@@ -113,18 +113,26 @@ class WebsocketFeedSource:
                 continue
             self._error = None
             if candles:
-                c = candles[-1]
-                row = {
-                    "ts": int(c[0]),
-                    "open": float(c[1]),
-                    "high": float(c[2]),
-                    "low": float(c[3]),
-                    "close": float(c[4]),
-                    "volume": float(c[5]) if c[5] is not None else 0.0,
-                }
+                # ccxt.pro emits the currently-FORMING candle as the last element; advancing on it
+                # feeds a partial bar into the feature pipeline. Take the last candle whose close
+                # time has passed (ts + interval <= now); skip the cycle if only a forming bar is in.
+                from src.data.schema import timeframe_ms
+
+                iv = timeframe_ms(self.timeframe)
+                now = _now_ms()
+                closed = [c for c in candles if int(c[0]) + iv <= now]
                 with self._lock:
-                    self._cache[symbol] = (int(c[0]), row)
-                    self._last_msg_ms = _now_ms()
+                    self._last_msg_ms = now  # a message arrived → stream alive, forming or not
+                    if closed:
+                        c = closed[-1]
+                        self._cache[symbol] = (int(c[0]), {
+                            "ts": int(c[0]),
+                            "open": float(c[1]),
+                            "high": float(c[2]),
+                            "low": float(c[3]),
+                            "close": float(c[4]),
+                            "volume": float(c[5]) if c[5] is not None else 0.0,
+                        })
 
     # -- FeedSource API -------------------------------------------------- #
     def connected(self) -> bool:
