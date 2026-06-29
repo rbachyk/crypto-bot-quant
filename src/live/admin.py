@@ -19,12 +19,14 @@ from sqlalchemy import delete, func, select
 from src.db.base import session_scope
 from src.db.models import (
     DecisionLog,
+    OpenPosition,
     PaperRun,
     PaperTradeRecord,
     TradeExplainabilityRow,
 )
 
-# The four tables a session writes; all keyed by the env-prefixed session_id.
+# The four HISTORY tables a session writes; all keyed by the env-prefixed session_id. These are
+# what the confirm-before-reset summary counts.
 _SESSION_TABLES = (PaperRun, PaperTradeRecord, DecisionLog, TradeExplainabilityRow)
 
 # Real-venue env prefixes; everything else is the "paper" environment (matches src.api.stats).
@@ -93,4 +95,9 @@ def reset_env_stats(env: str = "demo") -> EnvStatsSummary:
     with session_scope() as db:
         for model in _SESSION_TABLES:
             db.execute(_scope_env(delete(model), model, env))
+        # Also clear the env's LIVE open-position rows. They're transient display state (not history,
+        # so not counted in the summary), but a reset must drop them too — otherwise stale legs from
+        # a prior/crashed run linger on the dashboard forever (open_positions isn't auto-cleared on a
+        # hard kill). A running session simply rewrites its own rows on the next tick.
+        db.execute(_scope_env(delete(OpenPosition), OpenPosition, env))
     return removed

@@ -241,6 +241,34 @@ def test_reset_paper_stats_does_not_touch_selftest_rows() -> None:
             )
 
 
+@requires_db
+def test_reset_clears_env_open_positions() -> None:
+    """A reset must also drop the env's LIVE open-position rows (transient display state, not
+    history) — otherwise stale legs from a prior/crashed run linger on the dashboard after a reset
+    (open_positions isn't auto-cleared on a hard kill). Other envs stay untouched."""
+    from src.db.base import session_scope
+    from src.db.models import OpenPosition
+    from src.live.admin import reset_env_stats
+    from src.live.basket import _persist_open_positions
+
+    paper_sid = "paper:bybit_0002"  # legacy stamp-less orphan (what survived the user's reset)
+    demo_sid = "demo:bybit_0002:x"
+    pos = {"symbol": "ETH/USDT:USDT", "strategy": "lead_lag_xasset", "side": 1, "qty": 1.0,
+           "entry_price": 100.0, "mark_price": 100.0, "notional": 100.0, "unrealized_pnl": 0.0,
+           "entry_ts": 1}
+    try:
+        _persist_open_positions(paper_sid, [pos])
+        _persist_open_positions(demo_sid, [pos])
+        reset_env_stats("paper")
+        with session_scope() as s:
+            assert s.query(OpenPosition).filter_by(session_id=paper_sid).count() == 0  # cleared
+            assert s.query(OpenPosition).filter_by(session_id=demo_sid).count() == 1  # untouched
+    finally:
+        with session_scope() as s:
+            for sid in (paper_sid, demo_sid):
+                s.query(OpenPosition).filter_by(session_id=sid).delete()
+
+
 # --- routing + venue-mode mapping ------------------------------------------- #
 def test_live_jobs_route_to_dedicated_live_worker() -> None:
     assert queue_class("run_live_session") == "live"
