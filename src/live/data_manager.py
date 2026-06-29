@@ -153,11 +153,16 @@ class CcxtPollingSource:
     """Production :class:`FeedSource` over ccxt REST (a ccxt.pro ws can swap in later)."""
 
     def __init__(
-        self, exchange_id: str = "bybit", timeframe: str = "1m", *, client: Any | None = None
+        self,
+        exchange_id: str = "bybit",
+        timeframe: str = "1m",
+        *,
+        client: Any | None = None,
+        exchange_env: str = "live",
     ):
         from src.data.ccxt_source import CcxtDataSource
 
-        self._src = CcxtDataSource(exchange_id, client=client)
+        self._src = CcxtDataSource(exchange_id, client=client, exchange_env=exchange_env)
         self._ex = exchange_id
         self.timeframe = timeframe
 

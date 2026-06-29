@@ -178,5 +178,5 @@ def live_feed_source(
     if transport == "rest":
         from src.live.data_manager import CcxtPollingSource
 
-        return CcxtPollingSource(exchange_id, timeframe)
+        return CcxtPollingSource(exchange_id, timeframe, exchange_env=exchange_env)
     raise ValueError(f"transport must be 'ws' or 'rest', got {transport!r}")

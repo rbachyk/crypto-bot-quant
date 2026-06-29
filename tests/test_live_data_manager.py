@@ -31,6 +31,20 @@ def _mgr(src) -> LiveDataManager:
     return LiveDataManager(src, SYMS, interval_ms=IV, stale_after_intervals=2)
 
 
+def test_polling_source_routes_testnet_to_sandbox_demo_stays_mainnet() -> None:
+    """REGRESSION (E1): the REST data feed applies the exchange env so TESTNET reads testnet klines
+    (matching the venue its orders hit), while DEMO/LIVE keep MAINNET data — Bybit's demo endpoint
+    serves no public klines (the silent tick-0 bug), so demo trading is mainnet-data by design."""
+    from src.live.data_manager import CcxtPollingSource
+
+    tn = CcxtPollingSource("bybit", "5m", exchange_env="testnet")._src._ex
+    assert tn.urls["api"] == tn.urls["test"]  # routed to the testnet/sandbox endpoints
+
+    for env in ("demo", "live"):
+        ex = CcxtPollingSource("bybit", "5m", exchange_env=env)._src._ex
+        assert ex.urls["api"] != ex.urls["test"]  # mainnet data preserved
+
+
 def test_polling_source_returns_last_closed_bar_not_forming() -> None:
     """REGRESSION: CcxtPollingSource.latest_bar must return the last CLOSED bar, never the
     still-forming candle. The forming candle's open-ts is < now so it passes the fetch ts<end

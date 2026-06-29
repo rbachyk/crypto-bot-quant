@@ -57,6 +57,7 @@ class CcxtDataSource(DataSource):
         max_retries: int = 8,
         retry_base_sec: float = 1.0,
         retry_max_sec: float = 60.0,
+        exchange_env: str = "live",
     ) -> None:
         self.exchange_id = exchange_id
         self._estimated_spread_bps = estimated_spread_bps
@@ -81,6 +82,14 @@ class CcxtDataSource(DataSource):
                     "options": {"defaultType": "swap"},
                 }
             )
+            # Route market data to the right environment for TESTNET (its klines must match the
+            # testnet venue the orders hit). demo + live deliberately read MAINNET data — Bybit's
+            # demo endpoint serves no public klines (the silent tick-0 bug), and demo trading is
+            # mainnet-data by design; live is mainnet anyway.
+            if exchange_env == "testnet":
+                from src.execution.live_venue import apply_exchange_env
+
+                apply_exchange_env(self._ex, "testnet")
         self._markets: dict | None = None
 
     # -- rate-limit-resilient call wrapper ------------------------------- #
