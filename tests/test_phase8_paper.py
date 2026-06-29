@@ -325,6 +325,35 @@ class TestPaperTradingEngine:
         engine.process_candidates(inputs, session)
         assert session.total_candidates == 2
 
+    def test_short_exit_classifies_and_closes_not_open(self) -> None:
+        """REGRESSION: a short must classify as take_profit/stop and CLOSE — the old exit_move sign
+        guards were swapped for side<0, so every short stuck at 'open', pinned its concurrency slot
+        forever and never realized P&L. TP is BELOW entry for a short, stop ABOVE."""
+        # short, price FALLS 2.5% → take-profit (below entry) → profit, slot released
+        eng = PaperTradingEngine()
+        sess = eng.new_session()
+        eng.process_candidates(
+            [PaperCandidateInput(candidate=_candidate("BTC/USDT:USDT", side=-1),
+                                 equity=10_000.0, exit_move_frac=-0.025)],
+            sess,
+        )
+        assert sess.trades, "the short should have executed"
+        won = sess.trades[-1]
+        assert won.side == -1 and won.exit_reason == "take_profit" and won.pnl > 0
+        assert "BTC/USDT:USDT" not in eng._open_positions  # closed, not stuck open
+
+        # short, price RISES 1.2% → stop (above entry) → loss
+        eng2 = PaperTradingEngine()
+        sess2 = eng2.new_session()
+        eng2.process_candidates(
+            [PaperCandidateInput(candidate=_candidate("ETH/USDT:USDT", side=-1),
+                                 equity=10_000.0, exit_move_frac=0.012)],
+            sess2,
+        )
+        lost = sess2.trades[-1]
+        assert lost.exit_reason == "stop" and lost.pnl < 0
+        assert "ETH/USDT:USDT" not in eng2._open_positions
+
 
 # --------------------------------------------------------------------------- #
 # PaperReport tests                                                             #

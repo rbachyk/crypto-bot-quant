@@ -515,15 +515,25 @@ class PaperTradingEngine:
         tp_price = entry_price * (1 + candidate.tp_frac * candidate.side)
         exit_move = inp.exit_move_frac
         exit_price = entry_price * (1 + exit_move)
+        # Classify the exit by which bracket the forward price reached. ``exit_move`` is the RAW
+        # (non-side-adjusted) price move; ``exit_move * side > 0`` means it moved in our favour →
+        # the take-profit side, otherwise the stop side. For a SHORT the levels invert (stop ABOVE
+        # entry, TP BELOW), so the comparison flips with side. (The previous code paired the wrong
+        # exit_move sign with the short branches, so a short NEVER classified as tp/stop — it stuck
+        # at "open", pinned its concurrency slot forever and never realized P&L.)
         exit_reason = "open"
-        if exit_move > 0 and candidate.side > 0 and exit_price >= tp_price:
-            exit_reason = "take_profit"
-        elif exit_move < 0 and candidate.side > 0 and exit_price <= stop_price:
-            exit_reason = "stop"
-        elif exit_move > 0 and candidate.side < 0 and exit_price <= tp_price:
-            exit_reason = "take_profit"
-        elif exit_move < 0 and candidate.side < 0 and exit_price >= stop_price:
-            exit_reason = "stop"
+        if exit_move != 0:
+            favorable = exit_move * candidate.side > 0
+            if favorable and (
+                (candidate.side > 0 and exit_price >= tp_price)
+                or (candidate.side < 0 and exit_price <= tp_price)
+            ):
+                exit_reason = "take_profit"
+            elif not favorable and (
+                (candidate.side > 0 and exit_price <= stop_price)
+                or (candidate.side < 0 and exit_price >= stop_price)
+            ):
+                exit_reason = "stop"
 
         raw_pnl = (exit_price - entry_price) * candidate.side * fill.qty
         fee = fill.fee
