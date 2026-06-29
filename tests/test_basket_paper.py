@@ -217,6 +217,40 @@ def test_engine_simulates_paper_bracket_and_time_stop_exits() -> None:
     assert sess.trades[0].exit_reason == "time_stop"
 
 
+def test_rebalance_closes_ghost_leg_with_no_current_bar() -> None:
+    """REGRESSION (C2): a held leg whose symbol has NO bar at a rebalance (halted/delisted/feed gap
+    over a multi-day run) must still be flattened on its last known close — not left as a ghost leg
+    that never closes and keeps accruing funding against a frozen mark."""
+    from src.backtest.engine import BacktestResult
+    from src.backtest.portfolio import CrossSectionalEngine, _Leg
+
+    cfg = load_backtest_config()
+    meta = load_metadata_config()
+    sc = load_strategies_config()
+    strat = build_strategy(sc.candidate("funding_carry"), sc.strategy_version)
+    eng = CrossSectionalEngine(cfg, meta, strat)
+    eng._grid_iv = 3_600_000  # used by the close's bars_held math
+
+    sym = "BTC/USDT:USDT"
+    leg = _Leg(symbol=sym, side=1, qty=1.0, entry_ts=0, entry_price=100.0, notional=100.0,
+               risk_amount=1.0, entry_fee=0.0, funding=0.0, slippage_cost=0.0, regime="R1",
+               session=0, last_funding_ts=0)
+    holdings = {sym: leg}
+    by_symbol = {sym: SymbolInput(
+        symbol=sym,
+        bars=[{"ts": 0, "open": 100.0, "high": 100.0, "low": 100.0, "close": 105.0, "volume": 1.0}],
+        frame=FeatureFrame(symbol=sym, timeframe="1h", feature_names=[], rows=[]),
+        spread_samples=[], funding_events=[],
+    )}
+    result = BacktestResult(initial_equity=10_000.0, symbols=[sym])
+    # empty scores → the symbol is no longer a target → must close; bars_by_ts has NO bar at ts,
+    # exercising the last-known-close fallback.
+    eng._rebalance(holdings, {}, {sym: {}}, {sym: {}}, by_symbol, 10 * 3_600_000, 10_000.0, result)
+
+    assert sym not in holdings  # ghost leg flattened, not left open
+    assert any(t.symbol == sym for t in result.trades)  # closed on the last known bar
+
+
 def test_funding_settled_by_timestamp_survives_event_list_rebuild() -> None:
     """REGRESSION (C1): funding is settled by TIMESTAMP so the live loop rebuilding/sliding the
     funding_events list between ticks never skips or double-charges carry — a positional index into

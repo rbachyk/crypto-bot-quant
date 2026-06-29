@@ -187,6 +187,12 @@ class CrossSectionalEngine:
         for sym, leg in list(holdings.items()):
             if target.get(sym) != leg.side:
                 bar = bars_by_ts[sym].get(ts)
+                if bar is None:
+                    # No bar at this rebalance (symbol halted/delisted/feed gap over a multi-day
+                    # run): flatten on the last known close rather than leaving a ghost leg that
+                    # never closes and keeps accruing funding (mirrors the end-of-run force-close).
+                    known = by_symbol[sym].bars if sym in by_symbol else []
+                    bar = known[-1] if known else None
                 if bar is not None:
                     equity += self._close_leg(leg, bar, "rebalance", result)
                     del holdings[sym]
