@@ -237,6 +237,30 @@ def _persist_open_positions(session_id: str, positions: list[dict]) -> None:
         pass
 
 
+def _clear_orphan_open_positions(session_id: str) -> None:
+    """At session start, delete leftover open-position rows from PRIOR runs of the SAME stream.
+
+    Each run now has a unique session_id (env:…:<run-stamp>), so a hard-killed run (no graceful
+    end-clear) leaves orphan rows that linger on the dashboard forever — the new run uses a new id
+    and never overwrites them. We delete only rows whose session_id shares this run's stream prefix
+    (everything up to and including the last ':', i.e. the id minus the run stamp) and differ from
+    the current id — so concurrent OTHER streams (different strategy/env/timeframe) are untouched."""
+    from src.db.base import session_scope
+    from src.db.models import OpenPosition
+
+    prefix = session_id.rsplit(":", 1)[0] + ":"  # drop the trailing run-stamp segment
+    try:
+        with session_scope() as s:
+            (
+                s.query(OpenPosition)
+                .filter(OpenPosition.session_id.like(f"{prefix}%"))
+                .filter(OpenPosition.session_id != session_id)
+                .delete(synchronize_session=False)
+            )
+    except Exception:  # noqa: BLE001 - cleanup must never take down the session
+        pass
+
+
 def run_basket_paper_session(
     candidate_id: str,
     *,
@@ -315,6 +339,7 @@ def run_basket_paper_session(
     session = PaperSession(
         session_id=f"paper:basket:{candidate_id}:{data_cfg.data_version}:{tf}:{_run_stamp()}"
     )
+    _clear_orphan_open_positions(session.session_id)  # drop a prior crashed run's stale legs
     loop = BasketPaperLoop(
         cfg, meta, strategy, bar_interval_ms=timeframe_ms(tf), session=session, on_event=on_event,
         initial_equity=PAPER_BASE_EQUITY,  # paper base → equity curve aligns with other sessions

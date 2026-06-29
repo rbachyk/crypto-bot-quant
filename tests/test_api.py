@@ -189,6 +189,34 @@ def test_api_stats_respects_env_selector() -> None:
 
 
 @requires_db
+def test_clear_orphan_open_positions_drops_prior_run_same_stream_only() -> None:
+    """REGRESSION (R7): unique-per-run session ids mean a hard-killed run leaves orphan
+    open-position rows; on start the new run clears prior runs of the SAME stream (id minus the run
+    stamp) without touching a concurrent OTHER stream."""
+    from src.db.base import session_scope
+    from src.db.models import OpenPosition
+    from src.live.basket import _clear_orphan_open_positions, _persist_open_positions
+
+    old = "demo:bybit_0002:20260629T100000-aaaa"  # prior (crashed) run, same stream
+    new = "demo:bybit_0002:20260629T120000-bbbb"  # this run (same stream → prefix demo:bybit_0002:)
+    other = "paper:basket:funding_carry:bybit_0002:1h:20260629T120000-cccc"  # a different stream
+    pos = {"symbol": "ETH/USDT:USDT", "strategy": "lead_lag_xasset", "side": 1, "qty": 1.0,
+           "entry_price": 100.0, "mark_price": 100.0, "notional": 100.0, "unrealized_pnl": 0.0,
+           "entry_ts": 1}
+    try:
+        for sid in (old, other):
+            _persist_open_positions(sid, [pos])
+        _clear_orphan_open_positions(new)  # what the new run does at start
+        with session_scope() as s:
+            assert s.query(OpenPosition).filter_by(session_id=old).count() == 0  # prior run cleared
+            assert s.query(OpenPosition).filter_by(session_id=other).count() == 1  # other stream kept
+    finally:
+        with session_scope() as s:
+            for sid in (old, new, other):
+                s.query(OpenPosition).filter_by(session_id=sid).delete()
+
+
+@requires_db
 def test_open_positions_panel_excludes_real_venue_sessions() -> None:
     """The Paper page Open-positions panel must NOT show demo/testnet/live real-venue legs — the
     per-symbol live loop persists OpenPosition rows for those too, and mixing them into the paper

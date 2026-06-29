@@ -328,6 +328,7 @@ class LiveLoop:
         should_stop: Callable[[], bool] | None = None,
         on_positions: Callable[[str, list[dict]], None] | None = None,
         on_flush: Callable[[PaperSession], None] | None = None,
+        on_session_start: Callable[[str], None] | None = None,
         price_of: Callable[[str], float | None] | None = None,
         bar_iv: int = 0,
     ) -> LiveRunResult:
@@ -343,6 +344,8 @@ class LiveLoop:
         if bar_iv > 0:
             self._bar_iv = bar_iv
         session = self.engine.new_session(f"{self.env_label}:{session_name}")
+        if on_session_start is not None:
+            on_session_start(session.session_id)  # e.g. clear a prior crashed run's stale positions
         result = LiveRunResult(session=session, mode=self.mode)
 
         # Section 7: before ANY tick, reconcile the real exchange book. A foreign/manual
@@ -493,6 +496,7 @@ def run_replay_session(
     on_heartbeat: Callable[[dict], None] | None = None,
     on_positions: Callable[[str, list[dict]], None] | None = None,
     on_flush: Callable[[PaperSession], None] | None = None,
+    on_session_start: Callable[[str], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> LiveRunResult:
     """Run the live loop over a snapshot **replay** or the **real-time** live feed in ``mode``.
@@ -601,6 +605,7 @@ def run_replay_session(
         should_stop=should_stop,
         on_positions=on_positions,
         on_flush=on_flush,
+        on_session_start=on_session_start,
         price_of=getattr(feed, "latest_price", None),  # only the realtime feed marks live prices
         bar_iv=timeframe_ms(tf),  # pin the time-stop interval to the configured timeframe
     )

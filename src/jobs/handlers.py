@@ -874,7 +874,7 @@ def _run_live_session(ctx: JobContext, params: dict) -> dict:
     Whatever executed before a stop/cancel/error is still persisted."""
     from src.config import get_settings
     from src.data.config import load_data_config
-    from src.live.basket import _persist_open_positions
+    from src.live.basket import _clear_orphan_open_positions, _persist_open_positions
     from src.live.loop import persist_live_run, run_replay_session
 
     settings = get_settings()
@@ -993,6 +993,8 @@ def _run_live_session(ctx: JobContext, params: dict) -> dict:
         # Publish live open positions (marked to market) to the dashboard's panel each tick.
         on_positions=_persist_open_positions,
         on_flush=_on_flush,  # incremental trade persistence (throttled)
+        # On start, drop stale open-position rows left by a prior crashed run of this stream.
+        on_session_start=_clear_orphan_open_positions,
         # Stop on a dashboard Stop (cancel flag) OR if this run was superseded (a false-reap
         # requeued the job and another worker now owns it) — so two live loops never run at once.
         should_stop=lambda: ctx.is_cancelled() or not ctx.still_owns(),
