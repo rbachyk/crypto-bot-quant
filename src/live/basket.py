@@ -55,6 +55,7 @@ def _trade_to_paper(t: Trade, *, maker: bool) -> PaperTrade:
         execution_route="maker" if maker else "taker",
         spread_bps_at_entry=0.0,
         slippage_frac=0.0,
+        funding=t.funding,  # carry accrued over the hold (already netted into t.pnl)
     )
 
 
@@ -159,7 +160,7 @@ class BasketPaperLoop:
             out.append({
                 "symbol": sym, "strategy": self.engine.name, "side": leg.side, "qty": leg.qty,
                 "entry_price": leg.entry_price, "mark_price": mark, "notional": leg.notional,
-                "unrealized_pnl": unreal, "entry_ts": leg.entry_ts,
+                "unrealized_pnl": unreal, "funding": leg.funding, "entry_ts": leg.entry_ts,
             })
         return out
 

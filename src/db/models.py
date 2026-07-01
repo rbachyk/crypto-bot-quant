@@ -509,6 +509,10 @@ class PaperTradeRecord(Base):
     regime: Mapped[str] = mapped_column(String(24), default="")
     fee: Mapped[float] = mapped_column(default=0.0)
     slippage_cost: Mapped[float] = mapped_column(default=0.0)
+    # Funding booked into pnl, COST convention (>0 = paid, <0 = carry received). Already included in
+    # pnl; surfaced separately so closed-trade analysis can split carry from price P&L. 0.0 for
+    # per-trade-engine trades (lead_lag etc.); meaningful for basket legs.
+    funding: Mapped[float] = mapped_column(default=0.0)
     pnl: Mapped[float] = mapped_column(default=0.0)
     pnl_r: Mapped[float] = mapped_column(default=0.0)
     has_exchange_side_stop: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -537,6 +541,11 @@ class OpenPosition(Base):
     mark_price: Mapped[float] = mapped_column(default=0.0)
     notional: Mapped[float] = mapped_column(default=0.0)
     unrealized_pnl: Mapped[float] = mapped_column(default=0.0)
+    # Cumulative funding accrued on the leg, COST convention (>0 = paid by the leg, <0 = carry
+    # received). Already netted INTO unrealized_pnl; surfaced separately so the dashboard can show
+    # how much of a leg's P&L is carry vs price. 0.0 for the per-trade engine (it doesn't accrue
+    # funding on open positions); meaningful for basket legs (funding_carry / residual_momentum).
+    funding: Mapped[float] = mapped_column(default=0.0)
     entry_ts: Mapped[int] = mapped_column(BigInteger, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 

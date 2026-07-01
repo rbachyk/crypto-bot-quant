@@ -177,6 +177,7 @@ def persist_paper_session(
                     regime=t.regime,
                     fee=t.fee,
                     slippage_cost=t.slippage_cost,
+                    funding=t.funding,
                     pnl=t.pnl,
                     pnl_r=t.pnl_r,
                     has_exchange_side_stop=t.has_exchange_side_stop,

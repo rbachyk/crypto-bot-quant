@@ -758,7 +758,8 @@ def _open_positions_table() -> str:
                 q = q.where(~OpenPosition.session_id.like(f"{pfx}%"))
             rows = session.execute(q).scalars().all()
             data = [
-                (r.strategy, r.symbol, r.side, r.qty, r.entry_price, r.mark_price, r.unrealized_pnl)
+                (r.strategy, r.symbol, r.side, r.qty, r.entry_price, r.mark_price,
+                 r.unrealized_pnl, r.funding)
                 for r in rows
             ]
     except Exception:  # noqa: BLE001 - degrade to empty (e.g. table not migrated yet), never 500
@@ -768,6 +769,8 @@ def _open_positions_table() -> str:
     for d in data:
         by_strat.setdefault(d[0], []).append(d)
     total = sum(d[6] for d in data)
+    # Funding is stored COST-convention (>0 paid); show its P&L CONTRIBUTION (carry earned = +).
+    total_funding = -sum(d[7] for d in data)
 
     body = ""
     for strat in sorted(by_strat):
@@ -776,29 +779,34 @@ def _open_positions_table() -> str:
             f"<tr><td><code>{_esc(strat)}</code></td><td>{_esc(sym)}</td>"
             f"<td>{'LONG' if side > 0 else 'SHORT'}</td><td>{qty:.4f}</td><td>{entry:,.4f}</td>"
             f"<td>{mark:,.4f}</td>"
+            f'<td style="color:{_pnl_color(-fund)}">{-fund:+,.2f}</td>'
             f'<td style="color:{_pnl_color(upnl)}">{upnl:+,.2f}</td></tr>'
-            for (_st, sym, side, qty, entry, mark, upnl) in legs
+            for (_st, sym, side, qty, entry, mark, upnl, fund) in legs
         )
         sub = sum(r[6] for r in legs)
+        sub_funding = -sum(r[7] for r in legs)
         body += (
             "<tr style='border-top:1px solid var(--border)'>"
             f"<td colspan='6' style='text-align:right' class='meta'>{_esc(strat)} "
             f"subtotal ({len(legs)})</td>"
+            f'<td style="color:{_pnl_color(sub_funding)}"><b>{sub_funding:+,.2f}</b></td>'
             f'<td style="color:{_pnl_color(sub)}"><b>{sub:+,.2f}</b></td></tr>'
         )
     if not data:
         body = (
-            "<tr><td colspan='7' class='meta'>No open positions — sessions are flat or between "
+            "<tr><td colspan='8' class='meta'>No open positions — sessions are flat or between "
             "rebalances.</td></tr>"
         )
     return f"""
 <table>
   <tr><th>Strategy</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Mark</th>
-      <th>Unrealized P&amp;L</th></tr>
+      <th>Funding</th><th>Unrealized P&amp;L</th></tr>
   {body}
 </table>
 <p class="meta" style="margin-top:8px">Total unrealized ({len(data)} open):
-   <b style="color:{_pnl_color(total)}">{total:+,.2f}</b></p>"""
+   <b style="color:{_pnl_color(total)}">{total:+,.2f}</b>
+   &nbsp;·&nbsp; of which funding:
+   <b style="color:{_pnl_color(total_funding)}">{total_funding:+,.2f}</b></p>"""
 
 
 def _open_positions_card() -> str:
@@ -1799,6 +1807,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         maker = sum(1 for t in trades if t.execution_route == "maker")
         with_stop = sum(1 for t in trades if t.has_exchange_side_stop)
         avg_slip = (sum(t.slippage_cost for t in trades) / n) if n else 0.0
+        # Exit-reason breakdown so trail-outs (trailing_stop) are visible vs hard stops / TPs /
+        # time-stops / rebalances — dynamic, so any reason string shows up without a code change.
+        reasons: dict[str, int] = {}
+        for t in trades:
+            reasons[t.exit_reason] = reasons.get(t.exit_reason, 0) + 1
+        reason_str = " · ".join(f"{r} {c}" for r, c in sorted(reasons.items())) or "—"
         body = (
             _period_selector("/dashboard/execution", period)
             + _kpi_row(compute_trading_stats(window, env=env_scope))
@@ -1810,6 +1824,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     ("exchange-side stop %", f"{(with_stop / n * 100) if n else 0:.1f}%"),
                     ("avg slippage cost", f"{avg_slip:.4f}"),
                     ("total fees", f"{sum(t.fee for t in trades):.2f}"),
+                    # Funding is stored cost-convention (>0 paid); show its P&L CONTRIBUTION
+                    # (carry earned = +) so it reads consistently with the open-positions panel.
+                    ("net funding", f"{-sum(t.funding for t in trades):+.2f}"),
+                    ("exit reasons", reason_str),
                 ],
             )
         )

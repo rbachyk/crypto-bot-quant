@@ -17,6 +17,7 @@ checks; the report module formats the session for each gate's criteria.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -138,6 +139,25 @@ class PaperTradingEngine:
         # an explicit simulator a paper position would never close. simulate_paper_exits reads these
         # to flatten a held paper position when a new bar's price breaches its stop/TP/time-stop.
         self._exit_levels: dict[str, tuple[float, float, int, int]] = {}
+        # Perpetual funding accrued on each OPEN position — parity with the backtest engine, which
+        # charges funding at every funding timestamp a position is held across (src/backtest/engine
+        # ._charge_funding). Without this, paper/live directional P&L (e.g. lead_lag held for hours)
+        # overstates vs the backtest AND the real exchange, which DOES debit/credit funding. Wired
+        # by the live run from the feed's funding series (set_funding_source); with no source
+        # (offline unit tests) funding stays 0 — behaviour unchanged. COST convention: >0 = paid.
+        from src.backtest.config import load_backtest_config
+        from src.backtest.costs import FundingModel
+
+        self._funding = FundingModel(load_backtest_config().costs)
+        self._funding_source: Callable[[str], list[dict]] | None = None
+        self._position_funding: dict[str, float] = {}  # symbol → accrued funding (cost convention)
+        self._funding_watermark: dict[str, int] = {}  # symbol → last settled funding-event ts
+        # Trailing-stop simulation (parity with the backtest, which ratchets the stop with the peak
+        # favorable price — `src/backtest/engine.py`; and with live, where the trail is an
+        # exchange-native order). Without it paper never trails, so momentum winners (lead_lag,
+        # whose PRIMARY exit IS the trail) round-trip from profit to loss instead of trailing out.
+        self._trail_dist: dict[str, float] = {}  # symbol → trailing distance (price units); 0 = off
+        self._peak: dict[str, float] = {}  # symbol → best favorable price (high=long / low=short)
         # Realized PnL accumulated across the session (from CLOSED trades), fed to the loss
         # breakers so they can actually trip (Section 17). Per-symbol for the per-symbol breaker.
         self._realized_pnl: float = 0.0
@@ -176,10 +196,12 @@ class PaperTradingEngine:
             mark = price_of(sym)
             mark = pos.entry_price if mark is None else float(mark)
             strat, entry_ts = self._position_meta.get(sym, ("", 0))
+            funding = self._position_funding.get(sym, 0.0)  # cost convention; net into unrealized
             out.append({
                 "symbol": sym, "strategy": strat, "side": pos.side, "qty": pos.qty,
                 "entry_price": pos.entry_price, "mark_price": mark, "notional": pos.notional,
-                "unrealized_pnl": pos.side * (mark - pos.entry_price) * pos.qty,
+                "unrealized_pnl": pos.side * (mark - pos.entry_price) * pos.qty - funding,
+                "funding": funding,
                 "entry_ts": entry_ts,
             })
         return out
@@ -209,13 +231,48 @@ class PaperTradingEngine:
             self._week_key = week
             self._week_start_realized = self._realized_pnl
 
+    def set_funding_source(self, source: Callable[[str], list[dict]] | None) -> None:
+        """Wire the per-symbol funding-event lookup (``[{"ts", "funding_rate"}, ...]``) so open
+        paper positions accrue funding exactly as the backtest does. The live run sources it from
+        the feed; a real-venue (demo/testnet/live) run leaves it unset — the exchange charges
+        funding itself, reflected in real account equity, so simulating it would double-count."""
+        self._funding_source = source
+
+    def _charge_open_funding(self, now_ts: int) -> None:
+        """Settle every funding event in ``(watermark, now_ts]`` (and after entry) onto each open
+        position — mirrors the basket / backtest funding helper. Iterating the bounded event window
+        each call is robust to the live feed's funding series sliding/rebuilding under us."""
+        if self._funding_source is None:
+            return
+        for sym, pos in self._open_positions.items():
+            try:
+                events = self._funding_source(sym) or []
+            except Exception:  # noqa: BLE001 - a feed hiccup must never crash the trading loop
+                continue
+            last = self._funding_watermark.get(sym, 0)  # last settled funding ts (init = entry ts)
+            for ev in events:
+                ets = int(ev["ts"])
+                if last < ets <= now_ts:
+                    self._position_funding[sym] = self._position_funding.get(sym, 0.0) + (
+                        self._funding.payment(
+                            side=pos.side,
+                            notional=pos.notional,
+                            funding_rate=float(ev["funding_rate"]),
+                        )
+                    )
+                    last = ets
+            self._funding_watermark[sym] = last
+
     def simulate_paper_exits(
         self, price_of, now_ts: int, session: PaperSession, *, bar_iv: int = 0
     ) -> int:
-        """Close held PAPER positions whose bracket (stop / take-profit) or time-stop is breached
-        by the latest bar — the exchange-side exit a real venue would fill but the offline
-        SimulatedVenue does not. Without this a per-symbol paper position (exit_move_frac=0) opens
-        and is held forever, so the session books no closed trades and shows no realized P&L.
+        """Close held PAPER positions whose bracket (stop / trailing-stop / take-profit) or
+        time-stop is breached by the latest bar — the exchange-side exit a real venue would fill but
+        the offline SimulatedVenue does not. Without this a per-symbol paper position
+        (exit_move_frac=0) opens and is held forever, so the session books no closed trades and no
+        realized P&L. The trailing stop ratchets the effective stop with the peak favorable price
+        (parity with the backtest / a live exchange-native trailing order), and exits carry a
+        distinct ``trailing_stop`` reason so trail-outs are visible vs hard stops.
 
         ``price_of(symbol)`` returns the latest close; a close-based check is conservative (it can
         miss an intrabar wick) but never invents a fill. Returns the number of positions closed.
@@ -223,6 +280,9 @@ class PaperTradingEngine:
         # Roll the daily/weekly loss windows for THIS bar before booking any exit, so a loss closed
         # on the first bar of a new day counts toward the new day's daily-loss breaker (B2/R3).
         self._roll_loss_windows(now_ts)
+        # Accrue funding on every held position crossing a funding timestamp this bar (parity with
+        # the backtest), BEFORE marking exits so a leg that closes here realizes its full funding.
+        self._charge_open_funding(now_ts)
         closed = 0
         for sym in list(self._open_positions):
             price = price_of(sym)
@@ -231,15 +291,23 @@ class PaperTradingEngine:
             price = float(price)
             pos = self._open_positions[sym]
             stop, tp, hold_bars, entry_ts = self._exit_levels.get(sym, (0.0, 0.0, 0, 0))
+            trail_dist = self._trail_dist.get(sym, 0.0)
+            # Peak = best favorable price BEFORE this close (ratcheted at the end of the tick), so a
+            # fresh favorable close can't tighten the very stop it's then tested against — mirrors
+            # the backtest's no-look-ahead ordering (src/backtest/engine.py).
+            peak = self._peak.get(sym, pos.entry_price)
             reason: str | None = None
             if pos.side > 0:
-                if stop > 0 and price <= stop:
-                    reason = "stop"
+                # Effective stop = fixed stop ratcheted UP by the trailing stop (peak − trail_dist).
+                eff_stop = max(stop, peak - trail_dist) if (trail_dist > 0 and stop > 0) else stop
+                if eff_stop > 0 and price <= eff_stop:
+                    reason = "trailing_stop" if eff_stop > stop else "stop"
                 elif tp > 0 and price >= tp:
                     reason = "take_profit"
-            else:  # short: stop is ABOVE entry, take-profit BELOW
-                if stop > 0 and price >= stop:
-                    reason = "stop"
+            else:  # short: stop is ABOVE entry, take-profit BELOW; the trail ratchets it DOWN
+                eff_stop = min(stop, peak + trail_dist) if (trail_dist > 0 and stop > 0) else stop
+                if eff_stop > 0 and price >= eff_stop:
+                    reason = "trailing_stop" if eff_stop < stop else "stop"
                 elif tp > 0 and price <= tp:
                     reason = "take_profit"
             if (
@@ -248,6 +316,9 @@ class PaperTradingEngine:
             ):
                 reason = "time_stop"
             if reason is None:
+                # No exit → ratchet the peak with this close for the NEXT tick's trailing stop.
+                if trail_dist > 0:
+                    self._peak[sym] = max(peak, price) if pos.side > 0 else min(peak, price)
                 continue
             self._book_paper_exit(sym, price, reason, now_ts, session)
             closed += 1
@@ -267,6 +338,11 @@ class PaperTradingEngine:
             return
         self._position_meta.pop(symbol, None)
         self._exit_levels.pop(symbol, None)
+        # Funding accrued while held (cost convention) — realized into pnl, like the backtest.
+        funding = self._position_funding.pop(symbol, 0.0)
+        self._funding_watermark.pop(symbol, None)
+        self._trail_dist.pop(symbol, None)
+        self._peak.pop(symbol, None)
         self._venue.close_position(symbol)  # drop mirror + cancel the resting bracket legs
         exit_fee = self._exit_fee(symbol, exit_price * pos.qty)
         raw_pnl = (exit_price - pos.entry_price) * pos.side * pos.qty
@@ -277,15 +353,16 @@ class PaperTradingEngine:
         )
         if trade is not None:
             total_fee = trade.fee + exit_fee  # entry fee (already on the record) + exit fee
-            pnl = raw_pnl - total_fee
+            pnl = raw_pnl - total_fee - funding
             trade.exit_price = exit_price
             trade.exit_reason = exit_reason
             trade.exit_ts = now_ts
             trade.fee = total_fee
+            trade.funding = funding
             trade.pnl = pnl
             trade.pnl_r = pnl / pos.risk_amount if pos.risk_amount > 0 else 0.0
         else:  # no open record (shouldn't happen in the live path) — book a standalone close
-            pnl = raw_pnl - exit_fee
+            pnl = raw_pnl - exit_fee - funding
             strat, entry_ts = self._position_meta.get(symbol, ("", 0))
             session.trades.append(PaperTrade(
                 trade_id=str(uuid.uuid4())[:8], symbol=symbol, strategy=strat, side=pos.side,
@@ -294,7 +371,7 @@ class PaperTradingEngine:
                 exit_ts=now_ts, exit_price=exit_price, exit_reason=exit_reason, fee=exit_fee,
                 slippage_cost=0.0, pnl=pnl, pnl_r=pnl / pos.risk_amount if pos.risk_amount > 0 else 0.0,
                 has_exchange_side_stop=True, execution_route="taker", spread_bps_at_entry=0.0,
-                slippage_frac=0.0,
+                slippage_frac=0.0, funding=funding,
             ))
         self._realized_pnl += pnl
         self._per_symbol_pnl[symbol] = self._per_symbol_pnl.get(symbol, 0.0) + pnl
@@ -632,10 +709,24 @@ class PaperTradingEngine:
                 stop_price, tp_price, int(getattr(candidate, "hold_bars", 0) or 0),
                 int(getattr(candidate, "decision_ts", 0) or 0),
             )
+            # Start funding accrual at entry: 0 booked, watermark = entry ts so only funding posted
+            # strictly after entry is settled (mirrors the backtest's entry-anchored window).
+            self._position_funding[candidate.symbol] = 0.0
+            self._funding_watermark[candidate.symbol] = now_ts
+            # Trailing-stop state: distance in price units (trail_frac × entry); peak seeded at
+            # entry (matches the backtest's `peak=entry_price`). trail_frac 0 ⇒ no trailing here.
+            self._trail_dist[candidate.symbol] = (
+                float(getattr(candidate, "trail_frac", 0.0) or 0.0) * entry_price
+            )
+            self._peak[candidate.symbol] = entry_price
         else:
             self._open_positions.pop(candidate.symbol, None)
             self._position_meta.pop(candidate.symbol, None)
             self._exit_levels.pop(candidate.symbol, None)
+            self._position_funding.pop(candidate.symbol, None)
+            self._funding_watermark.pop(candidate.symbol, None)
+            self._trail_dist.pop(candidate.symbol, None)
+            self._peak.pop(candidate.symbol, None)
             self._venue.positions.pop(candidate.symbol, None)
             # The trade closed → its PnL is REALIZED. Accumulate it for the loss breakers so a
             # losing session halts new entries on the next candidate (Section 17).

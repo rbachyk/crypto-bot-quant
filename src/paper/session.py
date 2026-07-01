@@ -35,7 +35,7 @@ class PaperTrade:
     entry_ts: int
     exit_ts: int
     exit_price: float
-    exit_reason: str  # "stop" | "take_profit" | "time_stop" | "kill_switch" | "open"
+    exit_reason: str  # "stop"|"trailing_stop"|"take_profit"|"time_stop"|"kill_switch"|"open"
     fee: float
     slippage_cost: float
     pnl: float
@@ -44,6 +44,9 @@ class PaperTrade:
     execution_route: str  # "maker" | "taker"
     spread_bps_at_entry: float
     slippage_frac: float
+    # Funding booked into pnl, COST convention (>0 = paid, <0 = carry received). Already in pnl;
+    # carried separately so it survives persistence (basket legs accrue it; per-trade engine: 0).
+    funding: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -70,6 +73,7 @@ class PaperTrade:
             "execution_route": self.execution_route,
             "spread_bps_at_entry": self.spread_bps_at_entry,
             "slippage_frac": self.slippage_frac,
+            "funding": self.funding,
         }
 
 

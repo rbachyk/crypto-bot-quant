@@ -368,3 +368,182 @@ def test_basket_halt_check_honours_global_kill_switch(tmp_path) -> None:
     # caller's own stop still works independently of the kill switch.
     assert _halt_check(lambda: True, kill)() is True
     assert _halt_check(None, kill)() is False
+
+
+def test_paper_engine_accrues_funding_on_held_position() -> None:
+    """Parity with the backtest (and the real exchange): an open per-trade-engine position accrues
+    funding at every funding timestamp it is held across, so paper/live directional P&L (e.g.
+    lead_lag held for hours) is NET of funding instead of overstated. Funding lands in the live
+    open-positions snapshot (netted into unrealized, surfaced separately) AND in the closed trade's
+    pnl + funding field. Only funding posted AFTER entry is settled."""
+    from src.paper.engine import PaperTradingEngine
+    from src.paper.session import PaperSession, PaperTrade
+    from src.risk.portfolio import Position
+
+    def approx(a: float, b: float) -> bool:
+        return abs(a - b) < 1e-9
+
+    eng = PaperTradingEngine()
+    sess = PaperSession(session_id="t")
+    sym = "ETH/USDT:USDT"
+    # Seed a LONG held position at entry_ts=1_000 (mirrors process_candidates' open bookkeeping,
+    # including the funding watermark anchored to entry so pre-entry funding is never charged).
+    eng._open_positions[sym] = Position(
+        symbol=sym, side=1, qty=2.0, entry_price=100.0, risk_amount=10.0,
+        beta_to_btc=1.0, regime="R1",
+    )
+    eng._position_meta[sym] = ("lead_lag_xasset", 1_000)
+    eng._exit_levels[sym] = (95.0, 110.0, 0, 1_000)
+    eng._position_funding[sym] = 0.0
+    eng._funding_watermark[sym] = 1_000  # entry ts
+    sess.trades.append(PaperTrade(
+        trade_id="eth", symbol=sym, strategy="lead_lag_xasset", side=1, qty=2.0,
+        entry_price=100.0, stop_price=95.0, tp_price=110.0, regime="R1", session=0,
+        decision_ts=1_000, entry_ts=1_000, exit_ts=1_000, exit_price=100.0, exit_reason="open",
+        fee=0.2, slippage_cost=0.0, pnl=-0.2, pnl_r=0.0, has_exchange_side_stop=True,
+        execution_route="maker", spread_bps_at_entry=0.0, slippage_frac=0.0,
+    ))
+
+    # notional = 2×100 = 200; payment = rate×notional (funding_multiplier 1.0). Positive funding ⇒
+    # a LONG pays (cost > 0). One event before entry (ignored) + two after (0.2 each).
+    events = {sym: [
+        {"ts": 500, "funding_rate": 0.01},      # before entry → never settled
+        {"ts": 2_000, "funding_rate": 0.001},   # 0.001 × 200 = 0.2 paid
+        {"ts": 2_500, "funding_rate": 0.001},   # another 0.2 paid
+    ]}
+    eng.set_funding_source(lambda s: events.get(s, []))
+
+    # Tick inside the bracket at 2_000: charges the 2_000 event, no exit.
+    assert eng.simulate_paper_exits(lambda _s: 102.0, 2_000, sess) == 0
+    assert approx(eng._position_funding[sym], 0.2)
+    snap = eng.open_positions(lambda _s: 102.0)[0]
+    assert approx(snap["funding"], 0.2)
+    # directional = +1×(102−100)×2 = 4.0; unrealized nets funding → 4.0 − 0.2 = 3.8
+    assert approx(snap["unrealized_pnl"], 3.8)
+
+    # Next tick breaches TP (111 ≥ 110) at 2_500: charges the 2_500 event THEN closes in place.
+    assert eng.simulate_paper_exits(lambda _s: 111.0, 2_500, sess) == 1
+    assert sym not in eng._open_positions and sym not in eng._position_funding
+    t = sess.trades[0]
+    assert t.exit_reason == "take_profit"
+    assert approx(t.funding, 0.4)  # both post-entry events realized
+    # raw = +1×(111−100)×2 = 22; pnl = 22 − total_fee − funding, i.e. funding REDUCES realized pnl.
+    assert approx(t.pnl, 22.0 - t.fee - 0.4)
+
+
+def test_paper_engine_no_funding_source_is_inert() -> None:
+    """Without a wired funding source (offline tests / pre-deploy), funding stays 0 — behaviour is
+    exactly as before the funding-parity change (no accidental charges)."""
+    from src.paper.engine import PaperTradingEngine
+    from src.paper.session import PaperSession, PaperTrade
+    from src.risk.portfolio import Position
+
+    eng = PaperTradingEngine()
+    sess = PaperSession(session_id="t")
+    sym = "BTC/USDT:USDT"
+    eng._open_positions[sym] = Position(
+        symbol=sym, side=1, qty=1.0, entry_price=100.0, risk_amount=10.0,
+        beta_to_btc=1.0, regime="R1",
+    )
+    eng._position_meta[sym] = ("lead_lag_xasset", 1_000)
+    eng._exit_levels[sym] = (95.0, 110.0, 0, 1_000)
+    sess.trades.append(PaperTrade(
+        trade_id="btc", symbol=sym, strategy="lead_lag_xasset", side=1, qty=1.0,
+        entry_price=100.0, stop_price=95.0, tp_price=110.0, regime="R1", session=0,
+        decision_ts=1_000, entry_ts=1_000, exit_ts=1_000, exit_price=100.0, exit_reason="open",
+        fee=0.1, slippage_cost=0.0, pnl=-0.1, pnl_r=0.0, has_exchange_side_stop=True,
+        execution_route="maker", spread_bps_at_entry=0.0, slippage_frac=0.0,
+    ))
+    eng.simulate_paper_exits(lambda _s: 111.0, 2_000, sess)  # TP breach, no funding source
+    assert sess.trades[0].funding == 0.0
+
+
+def test_paper_engine_trailing_stop_locks_in_profit() -> None:
+    """Parity with the backtest (and live's exchange-native trailing order): the paper engine
+    ratchets the stop with the peak favorable price and exits on reversal via a DISTINCT
+    ``trailing_stop`` reason — so a momentum winner (lead_lag's primary exit IS the trail) locks in
+    profit instead of round-tripping to a loss / the fixed stop. Peak is 'before this tick' (no
+    look-ahead): a fresh favorable close can't tighten the stop it's then tested against."""
+    from src.paper.engine import PaperTradingEngine
+    from src.paper.session import PaperSession, PaperTrade
+    from src.risk.portfolio import Position
+
+    def _seed(eng, sess, sym, side, stop, tp, trail_dist) -> None:
+        eng._open_positions[sym] = Position(
+            symbol=sym, side=side, qty=2.0, entry_price=100.0, risk_amount=10.0,
+            beta_to_btc=1.0, regime="R1",
+        )
+        eng._position_meta[sym] = ("lead_lag_xasset", 1_000)
+        eng._exit_levels[sym] = (stop, tp, 0, 1_000)  # hold_bars 0 → time-stop disabled here
+        eng._trail_dist[sym] = trail_dist
+        eng._peak[sym] = 100.0  # seeded at entry, like the backtest
+        sess.trades.append(PaperTrade(
+            trade_id=sym[:3], symbol=sym, strategy="lead_lag_xasset", side=side, qty=2.0,
+            entry_price=100.0, stop_price=stop, tp_price=tp, regime="R1", session=0,
+            decision_ts=1_000, entry_ts=1_000, exit_ts=1_000, exit_price=100.0, exit_reason="open",
+            fee=0.2, slippage_cost=0.0, pnl=-0.2, pnl_r=0.0, has_exchange_side_stop=True,
+            execution_route="maker", spread_bps_at_entry=0.0, slippage_frac=0.0,
+        ))
+
+    # --- LONG: rises to 108, pulls back; trail (dist 3) exits at 104 for a PROFIT, not the 95 stop.
+    eng = PaperTradingEngine()
+    sess = PaperSession(session_id="t")
+    _seed(eng, sess, "ETH/USDT:USDT", 1, 95.0, 200.0, 3.0)
+    assert eng.simulate_paper_exits(lambda _s: 108.0, 2_000, sess) == 0  # peak → 108
+    assert eng.simulate_paper_exits(lambda _s: 106.0, 3_000, sess) == 0  # eff_stop 105, held
+    assert eng.simulate_paper_exits(lambda _s: 104.0, 4_000, sess) == 1  # 104 ≤ 105 → trail out
+    t = sess.trades[0]
+    assert t.exit_reason == "trailing_stop"      # distinct reason, not "stop"
+    assert t.exit_price == 104.0 and t.pnl > 0   # locked in profit (+1×(104−100)×2 − fees)
+
+    # --- SHORT (the lead_lag case): falls to 95, bounces; trail exits at 99 for a small profit
+    #     instead of riding up to the 105 fixed stop (a loss).
+    eng = PaperTradingEngine()
+    sess = PaperSession(session_id="t")
+    _seed(eng, sess, "SOL/USDT:USDT", -1, 105.0, 1.0, 3.0)
+    assert eng.simulate_paper_exits(lambda _s: 95.0, 2_000, sess) == 0  # peak (low) → 95
+    assert eng.simulate_paper_exits(lambda _s: 96.0, 3_000, sess) == 0  # eff_stop 98, held
+    assert eng.simulate_paper_exits(lambda _s: 99.0, 4_000, sess) == 1  # 99 ≥ 98 → trail out
+    t = sess.trades[0]
+    assert t.exit_reason == "trailing_stop"
+    assert t.exit_price == 99.0 and t.pnl > 0    # +1×(100−99)×2 − fees
+
+    # --- guardrail: a fresh peak on THIS tick must not close it (no look-ahead) ---
+    eng = PaperTradingEngine()
+    sess = PaperSession(session_id="t")
+    _seed(eng, sess, "BTC/USDT:USDT", 1, 95.0, 200.0, 3.0)
+    # jump straight to 120: eff_stop uses peak-before (100) → 97, price 120 well above → held,
+    # peak then ratchets to 120. A later 118 (≥ 120−3=117) holds; 116 (< 117) trails out.
+    assert eng.simulate_paper_exits(lambda _s: 120.0, 2_000, sess) == 0
+    assert eng.simulate_paper_exits(lambda _s: 118.0, 3_000, sess) == 0
+    assert eng.simulate_paper_exits(lambda _s: 116.0, 4_000, sess) == 1
+    assert sess.trades[0].exit_reason == "trailing_stop"
+
+
+def test_paper_engine_no_trailing_when_trail_dist_zero() -> None:
+    """trail_dist 0 (trailing disabled / not wired) → behaviour is exactly the fixed-stop path: a
+    pullback that stays above the fixed stop does NOT close, and a real breach reads 'stop'."""
+    from src.paper.engine import PaperTradingEngine
+    from src.paper.session import PaperSession, PaperTrade
+    from src.risk.portfolio import Position
+
+    eng = PaperTradingEngine()
+    sess = PaperSession(session_id="t")
+    sym = "ETH/USDT:USDT"
+    eng._open_positions[sym] = Position(
+        symbol=sym, side=1, qty=2.0, entry_price=100.0, risk_amount=10.0,
+        beta_to_btc=1.0, regime="R1",
+    )
+    eng._position_meta[sym] = ("lead_lag_xasset", 1_000)
+    eng._exit_levels[sym] = (95.0, 200.0, 0, 1_000)  # no _trail_dist entry → 0
+    sess.trades.append(PaperTrade(
+        trade_id="eth", symbol=sym, strategy="lead_lag_xasset", side=1, qty=2.0,
+        entry_price=100.0, stop_price=95.0, tp_price=200.0, regime="R1", session=0,
+        decision_ts=1_000, entry_ts=1_000, exit_ts=1_000, exit_price=100.0, exit_reason="open",
+        fee=0.2, slippage_cost=0.0, pnl=-0.2, pnl_r=0.0, has_exchange_side_stop=True,
+        execution_route="maker", spread_bps_at_entry=0.0, slippage_frac=0.0,
+    ))
+    assert eng.simulate_paper_exits(lambda _s: 108.0, 2_000, sess) == 0
+    assert eng.simulate_paper_exits(lambda _s: 104.0, 3_000, sess) == 0  # would trail if enabled
+    assert eng.simulate_paper_exits(lambda _s: 94.0, 4_000, sess) == 1   # real fixed-stop breach
+    assert sess.trades[0].exit_reason == "stop"

@@ -468,6 +468,15 @@ class LiveCandidateFeed:
         bars = self._reader.ohlcv(symbol)
         return float(bars[-1]["close"]) if bars else None
 
+    def funding_events(self, symbol: str) -> list[dict]:
+        """Funding events ({ts, funding_rate}) for a symbol from the rolling reader — lets the
+        paper engine accrue funding on held positions exactly as the basket loop / backtest do
+        (the funding series is refreshed on the point-in-time cadence, like funding_carry uses)."""
+        return [
+            {"ts": int(f["ts"]), "funding_rate": float(f.get("funding_rate", 0.0))}
+            for f in self._reader.series(symbol, FUNDING)
+        ]
+
     def _sleep_or_stop(self) -> bool:
         """Wait ``poll_sec`` (or 1s if not polling) in 1s slices so a dashboard Stop is honoured
         fast. Returns True if the operator pressed Stop during the wait."""

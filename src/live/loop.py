@@ -596,6 +596,11 @@ def run_replay_session(
             data_cfg, timeframe=tf, symbols=syms, candidate_id=candidate_id, settings=settings
         )
         loop = LiveLoop(mode=mode, settings=settings, guard=guard, data_manager=data_manager)
+    # Accrue funding on open positions in PAPER mode (parity with the backtest, which charges
+    # funding every funding timestamp, and with the real exchange). A real venue debits/credits
+    # funding itself — reflected in account equity — so only wire the simulated source for paper.
+    if mode == "paper":
+        loop.engine.set_funding_source(getattr(feed, "funding_events", None))
     return loop.run(
         feed,
         # Unique per run (timestamp + short random) so a restart/re-Start NEVER deletes the prior
