@@ -13,6 +13,12 @@ execution:
 
   # Default execution preference (Section 18): maker-first when urgency is low,
   # taker only when the expected edge justifies the cost.
+  #   maker_first        — POST-ONLY limit (exchange-enforced maker); an entry that would
+  #                        cross the book or is unfilled at the observation window end is a
+  #                        clean non-fill (no escalation).
+  #   passive_then_taker — POST-ONLY first; the unfilled remainder (or a crossing rejection)
+  #                        escalates ONCE to a taker market order at the window end.
+  #   taker              — market order immediately.
   default_entry_style: "maker_first"   # maker_first | taker | passive_then_taker
 
   # Hard execution blockers (Section 18) — also enforced as setup hard blockers.

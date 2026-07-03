@@ -21,6 +21,7 @@ live-safety condition (settings + gates + sign-off) enforced at the venue/guard 
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -192,10 +193,17 @@ class LiveLoop:
         # in replay paper the engine closes positions itself (exit_move_frac). ``_bar_iv`` is the
         # bar interval, inferred from the spacing of the feed's decision timestamps.
         self._open_age: dict[str, tuple[int, int]] = {}  # symbol -> (entry_decision_ts, hold_bars)
+        # Last known hold horizon per symbol, kept even after the age entry is retired — so a
+        # position RE-ADOPTED by reconciliation (restart / transient fetch-drop) can re-arm its
+        # time-stop with the adoption time as the age baseline (M15) instead of never expiring.
+        self._hold_by_symbol: dict[str, int] = {}
         self._bar_iv: int = 0
         self._prev_decision_ts: int | None = None
+        # Latest-price lookup (set by run()) — the fallback exit mark when an exchange-closed
+        # position's real exit fill can't be read from the account's execution history (H7).
+        self._price_of: Callable[[str], float | None] | None = None
 
-    def _reconcile_live(self, session: PaperSession) -> bool:
+    def _reconcile_live(self, session: PaperSession, decision_ts: int = 0) -> bool:
         """Per-tick reconciliation against the REAL exchange book (real venues only, Section 7).
 
         Re-pulls live orders + positions, syncs the venue mirror to the owned real state (so a
@@ -215,6 +223,8 @@ class LiveLoop:
             _log.warning("live_reconcile_fetch_error", exc_info=True)
             return False
         own = OwnershipPolicy(self.settings)
+        now_ts = decision_ts if decision_ts > 0 else int(time.time() * 1000)
+        known_before = set(venue.positions)
         foreign_orders = sorted(o for o, v in exch_orders.items() if not own.is_own(v.client_id))
         foreign_positions = sorted(s for s, p in exch_positions.items() if not p.owned)
         # Refresh/adopt OWNED items from the exchange (real stop/TP protection + positions opened
@@ -224,6 +234,20 @@ class LiveLoop:
             if p.owned:
                 venue.positions[sym] = p
                 self._absent_ticks.pop(sym, None)
+                if sym not in known_before and sym not in self._open_age:
+                    # M15: a position (re-)adopted by reconciliation re-arms its bot-side
+                    # time-stop with the ADOPTION time as the age baseline — the true entry time
+                    # is unknown after a restart/drop, and without re-arming it would never
+                    # time-stop. The hold horizon comes from the last known hold_bars for the
+                    # symbol; a startup-adopted position with no known horizon is logged only.
+                    hold = self._hold_by_symbol.get(sym, 0)
+                    if hold > 0:
+                        self._open_age[sym] = (now_ts, hold)
+                        _log.info(
+                            "time_stop_rearmed_on_adoption", symbol=sym, hold_bars=hold, ts=now_ts
+                        )
+                    else:
+                        _log.info("adopted_position_without_time_stop", symbol=sym)
                 if not p.has_exchange_side_stop():
                     # Log (not alert) so a multi-day loop can't flood the alert sink every tick.
                     _log.warning("live_owned_position_unprotected", symbol=sym)
@@ -237,15 +261,17 @@ class LiveLoop:
                 continue
             self._absent_ticks[sym] = self._absent_ticks.get(sym, 0) + 1
             if self._absent_ticks[sym] >= _ABSENT_DROP_TICKS:
-                venue.positions.pop(sym, None)
-                # Also drop it from the ENGINE's risk mirror so the Section-17 concurrency / heat /
-                # net-beta caps release the slot — otherwise they over-count forever in a real run
-                # (the engine's simulated exit path never fires when exits are exchange-side). Drop
-                # the position's metadata + bracket levels too, so they don't leak unbounded.
-                self.engine._open_positions.pop(sym, None)
-                self.engine._position_meta.pop(sym, None)
-                self.engine._exit_levels.pop(sym, None)
+                pos = venue.positions.pop(sym, None)
                 self._absent_ticks.pop(sym, None)
+                self._open_age.pop(sym, None)
+                # H7: this position closed ON THE EXCHANGE (its resident SL/TP/trailing fired) —
+                # book the realized exit into the engine at the REAL exit price/fee (from the
+                # account's execution history, with a mark-price fallback), so persisted
+                # net_pnl / win_rate / expectancy_r and the loss breakers reflect it instead of
+                # the entry's trade record staying "open" with pnl = -entry_fee forever. Booking
+                # also prunes the engine's Section-17 risk mirrors (concurrency/heat/net-beta),
+                # which were previously popped here without booking anything.
+                self._book_exchange_exit(sym, pos, session, now_ts, reason="exchange_exit")
         # Sync owned resting orders to the real book (drop our filled/cancelled orders the exchange
         # no longer lists, so the mirror doesn't grow unbounded over a multi-day run).
         venue.open_orders = {
@@ -268,6 +294,71 @@ class LiveLoop:
             )
             return True
         return False
+
+    def _book_exchange_exit(
+        self,
+        sym: str,
+        pos: Any | None,
+        session: PaperSession,
+        now_ts: int,
+        *,
+        reason: str,
+    ) -> None:
+        """Book a position exit that happened ON THE EXCHANGE into the engine (H7).
+
+        Exit price/fee sourcing (most reliable first): the venue reads the account's own
+        close-side executions since entry (``fetch_exit_fill`` — Bybit's /v5/execution/list via
+        ccxt ``fetch_my_trades``, which records SL/TP/trailing and reduce-only market fills);
+        if unavailable it falls back to the latest mark/close price (fee unknown → 0) with a
+        loud log, and lastly to the entry price (pnl ≈ -fees). A position with no open trade
+        record (adopted at startup from a prior process) clears its mirrors without fabricating
+        a trade — the engine logs it and books nothing."""
+        engine_pos = self.engine._open_positions.get(sym)
+        trade = next(
+            (t for t in reversed(session.trades) if t.symbol == sym and t.exit_reason == "open"),
+            None,
+        )
+        if trade is None:
+            # No known entry (adopted position) — prune engine mirrors, never fabricate (H7).
+            self.engine.book_exchange_exit(sym, 0.0, 0.0, now_ts, session, exit_reason=reason)
+            return
+        side = (
+            engine_pos.side
+            if engine_pos is not None
+            else (pos.side if pos is not None else trade.side)
+        )
+        entry_ts = self.engine._position_meta.get(sym, ("", 0))[1] or trade.entry_ts
+        got = None
+        fetch = getattr(self.venue, "fetch_exit_fill", None)
+        if callable(fetch):
+            got = fetch(sym, side, since_ts=entry_ts or None)
+        if got is not None:
+            exit_price, exit_fee, source = float(got[0]), float(got[1]), "executions"
+        else:
+            mark = self._price_of(sym) if self._price_of is not None else None
+            if mark is not None:
+                exit_price, exit_fee, source = float(mark), 0.0, "mark_price"
+            else:
+                exit_price, exit_fee, source = float(trade.entry_price), 0.0, "entry_price"
+        if source != "executions":
+            _log.warning(
+                "exchange_exit_price_fallback", symbol=sym, source=source, reason=reason,
+                hint="exit fill not visible in account executions — booked at " + source,
+            )
+        booked = self.engine.book_exchange_exit(
+            sym, exit_price, exit_fee, now_ts, session, exit_reason=reason
+        )
+        if booked:
+            _log.info(
+                "exchange_exit_booked", symbol=sym, reason=reason,
+                exit_price=exit_price, price_source=source, ts=now_ts,
+            )
+            session.reconciliation_events.append(
+                {
+                    "phase": "exchange_exit", "symbol": sym, "reason": reason,
+                    "exit_price": exit_price, "price_source": source, "decision_ts": now_ts,
+                }
+            )
 
     def reconcile_startup(self) -> StartupReconResult:
         """Reconcile the REAL exchange book against this bot before any tick (Section 7).
@@ -298,6 +389,9 @@ class LiveLoop:
         for pin in group:
             sym = pin.candidate.symbol
             hold_bars = int(getattr(pin.candidate, "hold_bars", 0) or 0)
+            if hold_bars > 0:
+                # Remembered past retirement so a re-adopted position can re-arm (M15).
+                self._hold_by_symbol[sym] = hold_bars
             if hold_bars > 0 and sym in self.venue.positions and sym not in self._open_age:
                 self._open_age[sym] = (decision_ts, hold_bars)
 
@@ -314,12 +408,20 @@ class LiveLoop:
         for sym, (entry_ts, hold_bars) in list(self._open_age.items()):
             if decision_ts - entry_ts >= hold_bars * self._bar_iv:
                 closed = self.venue.close_position(sym)
+                if not closed:
+                    # The reduce-only close FAILED (M15: close_position no longer pretends
+                    # success) — keep the age entry so the time-stop retries next bar.
+                    _log.warning("live_time_stop_close_failed", symbol=sym, ts=decision_ts)
+                    continue
                 self._open_age.pop(sym, None)
-                if closed:
-                    _log.info("live_time_stop", symbol=sym, held_bars=hold_bars, ts=decision_ts)
-                    session.reconciliation_events.append(
-                        {"phase": "time_stop", "symbol": sym, "decision_ts": decision_ts}
-                    )
+                _log.info("live_time_stop", symbol=sym, held_bars=hold_bars, ts=decision_ts)
+                session.reconciliation_events.append(
+                    {"phase": "time_stop", "symbol": sym, "decision_ts": decision_ts}
+                )
+                # H7: book the realized exit (real close fill from the account's executions,
+                # mark-price fallback) — the time-stop previously market-closed but booked
+                # nothing, leaving the trade record "open" forever.
+                self._book_exchange_exit(sym, None, session, decision_ts, reason="time_stop")
 
     def run(
         self,
@@ -346,6 +448,7 @@ class LiveLoop:
         # below is only a fallback for callers that don't know it.
         if bar_iv > 0:
             self._bar_iv = bar_iv
+        self._price_of = price_of  # fallback exit mark for exchange-closed positions (H7)
         session = self.engine.new_session(f"{self.env_label}:{session_name}")
         if on_session_start is not None:
             on_session_start(session.session_id)  # e.g. clear a prior crashed run's stale positions
@@ -402,7 +505,7 @@ class LiveLoop:
             # venue (testnet/demo/live) re-pulls the ACTUAL exchange book (detecting foreign items
             # and closes that happened exchange-side); offline paper uses the engine's own mirror.
             tick_halt = (
-                self._reconcile_live(session)
+                self._reconcile_live(session, decision_ts)
                 if self.mode != "paper"
                 else self.engine.run_reconciliation(session)
             )
@@ -518,6 +621,21 @@ def run_replay_session(
     data_cfg = data_cfg or load_data_config()
     syms = symbols or data_cfg.active_symbols()
 
+    # H6: the kill switch must halt BETWEEN bars too, not one-full-bar late. The realtime feed
+    # sleeps between closed bars polling only its stop condition (~1s slices), so we compose the
+    # kill switch into that stop condition — same pattern as the basket loop's _halt_check.
+    # KillSwitch.engaged() caches its result (~1.5s TTL) and its Redis client (M17), so this
+    # polling cadence is cheap and a Redis outage degrades to the file backend without stalling.
+    kill_switch = KillSwitch(settings)
+
+    def _stop_or_killed() -> bool:
+        if should_stop is not None and should_stop():
+            return True
+        try:
+            return kill_switch.engaged()
+        except Exception:  # noqa: BLE001 - a kill-switch read error must never crash the loop
+            return False
+
     # Section 13: any non-paper run (testnet/demo/live) places orders on a real account and
     # may ONLY run strategies validated on real lake data — never synthetic/reference-only.
     require_real_data = mode != "paper"
@@ -574,11 +692,11 @@ def run_replay_session(
             settings=settings,
             max_groups=max_ticks,
             poll_sec=poll_sec,  # >0 → continuous session (waits for new bars)
-            should_stop=should_stop,  # responsive Stop during the wait
+            should_stop=_stop_or_killed,  # responsive Stop AND kill switch during the wait (H6)
             on_cycle=on_heartbeat,  # per-cycle liveness (even when no signal fires)
         )
         # The real-time feed owns the data-manager halt; don't double-poll at the loop level.
-        loop = LiveLoop(mode=mode, settings=settings, guard=guard)
+        loop = LiveLoop(mode=mode, settings=settings, guard=guard, kill_switch=kill_switch)
     elif multi_strategy:
         from src.paper.lake import build_active_lake_inputs
 
@@ -590,12 +708,18 @@ def run_replay_session(
             require_real_data=require_real_data,
         )
         feed = ReplayFeed(inputs)
-        loop = LiveLoop(mode=mode, settings=settings, guard=guard, data_manager=data_manager)
+        loop = LiveLoop(
+            mode=mode, settings=settings, guard=guard,
+            data_manager=data_manager, kill_switch=kill_switch,
+        )
     else:
         feed = replay_feed_from_lake(
             data_cfg, timeframe=tf, symbols=syms, candidate_id=candidate_id, settings=settings
         )
-        loop = LiveLoop(mode=mode, settings=settings, guard=guard, data_manager=data_manager)
+        loop = LiveLoop(
+            mode=mode, settings=settings, guard=guard,
+            data_manager=data_manager, kill_switch=kill_switch,
+        )
     # Accrue funding on open positions in PAPER mode (parity with the backtest, which charges
     # funding every funding timestamp, and with the real exchange). A real venue debits/credits
     # funding itself — reflected in account equity — so only wire the simulated source for paper.
@@ -610,7 +734,7 @@ def run_replay_session(
         session_name=f"{data_cfg.data_version}:{_run_stamp()}",
         max_ticks=max_ticks,
         on_tick=on_tick,
-        should_stop=should_stop,
+        should_stop=_stop_or_killed,
         on_positions=on_positions,
         on_flush=on_flush,
         on_session_start=on_session_start,

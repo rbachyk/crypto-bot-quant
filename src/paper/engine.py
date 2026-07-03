@@ -21,6 +21,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+import structlog
+
 from src.config import Settings, get_settings
 from src.exchange.metadata import MetadataConfig
 from src.execution import (
@@ -52,6 +54,8 @@ from src.risk import (
     load_risk_config,
 )
 from src.risk.portfolio import Position
+
+_log = structlog.get_logger("paper.engine")
 
 
 @dataclass(slots=True)
@@ -218,8 +222,9 @@ class PaperTradingEngine:
         """Snapshot the lifetime realized total at each UTC day / week boundary so the daily/weekly
         loss breakers see only THIS day's / week's realized P&L. Called BEFORE any realized P&L is
         booked for ``ts`` (both the bar's exits and its entries) so a loss closed on the first bar
-        of a new day is attributed to the new day, not snapshotted away from it. The week is aligned
-        to Monday 00:00 UTC (the Unix epoch is a Thursday, so a raw //7d would roll on Thursdays)."""
+        of a new day is attributed to the new day, not snapshotted away from it. The week is
+        aligned to Monday 00:00 UTC (epoch is a Thursday, so a raw //7d would roll on Thursdays).
+        """
         if ts <= 0:
             return
         day = ts // 86_400_000
@@ -369,12 +374,74 @@ class PaperTradingEngine:
                 qty=pos.qty, entry_price=pos.entry_price, stop_price=0.0, tp_price=0.0,
                 regime=pos.regime, session=0, decision_ts=entry_ts, entry_ts=entry_ts or now_ts,
                 exit_ts=now_ts, exit_price=exit_price, exit_reason=exit_reason, fee=exit_fee,
-                slippage_cost=0.0, pnl=pnl, pnl_r=pnl / pos.risk_amount if pos.risk_amount > 0 else 0.0,
+                slippage_cost=0.0, pnl=pnl,
+                pnl_r=pnl / pos.risk_amount if pos.risk_amount > 0 else 0.0,
                 has_exchange_side_stop=True, execution_route="taker", spread_bps_at_entry=0.0,
                 slippage_frac=0.0, funding=funding,
             ))
         self._realized_pnl += pnl
         self._per_symbol_pnl[symbol] = self._per_symbol_pnl.get(symbol, 0.0) + pnl
+
+    def book_exchange_exit(
+        self,
+        symbol: str,
+        exit_price: float,
+        exit_fee: float,
+        now_ts: int,
+        session: PaperSession,
+        *,
+        exit_reason: str = "exchange_exit",
+    ) -> bool:
+        """Book the realized result of a position that closed ON THE EXCHANGE (H7).
+
+        Real-venue exits happen exchange-side (the resident SL/TP/trailing fired, or the
+        bot sent a reduce-only market close for a time-stop) — the engine's simulated exit
+        path never fires, so without this the entry's PaperTrade stays ``exit_reason="open"``
+        with ``pnl = -entry_fee`` forever and every persisted net_pnl / win_rate /
+        expectancy_r is structurally wrong. This CLOSES the existing open trade record in
+        place (real exit price + real exit fee from the caller), feeds the realized P&L to
+        the loss breakers, and prunes every engine mirror — it never places orders (the
+        position is already flat on the exchange) and NEVER fabricates an entry: a position
+        with no open trade record (adopted at startup from a prior process) just clears its
+        mirrors, logs, and returns False."""
+        self._roll_loss_windows(now_ts)
+        pos = self._open_positions.pop(symbol, None)
+        self._position_meta.pop(symbol, None)
+        self._exit_levels.pop(symbol, None)
+        funding = self._position_funding.pop(symbol, 0.0)
+        self._funding_watermark.pop(symbol, None)
+        self._trail_dist.pop(symbol, None)
+        self._peak.pop(symbol, None)
+        trade = next(
+            (t for t in reversed(session.trades)
+             if t.symbol == symbol and t.exit_reason == "open"),
+            None,
+        )
+        if trade is None:
+            _log.warning(
+                "exchange_exit_without_entry_record", symbol=symbol, exit_reason=exit_reason,
+                hint="position adopted from a prior process — mirrors cleared, no trade booked",
+            )
+            return False
+        raw_pnl = (exit_price - trade.entry_price) * trade.side * trade.qty
+        total_fee = trade.fee + exit_fee  # entry fee (already on the record) + real exit fee
+        pnl = raw_pnl - total_fee - funding
+        risk_amount = (
+            pos.risk_amount
+            if pos is not None and pos.risk_amount > 0
+            else abs(trade.entry_price - trade.stop_price) * trade.qty
+        )
+        trade.exit_price = exit_price
+        trade.exit_reason = exit_reason
+        trade.exit_ts = now_ts
+        trade.fee = total_fee
+        trade.funding = funding
+        trade.pnl = pnl
+        trade.pnl_r = pnl / risk_amount if risk_amount > 0 else 0.0
+        # Realized → the loss/drawdown breakers see the booked result (Section 17).
+        self._realized_pnl += pnl
+        self._per_symbol_pnl[symbol] = self._per_symbol_pnl.get(symbol, 0.0) + pnl
+        return True
 
     def process_candidates(
         self,

@@ -330,6 +330,200 @@ def test_startup_reconciliation_clean_paper_is_noop(tmp_path) -> None:
     assert not result.halted
 
 
+# --------------------------------------------------------------------------- #
+# H7: exchange-side exits book realized P&L                                     #
+# --------------------------------------------------------------------------- #
+class ExitFakeCcxt(FakeCcxt):
+    """FakeCcxt that also serves the account's execution history (fetch_my_trades)."""
+
+    def __init__(self, positions=None, my_trades=None) -> None:
+        super().__init__(positions=positions)
+        self.my_trades = my_trades or []
+        self.my_trades_calls: list = []
+
+    def fetch_my_trades(self, symbol, since=None, limit=None):
+        self.my_trades_calls.append((symbol, since))
+        return self.my_trades
+
+
+def _open_trade(sym: str, *, entry_fee: float = 0.5):
+    from src.paper.session import PaperTrade
+
+    return PaperTrade(
+        trade_id="t1", symbol=sym, strategy="lead_lag", side=1, qty=0.01,
+        entry_price=50_000.0, stop_price=49_000.0, tp_price=52_000.0, regime="low_vol_up",
+        session=0, decision_ts=1_000, entry_ts=1_000, exit_ts=0, exit_price=0.0,
+        exit_reason="open", fee=entry_fee, slippage_cost=0.0, pnl=-entry_fee, pnl_r=0.0,
+        has_exchange_side_stop=True, execution_route="maker", spread_bps_at_entry=0.0,
+        slippage_frac=0.0,
+    )
+
+
+def _held_loop(fake, sym: str = "BTC/USDT:USDT"):
+    """A testnet loop holding one owned position with its open trade record — the state
+    right after a live entry filled."""
+    from src.risk.portfolio import Position
+
+    settings = _testnet_settings()
+    venue = CcxtLiveVenue(load_metadata_config(), settings, client=fake)
+    loop = LiveLoop(mode="testnet", venue=venue, settings=settings)
+    session = loop.engine.new_session("t")
+    venue.positions[sym] = VenuePosition(
+        symbol=sym, side=1, qty=0.01, entry_price=50_000.0, owned=True
+    )
+    loop.engine._open_positions[sym] = Position(
+        symbol=sym, side=1, qty=0.01, entry_price=50_000.0,
+        risk_amount=10.0, beta_to_btc=1.0, regime="low_vol_up",
+    )
+    loop.engine._position_meta[sym] = ("lead_lag", 1_000)
+    session.trades.append(_open_trade(sym))
+    return loop, venue, session
+
+
+def test_exchange_side_exit_books_realized_pnl() -> None:
+    """A position closed by its exchange-resident SL/TP is BOOKED at the real exit fill
+    (price + fee from the account's executions) when reconciliation retires it — the trade
+    record no longer stays 'open' with pnl = -entry_fee forever (H7)."""
+    sym = "BTC/USDT:USDT"
+    fake = ExitFakeCcxt(my_trades=[
+        {"side": "sell", "amount": 0.01, "price": 51_000.0, "fee": {"cost": 0.3}},
+    ])
+    loop, venue, session = _held_loop(fake)
+    loop._reconcile_live(session, 2_000)  # absent tick 1 → debounce, still tracked
+    assert session.trades[0].exit_reason == "open"
+    loop._reconcile_live(session, 3_000)  # absent tick 2 → retired + booked
+    t = session.trades[0]
+    assert t.exit_reason == "exchange_exit"
+    assert t.exit_price == 51_000.0 and t.exit_ts == 3_000
+    # pnl = (51000-50000)*0.01 − (0.5 entry fee + 0.3 REAL exit fee)
+    assert t.pnl == pytest.approx(9.2)
+    assert t.pnl_r == pytest.approx(9.2 / 10.0)
+    assert t.fee == pytest.approx(0.8)
+    # The realized result reaches the loss breakers and the mirrors are pruned.
+    assert loop.engine._realized_pnl == pytest.approx(9.2)
+    assert sym not in loop.engine._open_positions and sym not in venue.positions
+    # The execution lookup was entry-anchored (since = the position's entry ts).
+    assert fake.my_trades_calls and fake.my_trades_calls[0] == (sym, 1_000)
+    assert any(e.get("phase") == "exchange_exit" for e in session.reconciliation_events)
+
+
+def test_exchange_exit_falls_back_to_mark_price_without_history() -> None:
+    """When the execution history is unavailable the exit books at the latest mark price
+    (fee unknown → 0) instead of never booking at all."""
+    loop, venue, session = _held_loop(FakeCcxt())  # no fetch_my_trades on this fake
+    loop._price_of = lambda s: 50_500.0
+    loop._reconcile_live(session, 2_000)
+    loop._reconcile_live(session, 3_000)
+    t = session.trades[0]
+    assert t.exit_reason == "exchange_exit" and t.exit_price == 50_500.0
+    assert t.pnl == pytest.approx((50_500.0 - 50_000.0) * 0.01 - 0.5)  # entry fee only
+
+
+def test_time_stop_books_realized_exit() -> None:
+    """The bot-side time-stop books its realized result (real close fill from the account's
+    executions) instead of market-closing and booking nothing (H7)."""
+    sym = "BTC/USDT:USDT"
+    fake = ExitFakeCcxt(my_trades=[
+        {"side": "sell", "amount": 0.01, "price": 50_200.0, "fee": {"cost": 0.2}},
+    ])
+    loop, venue, session = _held_loop(fake)
+    iv = timeframe_ms(TF)
+    loop._bar_iv = iv
+    loop._open_age[sym] = (0, 2)
+    loop._apply_time_stops(2 * iv, session)
+    assert fake.orders and fake.orders[-1]["params"].get("reduceOnly") is True  # real close sent
+    t = session.trades[0]
+    assert t.exit_reason == "time_stop" and t.exit_price == 50_200.0
+    assert t.pnl == pytest.approx((50_200.0 - 50_000.0) * 0.01 - 0.7)
+    assert sym not in loop.engine._open_positions and sym not in loop._open_age
+
+
+def test_adopted_exit_without_entry_record_books_nothing() -> None:
+    """A position adopted at startup (no known entry trade) that closes exchange-side clears
+    the mirrors WITHOUT fabricating a trade record — and never crashes (H7)."""
+    sym = "BTC/USDT:USDT"
+    fake = ExitFakeCcxt(my_trades=[
+        {"side": "sell", "amount": 0.01, "price": 51_000.0, "fee": {"cost": 0.3}},
+    ])
+    settings = _testnet_settings()
+    venue = CcxtLiveVenue(load_metadata_config(), settings, client=fake)
+    loop = LiveLoop(mode="testnet", venue=venue, settings=settings)
+    session = loop.engine.new_session("t")
+    venue.positions[sym] = VenuePosition(  # adopted: no engine mirror, no trade record
+        symbol=sym, side=1, qty=0.01, entry_price=50_000.0, owned=True
+    )
+    loop._reconcile_live(session, 2_000)
+    loop._reconcile_live(session, 3_000)
+    assert session.trades == []  # nothing fabricated
+    assert sym not in venue.positions
+    assert loop.engine._realized_pnl == 0.0
+
+
+def test_readopted_position_rearms_time_stop_from_adoption_time() -> None:
+    """M15: a position re-adopted by reconciliation re-arms its bot-side time-stop with the
+    ADOPTION time as the age baseline (using the symbol's last known hold horizon)."""
+    sym = "ETH/USDT:USDT"
+    settings = _testnet_settings()
+    fake = FakeCcxt(positions=[
+        {"symbol": sym, "side": "long", "contracts": 0.1, "entryPrice": 3_000.0,
+         "stopLossPrice": 2_950.0,
+         "info": {"clientOrderId": f"{_PREFIX}e1", "stopLoss": "2950"}},
+    ])
+    venue = CcxtLiveVenue(load_metadata_config(), settings, client=fake)
+    loop = LiveLoop(mode="testnet", venue=venue, settings=settings)
+    loop._hold_by_symbol[sym] = 3  # the horizon this symbol traded with before the restart/drop
+    session = loop.engine.new_session("t")
+    loop._reconcile_live(session, 5_000)
+    assert loop._open_age[sym] == (5_000, 3)  # re-armed, adoption ts as baseline
+
+
+# --------------------------------------------------------------------------- #
+# H6: the kill switch is honoured between bars (composed into the feed's stop) #
+# --------------------------------------------------------------------------- #
+def test_run_replay_session_composes_kill_switch_into_feed_stop(tmp_path, monkeypatch) -> None:
+    """The realtime feed sleeps between closed bars polling only its stop condition; the
+    session wiring must compose the kill switch into that condition so an engage halts within
+    seconds, not up to one full bar later (H6)."""
+    import src.live.data_manager as dm_mod
+    import src.live.realtime as rt_mod
+    import src.live.websocket_feed as ws_mod
+    from src.live.loop import run_replay_session
+
+    captured: dict = {}
+
+    class _FakeFeed:
+        def __init__(self, *a, **kw) -> None:
+            captured["should_stop"] = kw.get("should_stop")
+
+        def groups(self):
+            return iter(())
+
+    monkeypatch.setattr(rt_mod, "LiveCandidateFeed", _FakeFeed)
+    monkeypatch.setattr(ws_mod, "live_feed_source", lambda *a, **k: object())
+    monkeypatch.setattr(dm_mod, "LiveDataManager", lambda *a, **k: None)
+    monkeypatch.setattr(KillSwitch, "_CACHE_TTL_S", 0.0)  # no read cache in this test
+    settings = Settings(
+        _env_file=None,
+        data_lake_path=tmp_path / "lake",
+        redis_url="redis://127.0.0.1:1/0",  # unreachable → file backend only
+    )
+    result = run_replay_session(
+        _cfg(0, 10 * timeframe_ms(TF)),
+        mode="paper", timeframe=TF, symbols=[SYM],
+        settings=settings, realtime=True, transport="rest", max_ticks=1,
+    )
+    assert not result.halted
+    stop = captured["should_stop"]
+    assert stop is not None
+    assert stop() is False
+    ks = KillSwitch(settings)
+    ks.engage(reason="h6")
+    try:
+        assert stop() is True  # engaged kill switch stops the between-bars wait immediately
+    finally:
+        ks.disengage()
+
+
 def test_live_loop_halts_on_data_integrity_failure(tmp_path) -> None:
     """Section 8: an exchange-wide data-integrity failure halts the loop like a kill switch."""
     from src.live.data_manager import DataHealth

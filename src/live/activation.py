@@ -98,7 +98,7 @@ def build_live_activation_request(
         )
 
     catalog = load_catalog()
-    blocks_live = [g for g, spec in catalog.items() if spec.blocks_live == "true"]
+    blocks_live = [g for g, spec in catalog.items() if spec.blocks_live_resolved()]
     with session_scope() as s:
         latest: dict[str, str] = {}
         for row in s.execute(

@@ -404,3 +404,23 @@ def test_emergency_close_requires_confirmation() -> None:
     assert raised
     assert venue.emergency_close_all(confirm=True) >= 1
     assert not venue.positions
+
+
+def test_order_plan_carries_resolved_entry_style() -> None:
+    """H8: the resolved entry style rides on the plan so the live venue applies the right
+    escalation semantics — maker_first/maker = post-only with NO escalation;
+    passive_then_taker = post-only first, one taker escalation of the unfilled remainder."""
+    builder = OrderBuilder(load_execution_config(), OwnershipPolicy(_settings()))
+    cand = _cand()
+    decision = _rm().evaluate(cand, _flat())
+    spec = _meta().spec(BTC)
+
+    default = builder.build(cand, decision, spec)
+    assert default.ok and default.plan is not None
+    assert default.plan.entry_style == "maker_first"  # config default
+    assert default.plan.entry.order_type is OrderType.POST_ONLY
+
+    esc = builder.build(cand, decision, spec, entry_style="passive_then_taker")
+    assert esc.ok and esc.plan is not None
+    assert esc.plan.entry_style == "passive_then_taker"
+    assert esc.plan.entry.order_type is OrderType.POST_ONLY  # still passive first

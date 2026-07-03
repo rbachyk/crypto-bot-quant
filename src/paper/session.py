@@ -35,7 +35,9 @@ class PaperTrade:
     entry_ts: int
     exit_ts: int
     exit_price: float
-    exit_reason: str  # "stop"|"trailing_stop"|"take_profit"|"time_stop"|"kill_switch"|"open"
+    # "exchange_exit" marks a real-venue position closed by its exchange-resident SL/TP/trailing
+    # (booked by reconciliation, H7); consumers filter on != "open", never on an exhaustive set.
+    exit_reason: str  # stop|trailing_stop|take_profit|time_stop|exchange_exit|kill_switch|open
     fee: float
     slippage_cost: float
     pnl: float

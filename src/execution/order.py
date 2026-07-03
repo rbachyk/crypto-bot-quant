@@ -86,6 +86,12 @@ class OrderPlan:
     stop: Order
     take_profit: Order | None = None
     trailing: Order | None = None
+    # The resolved entry style (Section 18) — the live venue reads it to decide the
+    # escalation semantics of a POST_ONLY entry: "passive_then_taker" escalates the unfilled
+    # remainder ONCE to a taker market order at the fill-observation window end (or on a
+    # post-only crossing rejection); "maker"/"maker_first" never escalate — an unfilled or
+    # crossing-rejected entry is a clean non-fill.
+    entry_style: str = "maker_first"
 
     def legs(self) -> list[Order]:
         return [o for o in (self.entry, self.stop, self.take_profit, self.trailing) if o]
@@ -99,6 +105,7 @@ class OrderPlan:
             "symbol": self.symbol,
             "side": "long" if self.side > 0 else "short",
             "qty": self.qty,
+            "entry_style": self.entry_style,
             "legs": [o.to_dict() for o in self.legs()],
         }
 
@@ -166,6 +173,13 @@ class OrderBuilder:
 
         # Entry style: explicit override, else the strategy's own maker flag, else config default
         # (parity with the backtest, where maker entries rest at a passive limit).
+        # Styles (Section 18): "taker" → market. Everything else rests as a POST-ONLY limit —
+        # the live venue sends the REAL post-only flag, so a limit that would cross the book is
+        # rejected by the exchange rather than silently filling as taker while recorded maker.
+        # "maker"/"maker_first" = post-only with NO escalation (an unfilled/crossing entry is a
+        # clean non-fill); "passive_then_taker" = post-only first, then ONE taker escalation of
+        # the unfilled remainder at the venue's fill-observation window end (or on a crossing
+        # rejection). The resolved style rides on the plan for the venue to read.
         style = entry_style or ("maker" if candidate.maker else self.cfg.default_entry_style)
         entry_type = OrderType.MARKET if style == "taker" else OrderType.POST_ONLY
 
@@ -258,5 +272,6 @@ class OrderBuilder:
             stop=stop,
             take_profit=take_profit,
             trailing=trailing,
+            entry_style=style,
         )
         return BuildResult(True, plan=plan)

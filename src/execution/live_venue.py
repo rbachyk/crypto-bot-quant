@@ -22,7 +22,6 @@ Tests inject a fake client, so nothing here needs the network or real keys.
 
 from __future__ import annotations
 
-import contextlib
 import time
 from typing import Any, Protocol
 
@@ -32,6 +31,7 @@ from src.config import Settings, get_settings
 from src.exchange.metadata import MetadataConfig
 from src.execution.config import load_execution_config
 from src.execution.order import BUY, Order, OrderPlan, OrderType
+from src.execution.ownership import MAX_CLIENT_ID_LEN
 from src.execution.venue import BracketResult, Fill, Venue, VenuePosition
 
 _log = structlog.get_logger("execution.live_venue")
@@ -176,11 +176,17 @@ class CcxtLiveVenue:
         self._ensure_tradable_metadata(plan.symbol)
 
         entry = plan.entry
-        maker = entry.order_type in _MAKER_TYPES
-        order_type = "limit" if maker else "market"
+        post_only = entry.order_type is OrderType.POST_ONLY
+        maker_intent = entry.order_type in _MAKER_TYPES
+        order_type = "limit" if maker_intent else "market"
         price = float(entry.price) if entry.price is not None else None
 
         params: dict[str, Any] = {"clientOrderId": entry.client_id}
+        if post_only:
+            # H8: maker intent is EXCHANGE-ENFORCED — the real ccxt-unified post-only flag,
+            # so a limit that would cross the book is rejected by Bybit instead of silently
+            # filling as taker while being recorded maker with zero slippage.
+            params["postOnly"] = True
         # Atomic exchange-resident protection attached to the entry (Section 2.2).
         sl_trigger = _leg_trigger(plan.stop)
         if sl_trigger is not None:
@@ -194,37 +200,84 @@ class CcxtLiveVenue:
         if plan.trailing is not None and plan.trailing.trail_offset:
             params["trailingPercent"] = float(plan.trailing.trail_offset) * 100.0
 
-        resp = self._ex.create_order(plan.symbol, order_type, entry.side, entry.qty, price, params)
+        filled_qty = 0.0
+        avg_obs: float | None = None
+        fee = 0.0
+        entry_still_resting = False
+        try:
+            resp = self._ex.create_order(
+                plan.symbol, order_type, entry.side, entry.qty, price, params
+            )
+        except Exception as exc:
+            if not (post_only and _is_post_only_rejection(exc)):
+                raise
+            # The post-only entry would have crossed the book → the exchange rejected it.
+            # That is a clean NO-FILL (maker_first semantics), or the escalation trigger
+            # for passive_then_taker below — never a silent taker fill.
+            _log.info(
+                "post_only_rejected_for_crossing",
+                symbol=plan.symbol, client_id=entry.client_id, error=str(exc),
+            )
+        else:
+            # OBSERVE the fill (never assume it): Bybit's create response omits fill fields
+            # for a resting order, so we poll the order status and book only what actually
+            # filled; any unfilled remainder is cancelled at the window end. ``fill_ratio``
+            # is a simulated-venue knob and is deliberately ignored here.
+            filled_qty, avg_obs, fee, entry_still_resting = self._observe_entry_fill(
+                resp, plan.symbol, entry
+            )
 
-        # OBSERVE the fill (never assume it): Bybit's create response omits fill fields
-        # for a resting order, so we poll the order status and book only what actually
-        # filled; any unfilled remainder is cancelled at the window end. ``fill_ratio``
-        # is a simulated-venue knob and is deliberately ignored here.
-        filled_qty, avg_obs, fee, entry_still_resting = self._observe_entry_fill(
-            resp, plan.symbol, entry
-        )
+        # passive_then_taker (Section 18): the passive leg was rejected for crossing or is
+        # (partially) unfilled at the observation-window end (remainder already cancelled +
+        # verified) → escalate the remaining qty ONCE to a taker market order. maker_first
+        # never escalates. An unconfirmable remainder-cancel blocks escalation (the passive
+        # order may still fill — escalating could double the position).
+        taker_qty = 0.0
+        taker_avg: float | None = None
+        if (
+            post_only
+            and plan.entry_style == "passive_then_taker"
+            and not entry_still_resting
+            and filled_qty < entry.qty - 1e-12
+        ):
+            taker_qty, taker_avg, taker_fee = self._escalate_entry_taker(
+                plan, entry, entry.qty - filled_qty, params
+            )
+            fee += taker_fee
+
+        total_qty = filled_qty + taker_qty
         # Average fill price is the observed one; fall back to the limit price only when
         # the venue reported a filled qty but no average (then the reference price).
-        avg = avg_obs if avg_obs else (price if price is not None else ref_price)
+        maker_px = avg_obs if avg_obs else (price if price is not None else ref_price)
+        if taker_qty > 0:
+            taker_px = taker_avg if taker_avg else ref_price
+            avg = (maker_px * filled_qty + taker_px * taker_qty) / total_qty
+        else:
+            avg = maker_px
         expected = price if price is not None else ref_price
-        slip_frac = 0.0 if maker else realized_slippage_frac
+        # H8: execution-quality fields come from the OBSERVED fill, never assumed. With
+        # post-only exchange-enforced, a resting fill IS maker; any taker escalation makes
+        # the fill non-maker. Slippage is measured actual-vs-expected, not modelled.
+        maker = maker_intent and taker_qty <= 0.0
+        slip_frac = abs(avg - expected) / expected if (total_qty > 0 and expected > 0) else 0.0
         fill = Fill(
             client_id=entry.client_id,
             symbol=plan.symbol,
             side=entry.side,
-            qty=filled_qty,
+            qty=total_qty,
             expected_price=expected,
             actual_price=avg,
             fee=fee,
             maker=maker,
             latency_ms=latency_ms,
             slippage_frac=slip_frac,
-            slippage_cost=abs(avg - ref_price) * filled_qty,
+            slippage_cost=abs(avg - ref_price) * total_qty,
             spread_bps_at_order=spread_bps,
             signal_age_ms=signal_age_ms,
-            order_type=entry.order_type.value,
+            order_type="market" if (taker_qty > 0 and filled_qty <= 0) else entry.order_type.value,
         )
         self.fills.append(fill)
+        filled_qty = total_qty
 
         # ADVISORY post-fill stop check (Section 2.2). A market fill's attached SL commonly hasn't
         # propagated to the position read yet, so an immediate "no stop" is NOT proof of rejection
@@ -346,6 +399,45 @@ class CcxtLiveVenue:
             )
         return min(filled or 0.0, qty), avg, fee or 0.0, still_resting
 
+    def _escalate_entry_taker(
+        self, plan: OrderPlan, entry: Order, qty: float, base_params: dict[str, Any]
+    ) -> tuple[float, float | None, float]:
+        """One-shot taker escalation for ``passive_then_taker`` (Section 18 / H8).
+
+        The passive post-only leg was rejected for crossing or unfilled at the observation
+        window end (its remainder already cancelled + verified), so the remaining qty is sent
+        as a market order carrying the same attached SL/TP/trailing params (position-level on
+        Bybit, so the escalated fill is protected too) under a derived — still prefix-owned —
+        clientOrderId, and its fill is OBSERVED like any entry. Returns ``(filled_qty,
+        avg_price, fee)``; a failed escalation is a logged no-fill, never a crash (the engine
+        records ``entry_unfilled``)."""
+        esc_id = entry.client_id[: MAX_CLIENT_ID_LEN - 1] + "T"
+        params = {k: v for k, v in base_params.items() if k != "postOnly"}
+        params["clientOrderId"] = esc_id
+        try:
+            resp = self._ex.create_order(plan.symbol, "market", entry.side, qty, None, params)
+        except Exception as exc:  # noqa: BLE001 - escalation failure = clean no-fill, not a crash
+            _log.error("taker_escalation_failed", symbol=plan.symbol, error=str(exc))
+            return 0.0, None, 0.0
+        esc_order = Order(
+            client_id=esc_id,
+            symbol=entry.symbol,
+            side=entry.side,
+            qty=qty,
+            order_type=OrderType.MARKET,
+            role="entry",
+            tags=dict(entry.tags),
+        )
+        filled, avg, fee, still_resting = self._observe_entry_fill(resp, plan.symbol, esc_order)
+        if still_resting:
+            # Cancel of the escalated remainder unconfirmed → keep it tracked (Section 7).
+            self.open_orders[esc_id] = esc_order
+        _log.info(
+            "entry_escalated_to_taker",
+            symbol=plan.symbol, requested=qty, filled=filled, client_id=esc_id,
+        )
+        return filled, avg, fee
+
     def _confirm_exchange_stop(self, symbol: str) -> bool | None:
         """Confirm the exchange-side stop right after placement (Section 2.2).
 
@@ -381,16 +473,39 @@ class CcxtLiveVenue:
         return "unknown"
 
     def cancel(self, client_id: str, *, owned_only: bool = True) -> bool:
+        """Cancel a resting order — VERIFIED, never assumed (M15).
+
+        A cancel call that errors does NOT mean the order is gone: the status is re-fetched,
+        and only a terminal status lets the order leave the mirror. An order the exchange
+        still lists stays tracked (reconciliation keeps seeing it) and this returns False —
+        the bot never mutates its book on an unconfirmed cancel."""
         order = self.open_orders.get(client_id)
         if order is None:
             return False
         if owned_only and not order.tags.get("bot_instance_id"):
             return False
-        with contextlib.suppress(Exception):  # already gone / race; treat as cancelled
+        try:
             self._ex.cancel_order(client_id, order.symbol, {"clientOrderId": client_id})
+        except Exception as exc:  # noqa: BLE001 - verify below; the order may already be gone
+            if not self._order_is_terminal(client_id, order.symbol):
+                _log.error(
+                    "cancel_unconfirmed",
+                    client_id=client_id, symbol=order.symbol, error=str(exc),
+                )
+                return False  # still live on the exchange → keep tracking it
         del self.open_orders[client_id]
         self.cancelled.add(client_id)
         return True
+
+    def _order_is_terminal(self, client_id: str, symbol: str) -> bool:
+        """Re-fetch an order's status after a failed cancel: True only when the exchange
+        positively reports a terminal status (filled/cancelled/rejected/expired). Any fetch
+        error → False (assume still live; never drop an order we can't account for)."""
+        try:
+            o = self._ex.fetch_order(client_id, symbol, {"clientOrderId": client_id}) or {}
+        except Exception:  # noqa: BLE001 - can't verify → treat as still live
+            return False
+        return str(o.get("status") or "").lower() in _TERMINAL_STATUSES
 
     def cancel_replace(self, client_id: str, new_order: Order) -> str | None:
         if not self.cancel(client_id):
@@ -540,38 +655,110 @@ class CcxtLiveVenue:
             )
         return out
 
+    def fetch_exit_fill(
+        self, symbol: str, side: int, *, since_ts: int | None = None
+    ) -> tuple[float, float] | None:
+        """Observed exit price + fee for a position that closed on the exchange (H7).
+
+        Sources the account's OWN executions via ccxt ``fetch_my_trades`` (Bybit:
+        /v5/execution/list) — the most reliable Bybit-compatible record of SL/TP/trailing
+        and reduce-only market-close fills. Close-side executions since ``since_ts`` (the
+        entry time) are aggregated to ``(vwap_price, total_fee)``; a position closed in
+        several partial executions books its true volume-weighted exit. Returns None when
+        no close-side execution is visible (or the fetch fails) — the caller falls back to
+        a mark price with a loud log."""
+        close_side = "sell" if side > 0 else "buy"
+        try:
+            trades = self._ex.fetch_my_trades(symbol, since_ts, 100) or []
+        except Exception as exc:  # noqa: BLE001 - a history fetch error → let the caller fall back
+            _log.warning("exit_fill_fetch_failed", symbol=symbol, error=str(exc))
+            return None
+        qty_sum = 0.0
+        px_qty = 0.0
+        fee_sum = 0.0
+        for t in trades:
+            if str(t.get("side") or "").lower() != close_side:
+                continue
+            amt = _num(t.get("amount")) or 0.0
+            px = _num(t.get("price")) or 0.0
+            if amt <= 0 or px <= 0:
+                continue
+            qty_sum += amt
+            px_qty += px * amt
+            fee_sum += _num((t.get("fee") or {}).get("cost")) or 0.0
+        if qty_sum <= 0:
+            return None
+        return px_qty / qty_sum, fee_sum
+
     def close_position(self, symbol: str) -> bool:
-        """Reduce-only market close of ONE owned position (bot-side time-stop) + cancel its legs."""
+        """Reduce-only market close of ONE owned position (bot-side time-stop) + cancel its legs.
+
+        M15: a failed close is a FAILED close — the position stays tracked (the caller retries
+        next tick) and the error is surfaced, instead of dropping the mirror as if flat while a
+        real position keeps running on the exchange."""
         pos = self.positions.get(symbol)
         if pos is None:
             return False
         close_side = "sell" if pos.side > 0 else "buy"
-        with contextlib.suppress(Exception):
+        try:
             self._ex.create_order(symbol, "market", close_side, pos.qty, None, {"reduceOnly": True})
-        for cid, order in [(c, o) for c, o in self.open_orders.items() if o.symbol == symbol]:
-            with contextlib.suppress(Exception):
-                self._ex.cancel_order(cid, order.symbol, {"clientOrderId": cid})
-            self.open_orders.pop(cid, None)
+        except Exception as exc:  # noqa: BLE001 - surface + keep tracking; never fake success
+            _log.error("close_position_failed", symbol=symbol, error=str(exc))
+            return False
+        for cid in [c for c, o in self.open_orders.items() if o.symbol == symbol]:
+            # Verified cancel: an unconfirmed leg cancel keeps the order tracked (Section 7).
+            self.cancel(cid, owned_only=False)
         self.positions.pop(symbol, None)
         return True
 
     def emergency_close_all(self, *, confirm: bool) -> int:
+        """Flatten the REAL exchange book (M14): reduce-only close every exchange-listed
+        position and cancel every resting order carrying our ownership prefix — fetched from
+        the exchange, not the in-memory mirror, so it still works after a restart (when the
+        mirror is empty but real positions remain). Mirror cleanup happens per item AFTER its
+        exchange call succeeds; failures are logged and keep the item tracked. Returns the
+        number of successful close/cancel actions."""
         if not confirm:
             raise PermissionError("emergency_close_all requires explicit confirmation (Section 7)")
         n = 0
-        for sym, pos in list(self.positions.items()):
+        # Positions: the exchange book is authoritative; merge the mirror in case the fetch
+        # fails (fall back to closing at least what we know about).
+        targets: dict[str, VenuePosition] = dict(self.positions)
+        try:
+            targets.update(self.fetch_exchange_positions())
+        except Exception:  # noqa: BLE001 - emergency close must still act on the mirror
+            _log.error("emergency_close_fetch_positions_failed", exc_info=True)
+        for sym, pos in targets.items():
             close_side = "sell" if pos.side > 0 else "buy"
-            with contextlib.suppress(Exception):
+            try:
                 self._ex.create_order(
                     sym, "market", close_side, pos.qty, None, {"reduceOnly": True}
                 )
+            except Exception as exc:  # noqa: BLE001 - keep closing the rest
+                _log.error("emergency_close_position_failed", symbol=sym, error=str(exc))
+                continue
+            self.positions.pop(sym, None)
             n += 1
-        for cid, order in list(self.open_orders.items()):
-            with contextlib.suppress(Exception):
-                self._ex.cancel_order(cid, order.symbol, {"clientOrderId": cid})
+        # Orders: cancel every OWNED (prefix-carrying) resting order on the exchange.
+        prefix = self.settings.order_client_id_prefix
+        order_targets: dict[str, str] = {cid: o.symbol for cid, o in self.open_orders.items()}
+        try:
+            for o in self._ex.fetch_open_orders() or []:
+                info = o.get("info") or {}
+                cid = str(o.get("clientOrderId") or info.get("clientOrderId") or "")
+                if cid.startswith(prefix):
+                    order_targets[cid] = str(o.get("symbol") or "")
+        except Exception:  # noqa: BLE001 - fall back to cancelling the mirrored orders
+            _log.error("emergency_close_fetch_orders_failed", exc_info=True)
+        for cid, sym in order_targets.items():
+            try:
+                self._ex.cancel_order(cid, sym, {"clientOrderId": cid})
+            except Exception as exc:  # noqa: BLE001 - keep cancelling the rest
+                _log.error("emergency_close_cancel_failed", client_id=cid, error=str(exc))
+                continue
+            self.open_orders.pop(cid, None)
+            self.cancelled.add(cid)
             n += 1
-        self.positions.clear()
-        self.open_orders.clear()
         return n
 
     def snapshot(self) -> dict[str, object]:
@@ -583,6 +770,27 @@ def _num(value: Any) -> float | None:
         return float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _is_post_only_rejection(exc: Exception) -> bool:
+    """Whether an order-create error is the exchange rejecting a POST-ONLY order that would
+    have crossed the book (taken liquidity). ccxt's typed exception is preferred; the message
+    heuristics cover fakes/older builds and Bybit's raw wording. Anything else (auth, network,
+    bad params) is NOT a crossing rejection and must propagate."""
+    try:
+        import ccxt
+
+        if isinstance(exc, ccxt.OrderImmediatelyFillable):
+            return True
+    except Exception:  # noqa: BLE001 - ccxt absent/old → fall through to message heuristics
+        pass
+    msg = str(exc).lower()
+    return (
+        "post only" in msg
+        or "post-only" in msg
+        or "postonly" in msg
+        or "immediately" in msg  # "order would be filled immediately" / ImmediatelyFillable
+    )
 
 
 def _leg_trigger(leg: Order | None) -> float | None:
