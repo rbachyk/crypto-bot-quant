@@ -22,10 +22,14 @@ import bisect
 import math
 from dataclasses import dataclass
 
+import structlog
+
 from src.backtest.config import BacktestConfig
 from src.backtest.costs import BUY, SELL, FeeModel, FundingModel, SlippageModel
 from src.backtest.engine import BacktestResult, SymbolInput, Trade, _regime_of
 from src.exchange.metadata import MetadataConfig
+
+_log = structlog.get_logger("backtest.portfolio")
 
 
 @dataclass(slots=True)
@@ -97,11 +101,16 @@ class CrossSectionalEngine:
         self.score_mode = str(ex.get("score_mode", ""))
         self.signal_window = max(2, int(ex.get("signal_window", 12)))
         self._residual = self.score_mode in ("residual_reversion", "residual_momentum")
-        # Maker rebalancing: a basket rebalance is low-urgency, so post passive limits (maker fee,
-        # no slippage) rather than cross the spread — the realistic basket execution, and turnover
-        # cost is the carry edge's tightest margin (the fee-stress blocker). Final force-close at
-        # end-of-data stays taker (you can't be patient at the boundary).
+        # Maker rebalancing: a basket rebalance is low-urgency, so post passive limits rather than
+        # cross the spread. Fill discipline mirrors the per-trade engine (Section 18 parity): the
+        # limit rests `limit_offset_frac` (floored at half the modelled spread — where a passive
+        # quote actually sits) inside the rebalance bar's open and fills ONLY if the bar trades
+        # through it (maker fee, zero slippage). A basket MUST rebalance, so an unfilled leg does
+        # NOT silently vanish: it escalates to TAKER at the same bar's close, paying taker fee plus
+        # spread-based slippage — what live would do when the passive order times out. Final
+        # force-close at end-of-data stays taker (you can't be patient at the boundary).
         self.maker = float(ex.get("maker_rebalance", 0.0)) > 0
+        self.limit_offset_frac = max(0.0, float(ex.get("limit_offset_frac", 0.0)))
         self.stop_frac = float(getattr(params, "stop_frac", 0.02)) or 0.02
         self.risk_scale = min(1.0, max(0.0, float(getattr(strategy, "risk_scale", 1.0))))
         self.name = str(getattr(strategy, "name", "cross_sectional"))
@@ -166,10 +175,11 @@ class CrossSectionalEngine:
             result.equity_curve.append(equity + self._unrealized(holdings, bars_by_ts, ts))
             result.equity_ts.append(ts)
 
-        # Force-close everything at the last bar.
+        # Force-close everything at the last bar (or the symbol's own last bar if it ends early —
+        # that bar is at-or-before last_ts by construction, never a future price).
         for sym, leg in list(holdings.items()):
             bar = bars_by_ts[sym].get(last_ts) or by_symbol[sym].bars[-1]
-            equity += self._close_leg(leg, bar, "end_of_data", result)
+            equity += self._close_leg(leg, bar, "end_of_data", result, by_symbol[sym])
         holdings.clear()
         if result.equity_curve:
             result.equity_curve[-1] = equity
@@ -187,15 +197,25 @@ class CrossSectionalEngine:
         for sym, leg in list(holdings.items()):
             if target.get(sym) != leg.side:
                 bar = bars_by_ts[sym].get(ts)
-                if bar is None:
-                    # No bar at this rebalance (symbol halted/delisted/feed gap over a multi-day
-                    # run): flatten on the last known close rather than leaving a ghost leg that
-                    # never closes and keeps accruing funding (mirrors the end-of-run force-close).
-                    known = by_symbol[sym].bars if sym in by_symbol else []
-                    bar = known[-1] if known else None
                 if bar is not None:
-                    equity += self._close_leg(leg, bar, "rebalance", result)
+                    equity += self._close_leg(leg, bar, "rebalance", result, by_symbol[sym])
                     del holdings[sym]
+                    continue
+                # No bar at this rebalance (symbol halted/delisted/feed gap over a multi-day
+                # run): flatten on the last bar AT-OR-BEFORE the rebalance ts — never a later
+                # bar, which would book a FUTURE price with exit_ts past the decision (H1).
+                sym_in = by_symbol.get(sym)
+                prior = self._bar_at_or_before(sym_in, ts) if sym_in is not None else None
+                if prior is None:
+                    # No priceable history at all — drop the leg rather than invent a fill.
+                    _log.warning(
+                        "basket_leg_dropped_no_prior_bar", symbol=sym, rebalance_ts=ts,
+                        entry_ts=leg.entry_ts,
+                    )
+                    del holdings[sym]
+                    continue
+                equity += self._close_leg(leg, prior, "gap_close", result, sym_in)
+                del holdings[sym]
         # Open new legs (stable same-side members are kept — no churn). Per-symbol target notionals
         # are dollar- or beta-neutral depending on config.
         gross = equity * self.portfolio_gross * self.risk_scale
@@ -236,20 +256,35 @@ class CrossSectionalEngine:
         if spread_bps > self.cfg.execution.max_spread_bps:
             return None  # toxic spread — skip this leg
         qty = notional / ref_price
+        filled_maker = False
         if self.maker:
-            # A basket rebalance is low-urgency → post a passive limit: fill at the reference, no
-            # slippage, maker fee. Realistic basket execution; cuts the turnover cost.
-            entry_price = ref_price
-            entry_fee = self.fees.fee(sym, qty * ref_price, maker=True)
-            slip_cost = 0.0
-        else:
-            bar_notional = float(bar.get("volume", 0.0) or 0.0) * ref_price
+            # Passive limit posted inside the rebalance bar's open; fills ONLY if the bar trades
+            # through it (same convention as the per-trade engine: a buy fills when the low
+            # reaches the limit, a sell when the high does). Maker fee, zero slippage.
+            offset = self._maker_offset(spread_bps)
+            limit_price = ref_price * (1.0 - side * offset)
+            traded_through = (
+                float(bar["low"]) <= limit_price
+                if side > 0
+                else float(bar["high"]) >= limit_price
+            )
+            if traded_through:
+                entry_price = limit_price
+                entry_fee = self.fees.fee(sym, qty * limit_price, maker=True)
+                slip_cost = 0.0
+                filled_maker = True
+        if not filled_maker:
+            # Taker: either an immediate (non-maker) rebalance at the bar open, or the ESCALATION
+            # of an unfilled passive limit at the bar close — a basket MUST rebalance, so the
+            # missed maker fill crosses the spread like live would, paying taker fee + slippage.
+            taker_ref = float(bar["close"]) if self.maker else ref_price
+            bar_notional = float(bar.get("volume", 0.0) or 0.0) * taker_ref
             slip = self.slippage.slippage_frac(
                 spread_bps=spread_bps, notional=notional, bar_notional=bar_notional or notional
             )
-            entry_price = self.slippage.fill_price(ref_price, BUY if side > 0 else SELL, slip)
+            entry_price = self.slippage.fill_price(taker_ref, BUY if side > 0 else SELL, slip)
             entry_fee = self.fees.fee(sym, qty * entry_price, maker=False)
-            slip_cost = abs(entry_price - ref_price) * qty
+            slip_cost = abs(entry_price - taker_ref) * qty
         real_notional = qty * entry_price
         return _Leg(
             symbol=sym,
@@ -267,19 +302,44 @@ class CrossSectionalEngine:
             last_funding_ts=ts,  # settle only funding posted strictly after entry
         )
 
-    def _close_leg(self, leg: _Leg, bar: dict, reason: str, result: BacktestResult) -> float:
-        ref_price = float(bar["close"])
+    def _close_leg(
+        self, leg: _Leg, bar: dict, reason: str, result: BacktestResult, sym_in: SymbolInput
+    ) -> float:
         exit_ts = int(bar["ts"])
-        if self.maker and reason != "end_of_data":
-            exit_price = ref_price  # passive maker exit on a planned rebalance
-            exit_fee = self.fees.fee(leg.symbol, leg.qty * ref_price, maker=True)
-        else:
+        spread_bps = float(sym_in.spread_bps_at(exit_ts))  # per-symbol modelled spread, both ways
+        filled_maker = False
+        exit_price = 0.0
+        exit_fee = 0.0
+        exit_slip_cost = 0.0
+        if self.maker and reason == "rebalance":
+            # Passive exit limit posted FAVORABLE to the closing side inside the bar open (a long
+            # sells above the open, a short buys below — the per-trade engine's manage-exit
+            # convention); fills only if the bar trades through it. Maker fee, zero slippage.
+            ref_open = float(bar["open"])
+            offset = self._maker_offset(spread_bps)
+            limit_price = ref_open * (1.0 + leg.side * offset)
+            traded_through = (
+                float(bar["high"]) >= limit_price
+                if leg.side > 0
+                else float(bar["low"]) <= limit_price
+            )
+            if traded_through:
+                exit_price = limit_price
+                exit_fee = self.fees.fee(leg.symbol, leg.qty * limit_price, maker=True)
+                filled_maker = True
+        if not filled_maker:
+            # Taker close at the bar close: forced exits (end_of_data / gap_close), non-maker
+            # rebalances, and the escalation of an unfilled passive exit (baskets MUST rebalance).
+            ref_price = float(bar["close"])
             bar_notional = float(bar.get("volume", 0.0) or 0.0) * ref_price
             slip = self.slippage.slippage_frac(
-                spread_bps=2.0, notional=leg.notional, bar_notional=bar_notional or leg.notional
+                spread_bps=spread_bps,
+                notional=leg.notional,
+                bar_notional=bar_notional or leg.notional,
             )
             exit_price = self.slippage.fill_price(ref_price, SELL if leg.side > 0 else BUY, slip)
             exit_fee = self.fees.fee(leg.symbol, leg.qty * exit_price, maker=False)
+            exit_slip_cost = abs(exit_price - ref_price) * leg.qty
         gross = leg.side * (exit_price - leg.entry_price) * leg.qty
         total_fee = leg.entry_fee + exit_fee
         pnl = gross - total_fee - leg.funding  # funding>0 = paid by the leg; carry is its negative
@@ -299,7 +359,7 @@ class CrossSectionalEngine:
                 risk_amount=leg.risk_amount,
                 fee=total_fee,
                 funding=leg.funding,
-                slippage_cost=leg.slippage_cost + abs(exit_price - ref_price) * leg.qty,
+                slippage_cost=leg.slippage_cost + exit_slip_cost,
                 pnl=pnl,
                 pnl_r=pnl_r,
                 regime=leg.regime,
@@ -308,6 +368,21 @@ class CrossSectionalEngine:
             )
         )
         return pnl
+
+    def _maker_offset(self, spread_bps: float) -> float:
+        """Passive-limit distance inside the reference price: the configured offset, floored at
+        HALF the modelled spread (a passive quote joining the near touch sits half a spread inside
+        the mid/open — an offset of 0 would make every 'maker' fill unconditional again)."""
+        return max(self.limit_offset_frac, 0.5 * spread_bps / 10_000.0)
+
+    @staticmethod
+    def _bar_at_or_before(sym_in: SymbolInput, ts: int) -> dict | None:
+        """Last bar with ``bar_ts <= ts`` (binary search on the time-ordered bars), or None when
+        the symbol has no bar at-or-before ``ts``. Works on any bar window (full backtest inputs
+        or the live loop's rolling window), so a gapped leg is never priced off a FUTURE bar."""
+        bars = sym_in.bars
+        i = bisect.bisect_right(bars, ts, key=lambda b: int(b["ts"])) - 1
+        return bars[i] if i >= 0 else None
 
     # -- helpers (mirror the per-trade engine's funding/grid math) ------- #
     def _charge_funding(self, leg: _Leg, sym_in: SymbolInput, ts: int) -> int:

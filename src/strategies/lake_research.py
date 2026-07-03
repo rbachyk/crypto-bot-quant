@@ -23,14 +23,19 @@ import structlog
 from src.backtest.config import BacktestConfig, load_backtest_config
 from src.backtest.service import build_lake_inputs, run_engine
 from src.backtest.stress import fee_stress, slippage_stress
-from src.backtest.walkforward import run_walk_forward
+from src.backtest.walkforward import pre_holdout_inputs, run_walk_forward
 from src.config import Settings, get_settings
 from src.data.config import DataConfig
 from src.data.store import SeriesStore
 from src.exchange.metadata import MetadataConfig, load_metadata_for
 from src.strategies.candidates import build_strategy
 from src.strategies.config import CandidateConfig, StrategiesConfig, load_strategies_config
-from src.strategies.research import CandidateValidation, SideDecision, _decide_sides
+from src.strategies.research import (
+    CandidateValidation,
+    SideDecision,
+    _decide_sides,
+    _side_trial_sharpes,
+)
 
 _log = structlog.get_logger("strategies.lake_research")
 
@@ -72,12 +77,15 @@ def validate_candidate_on_lake(
     ``emit`` receives a human line at each expensive stage (both-sides backtest, promoted
     backtest, walk-forward, fee/slippage stress) so a long run is observable rather than opaque.
     """
-    emit(f"{cand.id}: both-sides backtest")
+    emit(f"{cand.id}: both-sides backtest (pre-hold-out window)")
     _log.info("lake_validate_stage", candidate=cand.id, stage="backtest_both")
     both = build_strategy(cand, strat_cfg.strategy_version, cand.params)
-    full_both = run_engine(
-        cfg, meta, lake_inputs, strategy=both, label=f"{cand.id}_lake_both"
-    ).report
+    # The side decision is a FITTED selection — it must never see the locked hold-out the
+    # walk-forward evaluates once (H4), so the both-sides run stops at the SAME boundary the
+    # walk-forward locks (shared helper — the two cannot drift).
+    side_inputs = pre_holdout_inputs(cfg, lake_inputs)
+    both_run = run_engine(cfg, meta, side_inputs, strategy=both, label=f"{cand.id}_lake_both")
+    full_both = both_run.report
 
     side_decision = _decide_sides(full_both, strat_cfg.min_side_expectancy_r)
 
@@ -141,7 +149,10 @@ def validate_candidate_on_lake(
         "lake_validate_stage", candidate=cand.id, stage="walk_forward",
         trades=promoted_report.trade_count,
     )
-    wf = run_walk_forward(cfg, meta, lake_inputs, strategy=strategy)
+    wf = run_walk_forward(
+        cfg, meta, lake_inputs, strategy=strategy,
+        trial_sharpes=_side_trial_sharpes(both_run.result.trades),
+    )
     base_e = promoted_report.expectancy_r
     emit(f"{cand.id}: fee/slippage stress")
     _log.info("lake_validate_stage", candidate=cand.id, stage="stress")

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from src.backtest.overfitting import (
+    deflated_sharpe_from_returns,
     deflated_sharpe_ratio,
     effective_sample_size,
     probabilistic_sharpe_ratio,
     purged_kfold_indices,
     sample_adequacy,
+    trade_sharpe,
 )
 from src.risk.breakers import BreakerInputs, CircuitBreakers
 from src.risk.config import load_risk_config
@@ -47,6 +49,39 @@ def test_purged_kfold_has_no_train_test_overlap_and_partitions_test() -> None:
         assert set(train).isdisjoint(test)  # purge/embargo removed any overlap
         all_test += test
     assert sorted(all_test) == list(range(100))  # test folds partition the series
+
+
+def test_deflated_sharpe_from_returns_rewards_sample_size() -> None:
+    """H3 regression: the gate statistic is computed from the POOLED per-trade sample, so the
+    same per-trade edge on 500 trades must be more significant than on 25 trades — fold means
+    alone can no longer fake significance."""
+    edge = [0.5, -0.3, 0.4, -0.2, 0.6]  # positive-mean per-trade R pattern
+    small = deflated_sharpe_from_returns(edge * 5)  # 25 trades
+    large = deflated_sharpe_from_returns(edge * 100)  # 500 trades
+    assert 0.0 <= small < large <= 1.0
+
+
+def test_deflated_sharpe_from_returns_deflates_for_selection_breadth() -> None:
+    """The expected-max benchmark of the trials genuinely compared raises the bar: the same
+    pooled sample scores LOWER when it was the winner of a wide, dispersed search."""
+    returns = [0.5, -0.3, 0.4, -0.2, 0.6] * 40
+    single = deflated_sharpe_from_returns(returns)  # one config ⇒ plain PSR
+    searched = deflated_sharpe_from_returns(returns, trial_sharpes=[0.08, -0.02, 0.05, -0.06])
+    assert 0.0 <= searched < single <= 1.0
+
+
+def test_deflated_sharpe_from_returns_neutral_and_degenerate_cases() -> None:
+    assert deflated_sharpe_from_returns([]) == 0.0
+    assert deflated_sharpe_from_returns([0.1]) == 0.0  # one trade proves nothing
+    # A zero-mean sample sits at the 0.5 neutral point (no significance either way).
+    assert deflated_sharpe_from_returns([0.2, -0.2] * 50) == 0.5
+
+
+def test_trade_sharpe_basic_properties() -> None:
+    assert trade_sharpe([]) == 0.0
+    assert trade_sharpe([0.5]) == 0.0
+    assert trade_sharpe([0.1, 0.1]) == 0.0  # zero variance guard
+    assert trade_sharpe([0.5, -0.3, 0.4]) > 0.0 > trade_sharpe([-0.5, 0.3, -0.4])
 
 
 def test_sample_adequacy_thresholds() -> None:

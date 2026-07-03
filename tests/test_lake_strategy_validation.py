@@ -104,6 +104,53 @@ def test_no_edge_candidate_shelves_cleanly_without_misleading_cascade(tmp_path) 
         assert v.slippage_stress.get("skipped")
 
 
+def test_lake_side_decision_backtest_ends_at_the_holdout_boundary(tmp_path, monkeypatch) -> None:
+    """H4 regression (lake path): the both-sides backtest that DECIDES the promoted sides is a
+    fitted selection, so it must stop at the walk-forward's locked-hold-out boundary — the
+    hold-out then evaluates a side selection it never influenced."""
+    import src.strategies.lake_research as lr
+    from src.backtest.config import load_backtest_config
+    from src.backtest.service import build_lake_inputs
+    from src.backtest.walkforward import holdout_split
+    from src.exchange.metadata import load_metadata_for
+    from src.strategies.config import load_strategies_config
+
+    store = SeriesStore(tmp_path)
+    iv = timeframe_ms(TF)
+    h1 = timeframe_ms("1h")
+    start = (1_700_000_000_000 // h1) * h1
+    end = start + 600 * iv
+    _seed_lake(store, start, end)
+
+    data_cfg = _cfg(start, end)
+    lake_inputs = build_lake_inputs(
+        store, exchange_id=EX, symbols=[SYM], timeframe=TF, base_timeframe=TF,
+        funding_timeframe=FUND, start_ms=start, end_ms=end, oi_timeframe=OI_TF,
+    )
+    cfg = load_backtest_config()
+    _, holdout_lo, data_hi = holdout_split(lake_inputs, cfg.walk_forward.holdout_frac)
+    assert holdout_lo < data_hi  # the seeded window really has a locked hold-out
+
+    seen: dict[str, int] = {}
+    real_run_engine = lr.run_engine
+
+    def spy(cfg_, meta_, inputs, strategy=None, *, label=""):
+        if inputs and any(s.bars for s in inputs):
+            seen[label] = max(b["ts"] for s in inputs for b in s.bars)
+        return real_run_engine(cfg_, meta_, inputs, strategy=strategy, label=label)
+
+    monkeypatch.setattr(lr, "run_engine", spy)
+    sc = load_strategies_config()
+    cand = sc.candidate("basis_reversion")
+    lr.validate_candidate_on_lake(
+        cand, sc, cfg, load_metadata_for(data_cfg.exchange_id), lake_inputs
+    )
+
+    label = f"{cand.id}_lake_both"
+    assert label in seen, "the side-decision backtest must have run"
+    assert seen[label] < holdout_lo  # not one hold-out bar reached the side decision
+
+
 def test_validate_all_on_lake_errors_without_data(tmp_path) -> None:
     store = SeriesStore(tmp_path)  # empty store → no bars
     start, end = 0, 600 * timeframe_ms(TF)

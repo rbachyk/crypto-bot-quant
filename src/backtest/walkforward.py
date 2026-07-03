@@ -43,15 +43,27 @@ class WalkForwardResult:
     folds_passed: int = 0
     passed: bool = False
     reasons: list[str] = field(default_factory=list)
+    # Pooled per-trade OOS R-multiples across ALL folds (hold-out excluded) — the sample the
+    # deflated-Sharpe significance is computed on, so trade count genuinely matters.
+    oos_trade_rs: list[float] = field(default_factory=list)
+    # Per-trade Sharpe proxies of the strategy variants genuinely COMPARED during selection
+    # (e.g. the long/short side variants of the side decision). Empty ⇒ single trial ⇒ the
+    # deflation term collapses to plain PSR (no artificial deflation for a one-config run).
+    trial_sharpes: list[float] = field(default_factory=list)
 
     def overfitting(self) -> dict:
-        """Section-16 anti-overfitting controls over the folds (multiple-testing aware)."""
+        """Section-16 anti-overfitting controls (multiple-testing aware).
+
+        The significance statistic is a PSR over the POOLED per-trade OOS R-multiples across the
+        folds (n_obs = autocorrelation-discounted trade count, skew/kurtosis from the sample) —
+        NOT over the handful of fold means, so a 500-trade and a 25-trade strategy with the same
+        fold means are no longer equally 'significant'. The deflation benchmark is the expected
+        max of ``trial_sharpes`` (the selection breadth the caller actually exercised)."""
         from src.backtest.overfitting import overfitting_summary
 
-        # Each fold is a trial; its out-of-sample expectancy is a per-trial 'Sharpe' proxy.
-        trial_sharpes = [f.report.expectancy_r for f in self.folds] or [0.0]
-        n_trades = sum(f.report.trade_count for f in self.folds)
-        return overfitting_summary(trial_sharpes, trial_sharpes, n_trades).to_dict()
+        return overfitting_summary(
+            list(self.trial_sharpes), list(self.oos_trade_rs), len(self.oos_trade_rs)
+        ).to_dict()
 
     def to_dict(self) -> dict:
         return {
@@ -120,28 +132,53 @@ def _evaluate_fold_directional(report: BacktestReport, kc: KillCriteria) -> tupl
     return (not failures), failures
 
 
+def holdout_split(inputs: list[SymbolInput], holdout_frac: float) -> tuple[int, int, int]:
+    """``(data_lo, holdout_lo_ts, data_hi)`` — THE hold-out boundary, computed in one place.
+
+    Anchored to the ACTUAL data timestamp range, not a bar COUNT from ts=0. Real lake data is
+    rebased to the window start, so a contract listed mid-window has its first bar at a large ts
+    offset (not 0); laying folds over [0, n_bars*iv) would shift every fold off the real data and
+    evaluate the edge on empty pre-listing time. With dense data starting at ts=0 this reduces
+    exactly to the old bar-count arithmetic (data_lo=0, n_span=n_bars).
+
+    Shared by the walk-forward AND every FITTED selection step (e.g. the side decision — H4), so
+    the two can never drift apart: anything that influences the promoted configuration must only
+    see ``[data_lo, holdout_lo_ts)``; the locked hold-out ``[holdout_lo_ts, data_hi)`` is
+    evaluated exactly once, on a configuration it never influenced (Section 16)."""
+    iv = _iv(inputs)
+    with_bars = [s for s in inputs if s.bars]
+    data_lo = min((s.bars[0]["ts"] for s in with_bars), default=0)
+    data_hi = max((s.bars[-1]["ts"] for s in with_bars), default=-iv) + iv
+    n_span = max(0, (data_hi - data_lo) // iv)  # grid slots the data actually spans
+    holdout_slots = int(n_span * holdout_frac)
+    return data_lo, data_lo + (n_span - holdout_slots) * iv, data_hi
+
+
+def pre_holdout_inputs(cfg: BacktestConfig, inputs: list[SymbolInput]) -> list[SymbolInput]:
+    """Inputs truncated at the walk-forward's locked-hold-out boundary (timestamps unshifted).
+
+    Any data-fitted choice (side decision, parameter selection) must run on THIS window, never on
+    the full inputs — otherwise the hold-out "confirms" a selection that was fitted on it (H4)."""
+    _, holdout_lo_ts, _ = holdout_split(inputs, cfg.walk_forward.holdout_frac)
+    return rebase_window(inputs, 0, holdout_lo_ts)
+
+
 def run_walk_forward(
     cfg: BacktestConfig,
     meta: MetadataConfig,
     inputs: list[SymbolInput],
     strategy: Strategy | PortfolioStrategy | None = None,
+    *,
+    trial_sharpes: list[float] | None = None,
 ) -> WalkForwardResult:
+    """``trial_sharpes``: per-trade Sharpe proxies of the strategy variants the caller genuinely
+    compared before settling on ``strategy`` (e.g. the side-decision variants) — the deflation
+    benchmark for the deflated-Sharpe kill-criterion. Omitted ⇒ one trial ⇒ plain PSR."""
     wf = cfg.walk_forward
     kc = wf.kill_criteria
-    iv = _iv(inputs)
-    out = WalkForwardResult()
+    out = WalkForwardResult(trial_sharpes=list(trial_sharpes or []))
 
-    # Anchor folds to the ACTUAL data timestamp range, not a bar COUNT from ts=0. Real lake data
-    # is rebased to the window start, so a contract listed mid-window has its first bar at a large
-    # ts offset (not 0); laying folds over [0, n_bars*iv) would shift every fold off the real data
-    # and evaluate the edge on empty pre-listing time. With dense data starting at ts=0 this
-    # reduces exactly to the old bar-count arithmetic (data_lo=0, n_span=n_bars).
-    with_bars = [s for s in inputs if s.bars]
-    data_lo = min((s.bars[0]["ts"] for s in with_bars), default=0)
-    data_hi = max((s.bars[-1]["ts"] for s in with_bars), default=-iv) + iv
-    n_span = max(0, (data_hi - data_lo) // iv)  # grid slots the data actually spans
-    holdout_slots = int(n_span * wf.holdout_frac)
-    test_end_ts = data_lo + (n_span - holdout_slots) * iv
+    data_lo, test_end_ts, data_hi = holdout_split(inputs, wf.holdout_frac)
     fold_region = test_end_ts - data_lo
     fold_span = fold_region // wf.folds if wf.folds > 0 else fold_region
 
@@ -155,7 +192,10 @@ def run_walk_forward(
         lo = data_lo + i * fold_span
         hi = data_lo + (i + 1) * fold_span if i < wf.folds - 1 else test_end_ts
         windowed = rebase_window(inputs, lo, hi)
-        report = run_engine(cfg, meta, windowed, strategy=strategy, label=f"wf_fold_{i}").report
+        run = run_engine(cfg, meta, windowed, strategy=strategy, label=f"wf_fold_{i}")
+        report = run.report
+        # Pool the fold's per-trade R-multiples — the deflated-Sharpe sample (see overfitting()).
+        out.oos_trade_rs.extend(float(t.pnl_r) for t in run.result.trades)
         passed, failures = fold_eval(report, kc)
         out.folds.append(FoldResult(i, lo, hi, passed, failures, report))
 
@@ -176,7 +216,7 @@ def run_walk_forward(
 
     # 2) Locked hold-out — evaluated exactly once, here at the end (Section 16).
     holdout_report: BacktestReport | None = None
-    if holdout_slots > 0:
+    if test_end_ts < data_hi:
         windowed = rebase_window(inputs, test_end_ts, data_hi)
         holdout_report = run_engine(
             cfg, meta, windowed, strategy=strategy, label="wf_holdout"
@@ -190,10 +230,12 @@ def run_walk_forward(
         )
 
     # 3) Verdict. STABILITY (folds), ECONOMIC VIABILITY (locked hold-out, full kill-criteria), and
-    # MULTIPLE-TESTING SIGNIFICANCE (deflated Sharpe over the fold trials) must ALL hold. The
+    # MULTIPLE-TESTING SIGNIFICANCE (deflated Sharpe: PSR over the POOLED per-trade OOS
+    # R-multiples, deflated by the selection trials actually compared) must ALL hold. The
     # deflated-Sharpe floor is what stops a no-edge strategy from sneaking through on directional
     # folds that happened to land positive by luck — a genuinely edgeless strategy averages a
-    # deflated Sharpe below 0.5.
+    # deflated Sharpe below 0.5, and a thin sample can no longer borrow significance it hasn't
+    # earned (n_obs is the autocorrelation-discounted trade count, not the fold count).
     if out.folds_passed < kc.min_folds_passed:
         word = "passed" if wf.fold_criterion == "economic" else "directionally positive"
         out.reasons.append(

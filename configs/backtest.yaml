@@ -117,16 +117,20 @@ backtest:
     fold_criterion: directional
     # Kill-criteria, declared up front (Section 16). WF passes when >= min_folds_passed folds pass
     # the fold test AND the locked hold-out clears ALL economic criteria AND the deflated Sharpe
-    # (multiple-testing-aware significance over the folds) clears its floor.
+    # (multiple-testing-aware significance over the pooled OOS trades) clears its floor.
     kill_criteria:
       min_oos_expectancy_r: 0.03
       min_oos_profit_factor: 1.10
       max_oos_drawdown: 0.25
       min_folds_passed: 4
       min_trades_per_fold: 20
-      # Deflated Sharpe (PSR over the fold trials) ≥ this. 0.5 = "more likely than not a real edge
-      # net of multiple testing"; a genuinely edgeless strategy averages below 0.5 (the neutral
-      # point of a probability — not a number fitted to any candidate).
+      # Deflated Sharpe ≥ this. A PSR-style probability in [0,1]: PSR of the POOLED per-trade OOS
+      # R-multiples across the folds (n_obs = trade count discounted for autocorrelation, using the
+      # sample's own skew/kurtosis), deflated by the expected max of the selection trials genuinely
+      # compared (the side-decision variants; a single-config run = one trial = plain PSR). Sample
+      # size matters: 25 lucky trades no longer score like 500. 0.5 = "more likely than not a real
+      # edge net of multiple testing"; a genuinely edgeless strategy averages below 0.5 (the
+      # neutral point of a probability — not a number fitted to any candidate).
       min_deflated_sharpe: 0.5
 
   # --- Stress tests (Section 16 / FEE + SLIP gates) -------------------------

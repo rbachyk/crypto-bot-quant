@@ -164,12 +164,16 @@ class BasketPaperLoop:
             })
         return out
 
-    def close_all(self, ts: int, bars_at: dict[str, dict]) -> None:
-        """Flatten every leg at the latest bar (session end / stop)."""
+    def close_all(self, ts: int, bars_at: dict[str, dict], by_symbol: dict) -> None:
+        """Flatten every leg at the latest bar (session end / stop). ``by_symbol`` supplies each
+        leg's SymbolInput (spread model) for the taker close, same as the rebalance path."""
         for sym, leg in list(self._holdings.items()):
             bar = bars_at.get(sym)
-            if bar is not None:
-                self._equity += self.engine._close_leg(leg, bar, "end_of_data", self._result)
+            sym_in = by_symbol.get(sym)
+            if bar is not None and sym_in is not None:
+                self._equity += self.engine._close_leg(
+                    leg, bar, "end_of_data", self._result, sym_in
+                )
         self._holdings.clear()
         self._flush()
         if self.on_positions is not None:
@@ -184,7 +188,7 @@ class BasketPaperLoop:
             self.step(ts, bars_at, rows_at, by_symbol)
             last = snap
         if last is not None:
-            self.close_all(last[0], last[1])
+            self.close_all(last[0], last[1], by_symbol)
         return self._result
 
     def _flush(self) -> None:
@@ -245,7 +249,7 @@ def _clear_orphan_open_positions(session_id: str) -> None:
     end-clear) leaves orphan rows that linger on the dashboard forever — the new run uses a new id
     and never overwrites them. We delete only rows whose session_id shares this run's stream prefix
     (everything up to and including the last ':', i.e. the id minus the run stamp) and differ from
-    the current id — so concurrent OTHER streams (different strategy/env/timeframe) are untouched."""
+    the current id — concurrent OTHER streams (different strategy/env/timeframe) are untouched."""
     from src.db.base import session_scope
     from src.db.models import OpenPosition
 
@@ -292,14 +296,13 @@ def run_basket_paper_session(
     from src.exchange.metadata import load_metadata_for
     from src.killswitch import KillSwitch
     from src.live.data_manager import LiveDataManager
+    from src.live.loop import _resolve_live_timeframe
     from src.live.realtime import LiveCandidateFeed
     from src.live.websocket_feed import live_feed_source
     from src.paper.report import build_paper_report
     from src.paper.run import persist_paper_session
     from src.strategies.candidates import build_strategy
     from src.strategies.config import load_strategies_config
-
-    from src.live.loop import _resolve_live_timeframe
 
     settings = settings or get_settings()
     data_cfg = data_cfg or load_data_config()
@@ -359,7 +362,11 @@ def run_basket_paper_session(
             persisted = len(session.trades)
         if on_tick is not None:
             on_tick(ticks, f"tick {ticks}: {len(session.trades)} legs, {len(bars_at)} symbols")
-    loop.close_all(int(max((b["ts"] for b in last_bars.values()), default=0)), last_bars)
+    loop.close_all(
+        int(max((b["ts"] for b in last_bars.values()), default=0)),
+        last_bars,
+        feed.symbol_inputs(),
+    )
 
     persist_paper_session(session, build_paper_report(session), settings)
     return len(session.trades)

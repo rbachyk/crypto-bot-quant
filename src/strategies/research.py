@@ -20,10 +20,12 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 
 from src.backtest.config import BacktestConfig, load_backtest_config
+from src.backtest.engine import Trade
 from src.backtest.metrics import BacktestReport
+from src.backtest.overfitting import trade_sharpe
 from src.backtest.service import run_engine
 from src.backtest.stress import fee_stress, slippage_stress
-from src.backtest.walkforward import run_walk_forward
+from src.backtest.walkforward import pre_holdout_inputs, run_walk_forward
 from src.config import Settings, get_settings
 from src.exchange.metadata import MetadataConfig, load_metadata_config
 from src.strategies.candidates import build_strategy
@@ -109,6 +111,15 @@ def _decide_sides(report: BacktestReport, min_side_expectancy_r: float) -> SideD
     )
 
 
+def _side_trial_sharpes(trades: list[Trade]) -> list[float]:
+    """Per-trade Sharpe of each side variant the side decision genuinely COMPARED — the deflation
+    benchmark for the walk-forward's deflated-Sharpe kill-criterion (H3: selection breadth must be
+    paid for). A side with fewer than two trades carries no measurable trial."""
+    longs = [t.pnl_r for t in trades if t.side > 0]
+    shorts = [t.pnl_r for t in trades if t.side < 0]
+    return [trade_sharpe(rs) for rs in (longs, shorts) if len(rs) >= 2]
+
+
 def validate_candidate(
     cand: CandidateConfig,
     strat_cfg: StrategiesConfig,
@@ -117,9 +128,13 @@ def validate_candidate(
 ) -> CandidateValidation:
     inputs = build_candidate_inputs(cand, edge=True)
 
-    # 1) Full backtest with BOTH sides to measure each side independently.
+    # 1) Both-sides backtest to measure each side independently. The side decision is a FITTED
+    # selection, so it must never see the locked hold-out the walk-forward evaluates once (H4):
+    # measure the sides only on the pre-hold-out window (same boundary the walk-forward locks).
+    side_inputs = pre_holdout_inputs(cfg, inputs)
     both = build_strategy(cand, strat_cfg.strategy_version, cand.params)
-    full_both = run_engine(cfg, meta, inputs, strategy=both, label=f"{cand.id}_both").report
+    both_run = run_engine(cfg, meta, side_inputs, strategy=both, label=f"{cand.id}_both")
+    full_both = both_run.report
     side_decision = _decide_sides(full_both, strat_cfg.min_side_expectancy_r)
 
     shelved: list[str] = []
@@ -137,8 +152,12 @@ def validate_candidate(
         cfg, meta, inputs, strategy=strategy, label=f"{cand.id}_promoted"
     ).report
 
-    # 4) Walk-forward + fee/slippage stress on the promoted configuration.
-    wf = run_walk_forward(cfg, meta, inputs, strategy=strategy)
+    # 4) Walk-forward + fee/slippage stress on the promoted configuration. The side variants
+    # compared in (1) are the selection trials the deflated Sharpe must deflate for.
+    wf = run_walk_forward(
+        cfg, meta, inputs, strategy=strategy,
+        trial_sharpes=_side_trial_sharpes(both_run.result.trades),
+    )
     base_e = promoted_report.expectancy_r
     fee = fee_stress(cfg, meta, inputs, baseline_expectancy_r=base_e, strategy=strategy)
     slip = slippage_stress(cfg, meta, inputs, baseline_expectancy_r=base_e, strategy=strategy)

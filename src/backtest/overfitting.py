@@ -92,6 +92,22 @@ def probabilistic_sharpe_ratio(
     return _phi((observed_sharpe - benchmark_sharpe) * math.sqrt(n_obs - 1) / den)
 
 
+def expected_max_sharpe(trial_sharpes: list[float]) -> float:
+    """Expected maximum of N trial Sharpes under the no-edge null (Bailey & LdP) — the benchmark
+    a selected winner must beat. 0.0 when there was no genuine selection (fewer than two trials,
+    or no spread across the trials → single effective trial)."""
+    n_trials = len(trial_sharpes)
+    if n_trials < 2:
+        return 0.0
+    sr_var = statistics.variance(trial_sharpes)
+    if sr_var <= 0:
+        return 0.0
+    return math.sqrt(sr_var) * (
+        (1 - _EULER) * _phi_inv(1 - 1.0 / n_trials)
+        + _EULER * _phi_inv(1 - 1.0 / (n_trials * math.e))
+    )
+
+
 def deflated_sharpe_ratio(
     trial_sharpes: list[float], n_obs: int, *, skew: float = 0.0, kurtosis: float = 3.0
 ) -> float:
@@ -99,20 +115,52 @@ def deflated_sharpe_ratio(
 
     Corrects for selection across the ``len(trial_sharpes)`` configurations tried — the more
     trials, the higher the benchmark the winner must beat to be credible (Section 16)."""
-    n_trials = len(trial_sharpes)
-    if n_trials == 0:
+    if not trial_sharpes:
         return 0.0
     observed = max(trial_sharpes)
-    sr_var = statistics.variance(trial_sharpes) if n_trials > 1 else 0.0
-    if sr_var <= 0:
-        # No spread across trials → benchmark is 0 (single effective trial).
-        return probabilistic_sharpe_ratio(observed, 0.0, n_obs, skew, kurtosis)
-    # Expected maximum of N standard-normal trial Sharpes (Bailey & LdP).
-    sr_star = math.sqrt(sr_var) * (
-        (1 - _EULER) * _phi_inv(1 - 1.0 / n_trials)
-        + _EULER * _phi_inv(1 - 1.0 / (n_trials * math.e))
+    return probabilistic_sharpe_ratio(
+        observed, expected_max_sharpe(trial_sharpes), n_obs, skew, kurtosis
     )
-    return probabilistic_sharpe_ratio(observed, sr_star, n_obs, skew, kurtosis)
+
+
+def trade_sharpe(returns: list[float]) -> float:
+    """Per-observation Sharpe (mean / sample std) of a per-trade return / R-multiple series."""
+    n = len(returns)
+    if n < 2:
+        return 0.0
+    mean = sum(returns) / n
+    var = sum((r - mean) ** 2 for r in returns) / (n - 1)
+    return mean / math.sqrt(var) if var > 0 else 0.0
+
+
+def deflated_sharpe_from_returns(
+    returns: list[float], trial_sharpes: list[float] | None = None
+) -> float:
+    """Deflated Sharpe computed from the POOLED per-trade return sample (the statistically
+    meaningful form — H3 fix): PSR of the sample's own per-trade Sharpe, with
+
+    * ``n_obs`` = the EFFECTIVE sample size (trade count discounted for autocorrelation), so a
+      500-trade edge and a 25-trade fluke with the same mean are no longer indistinguishable;
+    * skew/kurtosis estimated from the same sample (fat-tailed R-multiples widen the PSR band);
+    * benchmark = the expected max of the ``trial_sharpes`` genuinely COMPARED during selection
+      (same per-trade-Sharpe units). With fewer than two trials the deflation term collapses to
+      plain PSR against 0 — a single-config harness gets no artificial deflation and no credit.
+    """
+    n = len(returns)
+    if n < 2:
+        return 0.0
+    mean = sum(returns) / n
+    m2 = sum((r - mean) ** 2 for r in returns) / n
+    if m2 <= 0:
+        # Degenerate sample (every trade identical) — nothing statistical to say.
+        return 1.0 if mean > 0 else 0.0
+    sd = math.sqrt(m2)
+    skew = sum((r - mean) ** 3 for r in returns) / n / sd**3
+    kurt = sum((r - mean) ** 4 for r in returns) / n / sd**4
+    n_eff = int(round(effective_sample_size(returns)))
+    return probabilistic_sharpe_ratio(
+        trade_sharpe(returns), expected_max_sharpe(list(trial_sharpes or [])), n_eff, skew, kurt
+    )
 
 
 def effective_sample_size(returns: list[float]) -> float:
@@ -181,11 +229,15 @@ class OverfittingSummary:
 def overfitting_summary(
     trial_sharpes: list[float], returns: list[float], n_trades: int
 ) -> OverfittingSummary:
-    """Bundle the Section-16 controls for a report block."""
-    n_obs = max(len(returns), 2)
+    """Bundle the Section-16 controls for a report block.
+
+    ``returns`` is the POOLED per-trade OOS return sample (R-multiples across all folds) that the
+    significance is computed on; ``trial_sharpes`` are the per-trade Sharpe proxies of the
+    configurations genuinely COMPARED during selection (selection breadth — e.g. the long/short
+    side variants the side decision chose between). Zero or one trial ⇒ plain PSR, no deflation."""
     return OverfittingSummary(
-        deflated_sharpe=deflated_sharpe_ratio(trial_sharpes or [0.0], n_obs),
+        deflated_sharpe=deflated_sharpe_from_returns(returns, trial_sharpes),
         effective_sample_size=effective_sample_size(returns),
         sample_adequacy=sample_adequacy(n_trades),
-        n_trials=len(trial_sharpes),
+        n_trials=max(1, len(trial_sharpes)),
     )

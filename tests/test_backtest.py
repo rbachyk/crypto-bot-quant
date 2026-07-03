@@ -812,6 +812,43 @@ def test_walk_forward_folds_are_disjoint_and_ordered(cfg, meta, ref_inputs):
     assert wf.holdout.lo_ts >= wf.folds[-1].hi_ts
 
 
+def test_side_decision_window_ends_at_the_locked_holdout_boundary(cfg, meta, ref_inputs):
+    """H4 regression: any FITTED selection (the side decision) sees only the pre-hold-out window.
+    ``pre_holdout_inputs`` must truncate exactly at the SAME boundary the walk-forward locks
+    (shared ``holdout_split`` helper — the two cannot drift), so the hold-out evaluates a side
+    selection it never influenced."""
+    from src.backtest.walkforward import holdout_split, pre_holdout_inputs
+
+    data_lo, holdout_lo, data_hi = holdout_split(ref_inputs, cfg.walk_forward.holdout_frac)
+    assert data_lo < holdout_lo < data_hi  # a real hold-out exists with holdout_frac > 0
+
+    pre = pre_holdout_inputs(cfg, ref_inputs)
+    pre_max = max(b["ts"] for s in pre for b in s.bars)
+    assert pre_max < holdout_lo  # not one bar of the hold-out is visible to the selection
+    # Feature rows are truncated too (a row's decision would otherwise leak hold-out data).
+    assert all(r["decision_ts"] < holdout_lo for s in pre for r in s.frame.rows)
+
+    wf = run_walk_forward(cfg, meta, ref_inputs)
+    assert wf.holdout.lo_ts == holdout_lo  # identical boundary in the walk-forward itself
+
+
+def test_walk_forward_pools_oos_trades_and_carries_trial_count(cfg, meta, ref_inputs):
+    """H3 regression: the deflated Sharpe is computed from the pooled per-trade OOS R-multiples
+    (one per fold trade), and the selection trials passed by the caller flow into the deflation
+    term (more trials compared ⇒ lower significance for the same sample)."""
+    wf = run_walk_forward(cfg, meta, ref_inputs)
+    assert len(wf.oos_trade_rs) == sum(f.report.trade_count for f in wf.folds)
+    ov = wf.overfitting()
+    assert ov["n_trials"] == 1  # single-config run ⇒ plain PSR, no artificial deflation
+    assert 0.0 <= ov["deflated_sharpe"] <= 1.0
+
+    wide = run_walk_forward(
+        cfg, meta, ref_inputs, trial_sharpes=[0.2, -0.1, 0.05, -0.15]
+    ).overfitting()
+    assert wide["n_trials"] == 4
+    assert wide["deflated_sharpe"] < ov["deflated_sharpe"]  # selection breadth is paid for
+
+
 def test_fee_stress_survives_double_fees(cfg, meta, ref_inputs):
     res = fee_stress(cfg, meta, ref_inputs)
     assert res.kind == "fee" and res.multiplier == cfg.stress.fee_multiplier
