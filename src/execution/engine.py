@@ -122,6 +122,20 @@ class ExecutionEngine:
             # refusal as a graceful non-placement, never a crash.
             return ExecutionResult(False, reason=f"live_order_refused:{exc}")
 
+        # A zero fill is a clean NON-FILL: no position was opened (the live venue
+        # cancels the unfilled entry at its observation-window end), so there is no
+        # trade to book and no protection to demand — distinct from the invariant
+        # breach below, where a REAL position exists without an exchange-side stop.
+        if bracket.fill.qty <= 0.0:
+            return ExecutionResult(
+                False,
+                reason="entry_unfilled",
+                plan=plan,
+                fill=bracket.fill,
+                fully_filled=False,
+                remaining_qty=bracket.remaining_qty,
+            )
+
         # Section 2.2 invariant: the position must carry exchange-side protection.
         if not bracket.position.has_exchange_side_stop():
             return ExecutionResult(False, reason="position_without_exchange_side_stop")

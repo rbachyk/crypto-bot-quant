@@ -476,3 +476,213 @@ def test_demo_env_is_not_treated_as_live() -> None:
 def test_invalid_exchange_env_is_rejected() -> None:
     with pytest.raises(ValueError, match="EXCHANGE_ENV"):
         Settings(_env_file=None, exchange_env="sandbox")
+
+
+# --------------------------------------------------------------------------- #
+# C5: entry fills are OBSERVED via order-status polling, never assumed         #
+# --------------------------------------------------------------------------- #
+class PollingFakeCcxt(FakeCcxt):
+    """Fake whose create response carries NO fill info (like Bybit's create response for
+    a resting order) — the fill is only observable via fetch_order. cancel_order moves
+    the order to 'canceled' unless ``cancel_raises`` is set."""
+
+    def __init__(
+        self,
+        *,
+        status: str = "open",
+        filled: float = 0.0,
+        average: float | None = None,
+        cancel_raises: bool = False,
+    ) -> None:
+        super().__init__()
+        self.status = status
+        self.filled = filled
+        self.average = average
+        self.cancel_raises = cancel_raises
+        self.fetch_calls: list = []
+
+    def create_order(self, symbol, type, side, qty, price, params=None):  # noqa: A002
+        super().create_order(symbol, type, side, qty, price, params)
+        return {"id": "oid-1"}  # Bybit create response: no filled/average/status
+
+    def fetch_order(self, oid, symbol, params=None):
+        self.fetch_calls.append((oid, symbol, dict(params or {})))
+        return {
+            "id": oid,
+            "status": self.status,
+            "filled": self.filled,
+            "average": self.average,
+            "fee": {"cost": 0.1},
+        }
+
+    def cancel_order(self, oid, symbol, params=None):
+        if self.cancel_raises:
+            raise RuntimeError("cancel rejected")
+        self.cancelled.append(oid)
+        self.status = "canceled"
+        return {}
+
+
+def _polling_venue(fake) -> CcxtLiveVenue:
+    return CcxtLiveVenue(
+        load_metadata_config(),
+        _testnet_settings(),
+        client=fake,
+        fill_timeout_s=0.05,
+        fill_poll_interval_s=0.01,
+    )
+
+
+def test_fill_observed_via_fetch_order_when_create_response_omits_filled() -> None:
+    """The create response omits ``filled`` (Bybit does); the venue must POLL the order
+    and book the OBSERVED fill qty + average price — not assume a full fill at limit."""
+    fake = PollingFakeCcxt(status="closed", filled=0.01, average=50_100.0)
+    res = _polling_venue(fake).place_bracket(
+        _plan(), ref_price=50_000.0, realized_slippage_frac=0.001, latency_ms=5.0
+    )
+    assert fake.fetch_calls  # the fill was observed, not assumed
+    assert res.fully_filled and res.fill.qty == 0.01
+    assert res.position.qty == 0.01 and res.position.entry_price == 50_100.0
+    assert res.position.has_exchange_side_stop()
+    assert not fake.cancelled  # nothing to cancel — it filled
+
+
+def test_never_fills_cancels_remainder_and_books_nothing() -> None:
+    """Unfilled at the window end: the remainder is cancelled (and VERIFIED) and the
+    result is a clean no-position non-fill — no phantom VenuePosition, no trade."""
+    fake = PollingFakeCcxt(status="open", filled=0.0)
+    venue = _polling_venue(fake)
+    res = venue.place_bracket(
+        _plan(), ref_price=50_000.0, realized_slippage_frac=0.001, latency_ms=5.0
+    )
+    assert fake.cancelled == ["oid-1"]  # remainder cancelled on the exchange
+    assert res.fill.qty == 0.0 and res.position.qty == 0.0
+    assert not res.position.has_exchange_side_stop()  # no protection markers on a non-fill
+    assert not res.fully_filled and res.remaining_qty == pytest.approx(0.01)
+    assert not venue.positions  # no phantom position in the mirror
+    assert not venue.open_orders  # cancel confirmed → nothing left tracked as resting
+
+
+def test_partial_fill_books_only_the_filled_part() -> None:
+    """Partially filled at the window end: cancel the remainder, book the filled qty at
+    the observed average, and size the position (whose attached SL/TP cover it) to it."""
+    fake = PollingFakeCcxt(status="open", filled=0.004, average=50_050.0)
+    venue = _polling_venue(fake)
+    res = venue.place_bracket(
+        _plan(), ref_price=50_000.0, realized_slippage_frac=0.001, latency_ms=5.0
+    )
+    assert fake.cancelled == ["oid-1"]
+    assert res.fill.qty == pytest.approx(0.004)
+    assert res.position.qty == pytest.approx(0.004)
+    assert res.position.entry_price == 50_050.0
+    assert res.position.has_exchange_side_stop()  # the filled part IS protected
+    assert not res.fully_filled and res.remaining_qty == pytest.approx(0.006)
+    assert venue.positions["BTC/USDT:USDT"].qty == pytest.approx(0.004)
+    assert not venue.open_orders  # remainder cancelled → not tracked as resting
+
+
+def test_unconfirmed_cancel_keeps_the_entry_tracked() -> None:
+    """If the remainder cancel FAILS and the order is still open, the venue must not
+    assume it died: the entry stays tracked as a resting order for reconciliation."""
+    fake = PollingFakeCcxt(status="open", filled=0.0, cancel_raises=True)
+    venue = _polling_venue(fake)
+    res = venue.place_bracket(
+        _plan(), ref_price=50_000.0, realized_slippage_frac=0.001, latency_ms=5.0
+    )
+    assert res.fill.qty == 0.0 and not venue.positions
+    assert f"{_PREFIX}entry_1" in venue.open_orders  # still resting on the exchange → tracked
+    assert f"{_PREFIX}entry_1" in res.resting_order_ids
+
+
+def test_create_response_with_positive_full_fill_is_trusted_without_polling() -> None:
+    """A create response that positively reports the full fill (the pre-existing fake
+    contract) books directly — no polling, no behaviour change for such venues."""
+    fake = FakeCcxt()  # returns filled == qty in the create response
+    res = _venue(fake).place_bracket(
+        _plan(), ref_price=50_000.0, realized_slippage_frac=0.001, latency_ms=5.0
+    )
+    assert res.fully_filled and res.position.qty == 0.01
+
+
+# --------------------------------------------------------------------------- #
+# C6: place_order sends protective legs as conditional reduce-only orders      #
+# --------------------------------------------------------------------------- #
+def _protective(order_type: OrderType, *, role: str, stop_price=None, price=None) -> Order:
+    return Order(
+        client_id=f"{_PREFIX}{role}_9",
+        symbol="BTC/USDT:USDT",
+        side="sell",
+        qty=0.01,
+        order_type=order_type,
+        role=role,
+        price=price,
+        stop_price=stop_price,
+        reduce_only=True,
+        tags=_TAGS,
+    )
+
+
+def test_place_order_stop_market_is_conditional_reduce_only() -> None:
+    fake = FakeCcxt()
+    _venue(fake).place_order(
+        _protective(OrderType.STOP_MARKET, role="stop", stop_price=49_000.0)
+    )
+    sent = fake.orders[-1]
+    assert sent["type"] == "market" and sent["price"] is None
+    assert sent["params"]["stopLossPrice"] == 49_000.0  # trigger — NOT an immediate market
+    assert sent["params"]["reduceOnly"] is True
+    assert sent["params"]["clientOrderId"].startswith(_PREFIX)
+
+
+def test_place_order_take_profit_market_is_conditional_reduce_only() -> None:
+    fake = FakeCcxt()
+    _venue(fake).place_order(
+        _protective(OrderType.TAKE_PROFIT_MARKET, role="take_profit", stop_price=52_000.0)
+    )
+    sent = fake.orders[-1]
+    assert sent["type"] == "market" and sent["price"] is None
+    assert sent["params"]["takeProfitPrice"] == 52_000.0
+    assert sent["params"]["reduceOnly"] is True
+
+
+def test_place_order_stop_limit_carries_trigger_and_limit_price() -> None:
+    fake = FakeCcxt()
+    _venue(fake).place_order(
+        _protective(OrderType.STOP_LIMIT, role="stop", stop_price=49_000.0, price=48_950.0)
+    )
+    sent = fake.orders[-1]
+    assert sent["type"] == "limit" and sent["price"] == 48_950.0
+    assert sent["params"]["stopLossPrice"] == 49_000.0
+    assert sent["params"]["reduceOnly"] is True
+
+
+def test_place_order_trailing_stop_raises_instead_of_degrading_to_market() -> None:
+    fake = FakeCcxt()
+    trail = _protective(OrderType.TRAILING_STOP, role="trailing")
+    trail.trail_offset = 0.02
+    with pytest.raises(NotImplementedError, match="trailing"):
+        _venue(fake).place_order(trail)
+    assert not fake.orders  # nothing was sent — no silent market-order degradation
+
+
+def test_place_order_trigger_leg_without_trigger_price_is_refused() -> None:
+    fake = FakeCcxt()
+    with pytest.raises(ValueError, match="no.*trigger price"):
+        _venue(fake).place_order(_protective(OrderType.STOP_MARKET, role="stop"))
+    assert not fake.orders
+
+
+def test_cancel_replace_of_a_stop_leg_stays_conditional() -> None:
+    """cancel_replace (its documented purpose: protective-leg replacement) must place the
+    replacement as a conditional reduce-only order, not an instant market order."""
+    fake = FakeCcxt()
+    venue = _venue(fake)
+    old = _protective(OrderType.STOP_MARKET, role="stop", stop_price=49_000.0)
+    venue.open_orders[old.client_id] = old
+    new = _protective(OrderType.STOP_MARKET, role="stop", stop_price=49_500.0)
+    new.client_id = f"{_PREFIX}stop_10"
+    assert venue.cancel_replace(old.client_id, new) == new.client_id
+    assert old.client_id in fake.cancelled
+    sent = fake.orders[-1]
+    assert sent["params"]["stopLossPrice"] == 49_500.0
+    assert sent["params"]["reduceOnly"] is True

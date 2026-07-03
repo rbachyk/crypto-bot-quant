@@ -30,6 +30,13 @@ execution:
   # (Section 12: momentum has no fixed TP — the trailing/time-stop is the exit).
   trailing_offset_frac: 0.0
 
+  # Live entry fill OBSERVATION (Section 18): after creating the entry order the live
+  # venue polls the exchange order status (with light backoff) until this window
+  # elapses, books only the OBSERVED filled qty/avg price, and cancels any unfilled
+  # remainder at window end — a fill is never assumed from the create response alone.
+  entry_fill_timeout_s: 5.0
+  entry_fill_poll_interval_s: 0.2
+
   # Simulated-venue fill model (paper/backtest; a real venue swaps in measured
   # fills behind the same adapter). Slippage is always adverse to the taker.
   simulated_latency_ms: 40.0

@@ -96,6 +96,24 @@ def test_ownership_prefix_and_is_own() -> None:
     assert own.new_client_id("entry") != cid  # unique
 
 
+def test_client_ids_unique_across_restarts() -> None:
+    """H5 regression: a restarted process (same prefix, fresh OwnershipPolicy) must NOT
+    re-mint the previous session's ids — Bybit rejects a duplicate orderLinkId among
+    active orders, so a colliding stop replacement would be rejected and leave the
+    position unprotected. Recognition of the OLD session's ids must keep working."""
+    s = _settings()
+    before, after = OwnershipPolicy(s), OwnershipPolicy(s)  # `after` simulates a restart
+    roles = ("entry", "stop", "tp", "trail")
+    ids_before = {before.new_client_id(r) for r in roles for _ in range(25)}
+    ids_after = {after.new_client_id(r) for r in roles for _ in range(25)}
+    assert not ids_before & ids_after  # collision-free across restarts
+    # Adoption/reconciliation keys off the stable ownership prefix: the new session
+    # still recognises (and can adopt) every order the old session left resting.
+    assert all(after.is_own(cid) for cid in ids_before)
+    # Bybit's orderLinkId hard limit.
+    assert all(len(cid) <= 36 for cid in ids_before | ids_after)
+
+
 def test_all_order_legs_prefixed_and_tagged() -> None:
     s = _settings()
     own = OwnershipPolicy(s)
@@ -224,6 +242,21 @@ def test_partial_fill_tracks_remaining() -> None:
     assert res.placed and not res.fully_filled
     assert abs(res.position.qty - dec.qty * 0.5) < 1e-9
     assert res.remaining_qty > 0
+
+
+def test_zero_fill_is_a_clean_non_fill_not_a_phantom_rejection() -> None:
+    """A zero fill opens NO position, so the engine records a non-fill ('entry_unfilled'),
+    not 'position_without_exchange_side_stop' — that reason is reserved for a REAL filled
+    position missing its protection (Section 2.2)."""
+    s = _settings()
+    venue = SimulatedVenue(_meta())
+    cand = _cand(tp_frac=0.02)
+    dec = _rm().evaluate(cand, _flat())
+    res = _engine(s, venue).execute(cand, dec, realized_slippage_frac=0.0005, fill_ratio=0.0)
+    assert not res.placed and res.reason == "entry_unfilled"
+    assert res.fill is not None and res.fill.qty == 0.0
+    assert not res.fully_filled and res.remaining_qty == pytest.approx(dec.qty)
+    assert not venue.positions  # no phantom position booked
 
 
 # --------------------------------------------------------------------------- #

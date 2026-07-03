@@ -29,6 +29,8 @@ class ExecutionPolicyConfig:
     max_latency_ms: float
     attach_take_profit: bool
     trailing_offset_frac: float
+    entry_fill_timeout_s: float
+    entry_fill_poll_interval_s: float
     simulated_latency_ms: float
     simulated_partial_fill_ratio: float
     emergency_close_requires_confirmation: bool
@@ -47,6 +49,8 @@ def load_execution_config(path: str | None = None) -> ExecutionPolicyConfig:
         max_latency_ms=float(data.get("max_latency_ms", 1500.0)),
         attach_take_profit=bool(data.get("attach_take_profit", True)),
         trailing_offset_frac=float(data.get("trailing_offset_frac", 0.0)),
+        entry_fill_timeout_s=float(data.get("entry_fill_timeout_s", 5.0)),
+        entry_fill_poll_interval_s=float(data.get("entry_fill_poll_interval_s", 0.2)),
         simulated_latency_ms=float(data.get("simulated_latency_ms", 40.0)),
         simulated_partial_fill_ratio=float(data.get("simulated_partial_fill_ratio", 0.5)),
         emergency_close_requires_confirmation=bool(

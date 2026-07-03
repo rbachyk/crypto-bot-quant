@@ -23,12 +23,14 @@ Tests inject a fake client, so nothing here needs the network or real keys.
 from __future__ import annotations
 
 import contextlib
+import time
 from typing import Any, Protocol
 
 import structlog
 
 from src.config import Settings, get_settings
 from src.exchange.metadata import MetadataConfig
+from src.execution.config import load_execution_config
 from src.execution.order import BUY, Order, OrderPlan, OrderType
 from src.execution.venue import BracketResult, Fill, Venue, VenuePosition
 
@@ -36,6 +38,13 @@ _log = structlog.get_logger("execution.live_venue")
 
 # Order types that rest as maker (no taker slippage).
 _MAKER_TYPES = (OrderType.POST_ONLY, OrderType.LIMIT)
+
+# Protective (conditional trigger) order types — must NEVER be sent as plain
+# market/limit orders (they would execute immediately and flatten the position).
+_TRIGGER_TYPES = (OrderType.STOP_MARKET, OrderType.STOP_LIMIT, OrderType.TAKE_PROFIT_MARKET)
+
+# ccxt order statuses after which an order can no longer fill.
+_TERMINAL_STATUSES = frozenset({"closed", "canceled", "cancelled", "rejected", "expired"})
 
 VALID_EXCHANGE_ENVS = ("live", "testnet", "demo")
 
@@ -86,12 +95,25 @@ class CcxtLiveVenue:
         *,
         client: Any | None = None,
         guard: LiveOrderGuard | None = None,
+        fill_timeout_s: float | None = None,
+        fill_poll_interval_s: float | None = None,
     ) -> None:
         self.meta = meta
         self.settings = settings or get_settings()
         self.exchange_id = self.settings.exchange_id
         self.exchange_env = self.settings.exchange_env  # "live" | "testnet" | "demo"
         self._guard = guard
+        # Entry-fill observation window (Section 18 / execution.yaml): how long to poll
+        # the exchange order status before cancelling an unfilled remainder.
+        ecfg = load_execution_config()
+        self.fill_timeout_s = (
+            float(fill_timeout_s) if fill_timeout_s is not None else ecfg.entry_fill_timeout_s
+        )
+        self.fill_poll_interval_s = (
+            float(fill_poll_interval_s)
+            if fill_poll_interval_s is not None
+            else ecfg.entry_fill_poll_interval_s
+        )
         self.open_orders: dict[str, Order] = {}
         self.positions: dict[str, VenuePosition] = {}
         self.fills: list[Fill] = []
@@ -138,7 +160,14 @@ class CcxtLiveVenue:
 
         On a real-money venue the activation guard must authorise the order first; a
         denial raises (the engine surfaces it as a non-placement) — we never silently
-        trade live."""
+        trade live.
+
+        The entry fill is OBSERVED via order-status polling (see
+        :meth:`_observe_entry_fill`), never assumed from the create response. A partial
+        fill books only the filled qty — the attached stopLoss/takeProfit are
+        position-level on Bybit, so once the remainder is cancelled the protective legs
+        cover exactly the filled position. A zero fill returns a clean no-position
+        result (qty-0, no protection markers) and registers nothing in the mirror."""
         if self.is_live:
             allowed, reason = self._authorise(plan)
             if not allowed:
@@ -167,10 +196,16 @@ class CcxtLiveVenue:
 
         resp = self._ex.create_order(plan.symbol, order_type, entry.side, entry.qty, price, params)
 
-        avg = _num(resp.get("average")) or _num(resp.get("price")) or ref_price
-        filled = _num(resp.get("filled"))
-        filled_qty = filled if filled is not None else entry.qty * max(0.0, min(1.0, fill_ratio))
-        fee = _num((resp.get("fee") or {}).get("cost")) or 0.0
+        # OBSERVE the fill (never assume it): Bybit's create response omits fill fields
+        # for a resting order, so we poll the order status and book only what actually
+        # filled; any unfilled remainder is cancelled at the window end. ``fill_ratio``
+        # is a simulated-venue knob and is deliberately ignored here.
+        filled_qty, avg_obs, fee, entry_still_resting = self._observe_entry_fill(
+            resp, plan.symbol, entry
+        )
+        # Average fill price is the observed one; fall back to the limit price only when
+        # the venue reported a filled qty but no average (then the reference price).
+        avg = avg_obs if avg_obs else (price if price is not None else ref_price)
         expected = price if price is not None else ref_price
         slip_frac = 0.0 if maker else realized_slippage_frac
         fill = Fill(
@@ -215,7 +250,10 @@ class CcxtLiveVenue:
         if filled_qty > 0:
             self.positions[plan.symbol] = position
         fully = filled_qty >= entry.qty - 1e-12
-        if not fully:
+        # The unfilled remainder was cancelled at the observation-window end; the entry
+        # is only kept as a tracked resting order if that cancel could NOT be confirmed
+        # (so reconciliation still sees it — never silently dropped).
+        if not fully and entry_still_resting:
             self.open_orders[entry.client_id] = entry
             resting.append(entry.client_id)
         return BracketResult(
@@ -230,6 +268,83 @@ class CcxtLiveVenue:
         if self._guard is None:
             return False, "no activation guard configured for a live venue"
         return self._guard.allow_live_order(plan)
+
+    def _observe_entry_fill(
+        self, resp: dict, symbol: str, entry: Order
+    ) -> tuple[float, float | None, float, bool]:
+        """Observe the entry fill on the exchange — never assume it (Section 18).
+
+        Returns ``(filled_qty, avg_price, fee, entry_still_resting)``. The create
+        response is trusted only when it positively reports a terminal fill (a full
+        fill, or a terminal status with the filled qty present). Otherwise the order
+        status is polled (light backoff) until it goes terminal or the configured
+        window elapses; at window end the unfilled remainder is CANCELLED and the
+        cancel is VERIFIED with a final fetch — a race-fill discovered there is still
+        booked. ``entry_still_resting`` is True only when the cancel could not be
+        confirmed, so the caller keeps tracking the order instead of assuming it died.
+        """
+        qty = float(entry.qty)
+        filled = _num(resp.get("filled"))
+        avg = _num(resp.get("average")) or _num(resp.get("price"))
+        fee = _num((resp.get("fee") or {}).get("cost"))
+        status = str(resp.get("status") or "").lower()
+        if filled is not None and (filled >= qty - 1e-12 or status in _TERMINAL_STATUSES):
+            return min(filled, qty), avg, fee or 0.0, False
+
+        order_id = str(resp.get("id") or "") or entry.client_id
+        fetch_params = {"clientOrderId": entry.client_id}
+
+        def _absorb(o: dict) -> None:
+            nonlocal filled, avg, fee, status
+            f = _num(o.get("filled"))
+            if f is not None:
+                filled = f
+            avg = _num(o.get("average")) or avg
+            fee = _num((o.get("fee") or {}).get("cost")) or fee
+            status = str(o.get("status") or status or "").lower()
+
+        deadline = time.monotonic() + max(0.0, self.fill_timeout_s)
+        interval = max(0.01, self.fill_poll_interval_s)
+        while True:
+            try:
+                _absorb(self._ex.fetch_order(order_id, symbol, fetch_params) or {})
+            except Exception as exc:  # noqa: BLE001 - a poll hiccup: keep polling to the window end
+                _log.warning("entry_fill_poll_failed", symbol=symbol, error=str(exc))
+            if status in _TERMINAL_STATUSES or (filled is not None and filled >= qty - 1e-12):
+                return min(filled or 0.0, qty), avg, fee or 0.0, False
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(min(interval, max(0.0, deadline - time.monotonic())))
+            interval = min(interval * 1.5, 1.0)
+
+        # Window elapsed with the order still working: cancel the remainder, then VERIFY.
+        cancel_error: str | None = None
+        try:
+            self._ex.cancel_order(order_id, symbol, fetch_params)
+        except Exception as exc:  # noqa: BLE001 - verified below; never assume the cancel worked
+            cancel_error = str(exc)
+        try:
+            _absorb(self._ex.fetch_order(order_id, symbol, fetch_params) or {})
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("entry_cancel_verify_failed", symbol=symbol, error=str(exc))
+        still_resting = status not in _TERMINAL_STATUSES
+        if still_resting:
+            _log.error(
+                "entry_cancel_unconfirmed",
+                symbol=symbol,
+                client_id=entry.client_id,
+                status=status or "unknown",
+                error=cancel_error,
+            )
+        else:
+            _log.info(
+                "entry_remainder_cancelled",
+                symbol=symbol,
+                client_id=entry.client_id,
+                filled=filled or 0.0,
+                requested=qty,
+            )
+        return min(filled or 0.0, qty), avg, fee or 0.0, still_resting
 
     def _confirm_exchange_stop(self, symbol: str) -> bool | None:
         """Confirm the exchange-side stop right after placement (Section 2.2).
@@ -288,18 +403,54 @@ class CcxtLiveVenue:
 
         Refuses an ``entry`` order: an entry must go through :meth:`place_bracket` so its
         exchange-resident stop is attached atomically (Section 2.2). A bare entry placed here
-        could fill with no protection."""
+        could fill with no protection.
+
+        A protective leg (stop / take-profit) is sent as a proper CONDITIONAL order —
+        trigger price via ccxt's unified ``stopLossPrice`` / ``takeProfitPrice`` params,
+        always ``reduceOnly`` — never as a plain market/limit order, which would execute
+        IMMEDIATELY at market and flatten the position (or open opposite exposure)."""
         if order.role == "entry":
             raise ValueError(
                 "place_order cannot place an entry (no attached stop); use place_bracket so "
                 "protection is attached atomically (Section 2.2)"
             )
         self._ensure_tradable_metadata(order.symbol)
-        otype = "limit" if order.order_type in _MAKER_TYPES else "market"
-        price = float(order.price) if order.price is not None else None
-        self._ex.create_order(
-            order.symbol, otype, order.side, order.qty, price, {"clientOrderId": order.client_id}
-        )
+        if order.order_type is OrderType.TRAILING_STOP:
+            # There is no standalone trailing-stop order here: the trailing stop is
+            # attached at entry (``trailingPercent`` in place_bracket) and lives on the
+            # position. Degrading it to a market order would flatten the position.
+            raise NotImplementedError(
+                "standalone trailing-stop replacement is not supported on the live venue; "
+                "the trailing stop is attached at entry and rides the position"
+            )
+        params: dict[str, Any] = {"clientOrderId": order.client_id}
+        if order.order_type in _TRIGGER_TYPES:
+            trigger = _leg_trigger(order)
+            if trigger is None:
+                raise ValueError(
+                    f"protective leg {order.client_id} ({order.order_type.value}) has no "
+                    "trigger price — refusing to send it as an immediate market order"
+                )
+            key = (
+                "takeProfitPrice"
+                if order.order_type is OrderType.TAKE_PROFIT_MARKET
+                else "stopLossPrice"
+            )
+            params[key] = trigger
+            # A protective leg must only ever REDUCE the position (Section 2.2).
+            params["reduceOnly"] = True
+            otype = "limit" if order.order_type is OrderType.STOP_LIMIT else "market"
+            price = (
+                float(order.price)
+                if (order.order_type is OrderType.STOP_LIMIT and order.price is not None)
+                else None
+            )
+        else:
+            if order.reduce_only:
+                params["reduceOnly"] = True
+            otype = "limit" if order.order_type in _MAKER_TYPES else "market"
+            price = float(order.price) if order.price is not None else None
+        self._ex.create_order(order.symbol, otype, order.side, order.qty, price, params)
         self.open_orders[order.client_id] = order
 
     # -- reconciliation -------------------------------------------------- #
