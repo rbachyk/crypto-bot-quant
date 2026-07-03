@@ -17,6 +17,7 @@ BACKUP and MON are enhanced Phase 13 versions replacing the Phase 1 skeletons.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,6 +28,24 @@ from src.gates.result import Criterion
 # Repository root (same pattern as checks.py)
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Minimum genuine approved-correct RECOMMEND rows required for a track record.
+_MIN_RECOMMEND_TRACK = 3
+
+# A pre-fix version of this gate WROTE synthetic RECOMMEND rows into learner_logs on every
+# run (learner_id="online_shadow_v1", rationale "approved recommendation #N", fabricated
+# positive realized_outcome). Those rows are audit pollution, not a track record — exclude
+# them from the count. Purge them permanently with:
+#   DELETE FROM learner_logs
+#   WHERE mode = 'RECOMMEND'
+#     AND proposed_action->>'rationale' LIKE 'approved recommendation #%';
+_SYNTHETIC_RATIONALE_PREFIX = "approved recommendation #"
+
+
+def _is_synthetic_recommend_row(proposed_action: dict | None) -> bool:
+    """True for a row the pre-fix gate fabricated (identified by its rationale marker)."""
+    rationale = str((proposed_action or {}).get("rationale") or "")
+    return rationale.startswith(_SYNTHETIC_RATIONALE_PREFIX)
+
 
 # =========================================================================== #
 # LEARN-PROMO-L                                                                #
@@ -35,7 +54,9 @@ def check_learn_promo_l(settings: Settings) -> list[Criterion]:
     """LEARN-PROMO-L gate criteria (Phase 13 — Learner Recommend → Bounded Live).
 
     Pass conditions (Appendix A):
-    1. recommendations_track_record   — recommendation store can record approved decisions
+    1. recommendations_track_record   — genuine RECOMMEND-mode rows with positive realized
+                                        outcomes exist (READ-ONLY: the gate never writes
+                                        learner_logs; synthetic pre-fix rows are excluded)
     2. rollback_tested                — RollbackGuard freezes on deliberate trigger
     3. learner_kill_switch_independent — controller.freeze() independent of trading KillSwitch
     4. auto_freeze_on_breaker_enforced — immutable flag always True; cannot be disabled
@@ -45,65 +66,42 @@ def check_learn_promo_l(settings: Settings) -> list[Criterion]:
     out: list[Criterion] = []
 
     # ------------------------------------------------------------------ #
-    # 1. Recommendation track record                                       #
+    # 1. Recommendation track record (READ-ONLY — fail-closed)             #
     # ------------------------------------------------------------------ #
     try:
-        from src.adaptation.action_space import BoundedAction
-        from src.adaptation.store import reset_memory_sink, write_learner_log
-
-        reset_memory_sink()
-
-        # Simulate a recommendation track record: write 3 RECOMMEND-mode entries.
-        for i in range(3):
-            action = BoundedAction(
-                size_bucket=0.5,
-                take=True,
-                exec_style="maker",
-                param_nudges={},
-                learner_id="online_shadow_v1",
-                learner_version="learner_0001",
-                mode="RECOMMEND",
-                rationale=f"approved recommendation #{i + 1}",
-            )
-            write_learner_log(
-                learner_id=action.learner_id,
-                learner_version=action.learner_version,
-                mode="RECOMMEND",
-                symbol="BTCUSDT",
-                context_features={"signal_strength": 0.7 + i * 0.05},
-                proposed_action=action,
-                projected_outcome=0.005,
-                realized_outcome=0.004 + i * 0.001,  # approved + correct
-                applied=False,
-                clamped_fields=[],
-                config_version=settings.config_version,
-                write_to_db=True,
-            )
-
-        # Verify recommendation records exist in the DB.
         from src.db.base import session_scope
         from src.db.models import LearnerLog
 
         with session_scope() as session:
-            rec_count = (
-                session.query(LearnerLog)
+            rows = [
+                (r.proposed_action, r.realized_outcome)
+                for r in session.query(LearnerLog)
                 .filter(
-                    LearnerLog.learner_id == "online_shadow_v1",
                     LearnerLog.mode == "RECOMMEND",
+                    LearnerLog.realized_outcome.isnot(None),
                 )
-                .count()
-            )
+                .all()
+            ]
+
+        synthetic = sum(1 for pa, _ in rows if _is_synthetic_recommend_row(pa))
+        genuine = [(pa, ro) for pa, ro in rows if not _is_synthetic_recommend_row(pa)]
+        correct = sum(1 for _, ro in genuine if (ro or 0.0) > 0)
 
         out.append(
             Criterion.ok(
                 "recommendations_track_record",
-                f"{rec_count} RECOMMEND-mode learner_log entries exist; "
-                "track record of approved-correct recommendations verified",
+                f"{correct} genuine approved-correct RECOMMEND-mode learner_log entries "
+                f"(of {len(genuine)} genuine with realized outcomes; "
+                f"{synthetic} synthetic pre-fix rows excluded) ≥ {_MIN_RECOMMEND_TRACK}",
             )
-            if rec_count >= 3
+            if correct >= _MIN_RECOMMEND_TRACK
             else Criterion.fail(
                 "recommendations_track_record",
-                f"only {rec_count} RECOMMEND-mode entries (need ≥ 3 approved-correct)",
+                f"insufficient genuine track record: {correct} approved-correct RECOMMEND "
+                f"entries with realized outcomes (need ≥ {_MIN_RECOMMEND_TRACK}); "
+                f"{len(genuine)} genuine rows total, {synthetic} synthetic pre-fix rows "
+                "excluded — run the learner in RECOMMEND mode and record realized outcomes; "
+                "this gate never fabricates track-record rows",
             )
         )
     except Exception as exc:  # noqa: BLE001
@@ -358,6 +356,18 @@ def check_learn_promo_l(settings: Settings) -> list[Criterion]:
 # =========================================================================== #
 # SEC — Security Gate                                                          #
 # =========================================================================== #
+
+# DASHBOARD_AUTH_MODE=none (case-insensitive, tolerating whitespace and quotes).
+# REGRESSION (H12): the old check searched for an UPPERCASE needle in a lowercased
+# haystack, so it could never match and the criterion could never fail.
+_AUTH_NONE_RE = re.compile(r"^\s*DASHBOARD_AUTH_MODE\s*=\s*['\"]?none['\"]?\s*$", re.IGNORECASE)
+
+
+def _dashboard_auth_mode_is_none(content: str) -> bool:
+    """True if any line of ``content`` sets DASHBOARD_AUTH_MODE to none."""
+    return any(_AUTH_NONE_RE.match(line) for line in content.splitlines())
+
+
 def check_sec(settings: Settings) -> list[Criterion]:
     """SEC gate criteria (Phase 13 — Security Gate).
 
@@ -476,7 +486,7 @@ def check_sec(settings: Settings) -> list[Criterion]:
         else:
             content = env_example.read_text()
             # Must NOT be NONE; basic or better is required.
-            auth_none = "DASHBOARD_AUTH_MODE=none" in content.lower()
+            auth_none = _dashboard_auth_mode_is_none(content)
             has_auth = "DASHBOARD_AUTH_MODE=" in content
             auth_ok = has_auth and not auth_none
 

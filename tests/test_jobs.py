@@ -151,6 +151,19 @@ def test_basket_paper_session_routes_to_live_worker_and_is_registered() -> None:
     assert registry.get("run_basket_paper_session") is not None  # raises KeyError if missing
 
 
+def test_paper_session_routes_to_backtest_worker_and_is_registered() -> None:
+    """REGRESSION (H14): run_paper_session had no routing entry, fell to `default` and sat
+    queued forever when no worker served that class. It is a bounded batch pipeline run (same
+    shape as run_lake_paper_session), so it rides the served `backtest` class."""
+    import src.jobs.handlers  # noqa: F401 - import registers all handlers
+    from src.jobs.registry import registry
+    from src.jobs.routing import queue_class
+
+    assert queue_class("run_paper_session") == "backtest"
+    assert queue_class("run_lake_paper_session") == "backtest"  # must stay aligned
+    assert registry.get("run_paper_session") is not None  # raises KeyError if missing
+
+
 @requires_redis
 def test_worker_runs_jobs_concurrently() -> None:
     """A worker with concurrency > 1 runs jobs in PARALLEL — the fix that lets several continuous

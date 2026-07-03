@@ -21,9 +21,68 @@ from pathlib import Path
 
 from src.config import get_settings
 
+from tests.conftest import requires_db
+
 # ======================================================================== #
 # LEARN-PROMO-L                                                             #
 # ======================================================================== #
+
+
+def _clear_recommend_rows() -> None:
+    """Delete every RECOMMEND-mode learner_log row so the track-record count is deterministic."""
+    from src.db.base import session_scope
+    from src.db.models import LearnerLog
+
+    with session_scope() as db:
+        for row in db.query(LearnerLog).filter(LearnerLog.mode == "RECOMMEND").all():
+            db.delete(row)
+
+
+def _count_recommend_rows() -> int:
+    from src.db.base import session_scope
+    from src.db.models import LearnerLog
+
+    with session_scope() as db:
+        return db.query(LearnerLog).filter(LearnerLog.mode == "RECOMMEND").count()
+
+
+def _seed_recommend_track_record(
+    n: int = 3,
+    *,
+    rationale: str = "operator-approved sizing recommendation",
+    realized: float = 0.004,
+) -> None:
+    """Seed genuine RECOMMEND-mode rows with realized outcomes (what a real learner run in
+    RECOMMEND mode persists — NOT the gate's job to write)."""
+    from src.adaptation.action_space import BoundedAction
+    from src.adaptation.store import write_learner_log
+
+    settings = get_settings()
+    for i in range(n):
+        action = BoundedAction(
+            size_bucket=0.5,
+            take=True,
+            exec_style="maker",
+            param_nudges={},
+            learner_id="online_shadow_v1",
+            learner_version="learner_0001",
+            mode="RECOMMEND",
+            rationale=rationale,
+        )
+        write_learner_log(
+            learner_id=action.learner_id,
+            learner_version=action.learner_version,
+            mode="RECOMMEND",
+            symbol="BTCUSDT",
+            context_features={"signal_strength": 0.7 + i * 0.05},
+            proposed_action=action,
+            projected_outcome=0.005,
+            realized_outcome=realized + i * 0.001 if realized > 0 else realized,
+            applied=False,
+            clamped_fields=[],
+            config_version=settings.config_version,
+            write_to_db=True,
+        )
 
 
 class TestLearnPromoL:
@@ -167,16 +226,56 @@ class TestLearnPromoL:
         assert ff_blob == blob
         assert restored.learner_id == "revert_test"
 
-    def test_learn_promo_l_gate_passes(self):
-        """Full LEARN-PROMO-L gate check returns all criteria PASS."""
+    @requires_db
+    def test_learn_promo_l_gate_passes_with_genuine_track_record(self):
+        """Full LEARN-PROMO-L gate check passes when a GENUINE seeded track record exists."""
         from src.gates.phase13 import check_learn_promo_l
 
-        settings = get_settings()
-        criteria = check_learn_promo_l(settings)
+        _clear_recommend_rows()
+        _seed_recommend_track_record(3)
+        criteria = check_learn_promo_l(get_settings())
 
         assert len(criteria) > 0
         failed = [c.id for c in criteria if not c.passed]
         assert not failed, f"LEARN-PROMO-L gate failed criteria: {failed}"
+
+    @requires_db
+    def test_track_record_fails_closed_without_rows_and_gate_writes_nothing(self):
+        """REGRESSION (C4): with no genuine RECOMMEND rows the criterion FAILS, and the gate
+        must NOT write synthetic rows into learner_logs to make itself pass."""
+        from src.gates.phase13 import check_learn_promo_l
+
+        _clear_recommend_rows()
+        criteria = check_learn_promo_l(get_settings())
+        track = next(c for c in criteria if c.id == "recommendations_track_record")
+        assert not track.passed, track.detail
+        assert "insufficient genuine track record" in track.detail
+        # The gate is read-only: running it added ZERO RECOMMEND rows.
+        assert _count_recommend_rows() == 0
+
+    @requires_db
+    def test_track_record_excludes_pre_fix_synthetic_rows(self):
+        """Rows the pre-fix gate fabricated (rationale 'approved recommendation #N') are
+        pollution and must not count toward the track record."""
+        from src.gates.phase13 import check_learn_promo_l
+
+        _clear_recommend_rows()
+        _seed_recommend_track_record(3, rationale="approved recommendation #1")
+        criteria = check_learn_promo_l(get_settings())
+        track = next(c for c in criteria if c.id == "recommendations_track_record")
+        assert not track.passed, track.detail
+        assert "3 synthetic pre-fix rows excluded" in track.detail
+
+    @requires_db
+    def test_track_record_requires_positive_realized_outcomes(self):
+        """Approved-but-WRONG recommendations (negative realized outcome) do not count."""
+        from src.gates.phase13 import check_learn_promo_l
+
+        _clear_recommend_rows()
+        _seed_recommend_track_record(3, realized=-0.002)
+        criteria = check_learn_promo_l(get_settings())
+        track = next(c for c in criteria if c.id == "recommendations_track_record")
+        assert not track.passed, track.detail
 
 
 # ======================================================================== #
@@ -215,11 +314,28 @@ class TestSec:
 
     def test_dashboard_auth_not_none(self):
         """DASHBOARD_AUTH_MODE is set and not 'none' in .env.example."""
+        from src.gates.phase13 import _dashboard_auth_mode_is_none
+
         repo_root = Path(__file__).resolve().parents[1]
         env_example = (repo_root / ".env.example").read_text()
         has_auth = "DASHBOARD_AUTH_MODE=" in env_example
-        not_none = "DASHBOARD_AUTH_MODE=none" not in env_example.lower()
-        assert has_auth and not_none
+        assert has_auth and not _dashboard_auth_mode_is_none(env_example)
+
+    def test_dashboard_auth_none_detection_regression(self):
+        """REGRESSION (H12): the old check compared an UPPERCASE needle against a lowercased
+        haystack, so `DASHBOARD_AUTH_MODE=none` was never detected and the criterion could
+        never fail. The matcher must catch it case-insensitively, tolerating spaces/quotes."""
+        from src.gates.phase13 import _dashboard_auth_mode_is_none
+
+        assert _dashboard_auth_mode_is_none("DASHBOARD_AUTH_MODE=none")
+        assert _dashboard_auth_mode_is_none("dashboard_auth_mode=none")
+        assert _dashboard_auth_mode_is_none("DASHBOARD_AUTH_MODE = none")
+        assert _dashboard_auth_mode_is_none("DASHBOARD_AUTH_MODE='none'")
+        assert _dashboard_auth_mode_is_none('DASHBOARD_AUTH_MODE="NONE"')
+        assert _dashboard_auth_mode_is_none("FOO=1\nDASHBOARD_AUTH_MODE=none\nBAR=2")
+        assert not _dashboard_auth_mode_is_none("DASHBOARD_AUTH_MODE=basic")
+        assert not _dashboard_auth_mode_is_none("# DASHBOARD_AUTH_MODE=none (comment)")
+        assert not _dashboard_auth_mode_is_none("")
 
     def test_live_engine_requires_compose_profile(self):
         """trading-engine-live requires the 'live' compose profile."""
@@ -683,10 +799,13 @@ class TestPhase13GateIntegration:
         assert has_check("LIVE")
         assert CHECKS["LIVE"].__module__ == "src.gates.phase13"
 
+    @requires_db
     def test_learn_promo_l_gate_full(self):
-        """LEARN-PROMO-L gate runs and passes via CHECKS registry."""
+        """LEARN-PROMO-L gate runs and passes via CHECKS registry (genuine seeded rows)."""
         from src.gates.checks import run_check
 
+        _clear_recommend_rows()
+        _seed_recommend_track_record(3)
         criteria = run_check("LEARN-PROMO-L")
         failed = [c.id for c in criteria if not c.passed]
         assert not failed, f"LEARN-PROMO-L via CHECKS failed: {failed}"

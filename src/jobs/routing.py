@@ -40,6 +40,10 @@ _CLASS_MEMBERS: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "run_backtest",
             "run_lake_backtest",
+            # Bounded batch paper runs (scheduler/dashboard). run_paper_session must be routed
+            # explicitly: unrouted it fell to `default`, which no dedicated worker is guaranteed
+            # to serve — enqueued sessions sat queued forever.
+            "run_paper_session",
             "run_lake_paper_session",
             "run_walk_forward",
             "build_dataset_version",

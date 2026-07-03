@@ -523,7 +523,7 @@ class TestPaperReports:
 
 
 # --------------------------------------------------------------------------- #
-# Gate check tests (offline — no DB required)                                   #
+# Gate check tests (PAPER-A offline; PAPER-B DB-backed — real persisted rows)    #
 # --------------------------------------------------------------------------- #
 
 
@@ -591,59 +591,199 @@ class TestPaperAGateCheck:
         assert not failing, [(c.id, c.detail) for c in failing]
 
 
+_SEED_SESSION_ID = "paper_b_gate_seed"
+_SEED_STRATEGY = "paper_b_gate_seed_strat"
+
+
+def _clear_paper_scope() -> None:
+    """Remove every paper-environment PaperRun (and its trades / decision logs) plus any
+    backtest reference for the seeded strategy, so the gate sees a deterministic state."""
+    from sqlalchemy import select
+    from src.db.base import session_scope
+    from src.db.models import BacktestRun, DecisionLog, PaperRun, PaperTradeRecord
+
+    with session_scope() as db:
+        runs = db.execute(select(PaperRun)).scalars().all()
+        paper_ids = [
+            r.session_id
+            for r in runs
+            if not str(r.session_id).startswith(("demo:", "testnet:", "live:", "selftest:"))
+        ]
+        for r in runs:
+            if r.session_id in paper_ids:
+                db.delete(r)
+        if paper_ids:
+            for model in (PaperTradeRecord, DecisionLog):
+                for row in (
+                    db.execute(select(model).where(model.session_id.in_(paper_ids)))
+                    .scalars()
+                    .all()
+                ):
+                    db.delete(row)
+        for bt in (
+            db.execute(select(BacktestRun).where(BacktestRun.strategy_id == _SEED_STRATEGY))
+            .scalars()
+            .all()
+        ):
+            db.delete(bt)
+
+
+def _seed_paper_b_data(*, with_backtest_ref: bool = True) -> None:
+    """Seed a realistic persisted paper session (run + trades + decision logs) and,
+    optionally, a PASSED backtest reference for the traded strategy."""
+    from src.db.base import session_scope
+    from src.db.models import BacktestRun, DecisionLog, PaperRun, PaperTradeRecord
+
+    # 6 executed trades: 4 winners (+0.5R), 2 losers (-0.4R) → expectancy 0.2R.
+    trades = [
+        ("BTC/USDT:USDT", "low_vol_up", 25.0, 0.5),
+        ("ETH/USDT:USDT", "trend_up", 18.0, 0.5),
+        ("SOL/USDT:USDT", "low_vol_up", 12.0, 0.5),
+        ("BTC/USDT:USDT", "trend_up", 20.0, 0.5),
+        ("ETH/USDT:USDT", "low_vol_down", -14.0, -0.4),
+        ("SOL/USDT:USDT", "range", -11.0, -0.4),
+    ]
+    with session_scope() as db:
+        db.add(
+            PaperRun(
+                session_id=_SEED_SESSION_ID,
+                executed_count=len(trades),
+                rejected_count=4,
+                net_pnl=sum(pnl for _, _, pnl, _ in trades),
+                expectancy_r=0.2,
+                win_rate=4 / 6,
+                symbols=sorted({sym for sym, _, _, _ in trades}),
+                strategies=[_SEED_STRATEGY],
+            )
+        )
+        for i, (sym, regime, pnl, pnl_r) in enumerate(trades):
+            db.add(
+                PaperTradeRecord(
+                    session_id=_SEED_SESSION_ID,
+                    trade_id=f"{_SEED_SESSION_ID}-t{i}",
+                    symbol=sym,
+                    strategy=_SEED_STRATEGY,
+                    side=1,
+                    qty=0.01,
+                    entry_price=100.0,
+                    exit_price=100.0 + pnl,
+                    exit_reason="take_profit" if pnl > 0 else "stop",
+                    regime=regime,
+                    pnl=pnl,
+                    pnl_r=pnl_r,
+                    has_exchange_side_stop=True,
+                    execution_route="taker",
+                )
+            )
+        for j in range(4):
+            db.add(
+                DecisionLog(
+                    session_id=_SEED_SESSION_ID,
+                    symbol="BTC/USDT:USDT",
+                    strategy=_SEED_STRATEGY,
+                    action="reject",
+                    reason="risk_reject" if j % 2 == 0 else "exec_stale_data",
+                )
+            )
+        if with_backtest_ref:
+            db.add(
+                BacktestRun(
+                    run_id=f"bt_{_SEED_SESSION_ID}",
+                    kind="backtest",
+                    strategy_id=_SEED_STRATEGY,
+                    strategy_version="v1.0.0",
+                    passed=True,
+                    trade_count=50,
+                    expectancy_r=0.3,  # paper 0.2R / backtest 0.3R → ratio 0.67, within bounds
+                )
+            )
+
+
+@requires_db
 class TestPaperBGateCheck:
-    def test_check_paper_b_candidates(self) -> None:
+    """PAPER-B evaluates REAL persisted paper_runs/paper_trades — pass path needs seeded
+    rows; with no data the gate must FAIL-CLOSED (it must never fabricate a session)."""
+
+    def test_fails_closed_with_no_paper_sessions(self) -> None:
         from src.config import get_settings
         from src.gates.phase8 import check_paper_b
 
+        _clear_paper_scope()
         criteria = check_paper_b(get_settings())
-        cand = next((c for c in criteria if c.id == "paper_b_candidates"), None)
-        assert cand is not None
-        assert cand.passed, cand.detail
+        sessions = next((c for c in criteria if c.id == "paper_b_sessions"), None)
+        assert sessions is not None
+        assert not sessions.passed
+        assert "no persisted paper session" in sessions.detail
+        # Fail-closed overall: the gate cannot pass without real data.
+        assert any(not c.passed for c in criteria)
 
-    def test_check_paper_b_executed(self) -> None:
+    def test_fails_closed_without_backtest_reference(self) -> None:
         from src.config import get_settings
         from src.gates.phase8 import check_paper_b
 
-        criteria = check_paper_b(get_settings())
-        exe = next((c for c in criteria if c.id == "paper_b_executed"), None)
-        assert exe is not None
-        assert exe.passed, exe.detail
-
-    def test_check_paper_b_symbol_breakdown(self) -> None:
-        from src.config import get_settings
-        from src.gates.phase8 import check_paper_b
-
-        criteria = check_paper_b(get_settings())
-        sym = next((c for c in criteria if c.id == "paper_b_symbol_breakdown"), None)
-        assert sym is not None
-        assert sym.passed, sym.detail
-
-    def test_check_paper_b_regime_breakdown(self) -> None:
-        from src.config import get_settings
-        from src.gates.phase8 import check_paper_b
-
-        criteria = check_paper_b(get_settings())
-        reg = next((c for c in criteria if c.id == "paper_b_regime_breakdown"), None)
-        assert reg is not None
-        assert reg.passed, reg.detail
-
-    def test_check_paper_b_vs_backtest(self) -> None:
-        from src.config import get_settings
-        from src.gates.phase8 import check_paper_b
-
+        _clear_paper_scope()
+        _seed_paper_b_data(with_backtest_ref=False)
         criteria = check_paper_b(get_settings())
         bt = next((c for c in criteria if c.id == "paper_b_vs_backtest"), None)
         assert bt is not None
-        assert bt.passed, bt.detail
+        assert not bt.passed, bt.detail
+        assert "backtest" in bt.detail.lower()
 
-    def test_check_paper_b_all_pass(self) -> None:
+    def test_all_pass_with_seeded_real_session(self) -> None:
         from src.config import get_settings
         from src.gates.phase8 import check_paper_b
 
+        _clear_paper_scope()
+        _seed_paper_b_data(with_backtest_ref=True)
         criteria = check_paper_b(get_settings())
+
+        by_id = {c.id: c for c in criteria}
+        for cid in (
+            "paper_b_sessions",
+            "paper_b_candidates",
+            "paper_b_executed",
+            "paper_b_symbol_breakdown",
+            "paper_b_regime_breakdown",
+            "paper_b_win_loss",
+            "paper_b_rejection_analysis",
+            "paper_b_vs_backtest",
+        ):
+            assert cid in by_id, f"criterion {cid} missing"
         failing = [c for c in criteria if not c.passed]
         assert not failing, [(c.id, c.detail) for c in failing]
+        # The evaluated numbers come from the seeded REAL rows.
+        assert "6 persisted paper trades" in by_id["paper_b_executed"].detail
+        assert "4 wins / 2 losses" in by_id["paper_b_win_loss"].detail
+        assert "risk_reject" in by_id["paper_b_rejection_analysis"].detail
+
+    def test_inconsistent_expectancy_fails(self) -> None:
+        """A paper expectancy far below the backtest reference must FAIL consistency."""
+        from sqlalchemy import select
+        from src.config import get_settings
+        from src.db.base import session_scope
+        from src.db.models import PaperTradeRecord
+        from src.gates.phase8 import check_paper_b
+
+        _clear_paper_scope()
+        _seed_paper_b_data(with_backtest_ref=True)
+        # Flip every seeded trade into a loser: expectancy -0.4R vs +0.3R reference.
+        with session_scope() as db:
+            for t in (
+                db.execute(
+                    select(PaperTradeRecord).where(
+                        PaperTradeRecord.session_id == _SEED_SESSION_ID
+                    )
+                )
+                .scalars()
+                .all()
+            ):
+                t.pnl = -abs(t.pnl)
+                t.pnl_r = -0.4
+        criteria = check_paper_b(get_settings())
+        bt = next((c for c in criteria if c.id == "paper_b_vs_backtest"), None)
+        assert bt is not None
+        assert not bt.passed, bt.detail
+        assert "INCONSISTENT" in bt.detail
 
 
 # --------------------------------------------------------------------------- #
