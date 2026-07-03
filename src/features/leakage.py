@@ -119,16 +119,20 @@ class SyntheticReader(FeatureDataReader):
         return bars
 
     def _build_point_in_time(self) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+        # Same stamping convention as the real source (src.data.schema): close-derived
+        # samples (mark/index/spread) are stamped at the bar CLOSE (``ts + iv``); OI is a
+        # snapshot realized at its own sample time — so the gate tests what production does.
         mark, index, oi, spread = [], [], [], []
         for b in self._bars:
-            ts, c = b["ts"], b["close"]
+            ts, c = b["ts"] + self.iv, b["close"]
             mark.append(
                 {"ts": ts, "mark_price": c * (1.0 + (_unit(self.seed, "mk", ts) - 0.5) * 6e-4)}
             )
             index.append(
                 {"ts": ts, "index_price": c * (1.0 + (_unit(self.seed, "ix", ts) - 0.5) * 4e-4)}
             )
-            oi.append({"ts": ts, "open_interest": 1e6 * (1.0 + _unit(self.seed, "oi", ts))})
+            b_ts = b["ts"]  # OI: snapshot realized at its own sample time (bar open)
+            oi.append({"ts": b_ts, "open_interest": 1e6 * (1.0 + _unit(self.seed, "oi", b_ts))})
             frac = 0.0002 + _unit(self.seed, "sp", ts) * 0.0008
             spread.append(
                 {

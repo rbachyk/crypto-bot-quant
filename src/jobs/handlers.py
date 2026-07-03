@@ -233,7 +233,7 @@ def _repair_missing_data(ctx: JobContext, params: dict) -> dict:
     remaining = 0
     for i, key in enumerate(keys):
         ctx.check_cancelled()
-        result = platform.ingestor.repair(key, cfg.window_start_ms, cfg.window_end_ms)
+        result = platform.ingestor.repair(key, cfg.window_start_ms, cfg.series_end_ms(key))
         written += result.rows_written
         remaining += result.gaps_after
         ctx.progress(i + 1, len(keys), f"repaired {key.label()}")

@@ -135,7 +135,10 @@ class DataValidator:
         rows = self.store.read(key, start, end)
         label = key.label()
 
-        gaps = find_gaps(self.store, key, start, end)
+        # Expected grid ends at the per-series safe end: bars whose close time is past the
+        # hour-grid window end (e.g. the last 4h slot) are NOT required — they may still be
+        # forming and the source correctly refuses to serve them.
+        gaps = find_gaps(self.store, key, start, self.cfg.series_end_ms(key))
         if gaps.missing_ts:
             # A few scattered missing candles over a multi-year window (exchange maintenance) are
             # expected and should NOT fail the snapshot. ``max_unfilled_gap_bars`` is the tolerance:
@@ -275,15 +278,23 @@ class DataValidator:
                 if dt not in self.cfg.required_series:
                     continue
                 other = self.store.timestamps(SeriesKey(ex, dt, symbol, base), start, end)
-                if other != perp:
-                    report.violations.append(
-                        Violation(
-                            "markindex_alignment",
-                            CRITICAL,
-                            f"{dt} timestamps not aligned with perp {base} grid",
-                            f"{symbol}:{dt}",
-                        )
+                if other == perp:
+                    continue
+                # Close-time stamping listing edge: mark/index samples carry a kline's close
+                # value stamped at the kline CLOSE, so a symbol whose perp LISTS inside the
+                # window has its first sample one base interval after the perp's first bar
+                # (no earlier kline exists to close at the listing bar's open). That single
+                # leading offset is legitimate, not misalignment.
+                if perp and min(perp) > start and other == perp - {min(perp)}:
+                    continue
+                report.violations.append(
+                    Violation(
+                        "markindex_alignment",
+                        CRITICAL,
+                        f"{dt} timestamps not aligned with perp {base} grid",
+                        f"{symbol}:{dt}",
                     )
+                )
 
     def _check_clock_drift(self, report: DataQualityReport) -> None:
         """Verify the system clock advances consistently with the monotonic clock.

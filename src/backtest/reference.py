@@ -88,16 +88,20 @@ class ReferenceReader(FeatureDataReader):
         return bars
 
     def _build_point_in_time(self) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+        # Production stamping convention (see src.data.schema): values derived from a bar's
+        # CLOSE (mark/index/spread) are observable at the bar's close time, so they are
+        # stamped ``bar_ts + iv``. OI is a snapshot realized at its own sample time.
         mark, index, oi, spread = [], [], [], []
         for b in self._bars:
-            ts, c = b["ts"], b["close"]
+            ts, c = b["ts"] + self.iv, b["close"]  # close-derived ⇒ stamped at the bar CLOSE
             mark.append(
                 {"ts": ts, "mark_price": c * (1.0 + (_unit(self.seed, "mk", ts) - 0.5) * 4e-4)}
             )
             index.append(
                 {"ts": ts, "index_price": c * (1.0 + (_unit(self.seed, "ix", ts) - 0.5) * 3e-4)}
             )
-            oi.append({"ts": ts, "open_interest": 1e7 * (1.0 + _unit(self.seed, "oi", ts))})
+            b_ts = b["ts"]  # OI: snapshot realized at its own sample time (bar open)
+            oi.append({"ts": b_ts, "open_interest": 1e7 * (1.0 + _unit(self.seed, "oi", b_ts))})
             frac = 0.0002 + _unit(self.seed, "sp", ts) * 0.0006
             spread.append(
                 {

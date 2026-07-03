@@ -34,6 +34,10 @@ def _resolve_window_end_ms(window: dict, as_of_ms: int | None = None) -> int:
     fresh data and the still-forming / lagging recent candles are NOT required (which would make
     validation spuriously fail as 'missing'). An explicit ISO ``as_of`` is used verbatim.
 
+    NB the one-hour backoff only guarantees closure for timeframes ≤ 1h: coarser OHLCV grids
+    (4h/1d/...) are clamped per-series via :meth:`DataConfig.series_end_ms` — the hour-grid end
+    here is the RAW window end, not a closure guarantee for every timeframe.
+
     ``as_of_ms`` pins the window end explicitly (overrides the yaml) — used to FREEZE a ``now``
     window for a reproducible snapshot / test: the same as_of_ms always yields the same window,
     so the snapshot id is stable across re-runs."""
@@ -98,6 +102,21 @@ class DataConfig:
         """Symbols that must be fully covered (insufficient-history excluded)."""
         excluded = set(self.insufficient_history)
         return [s for s in self.symbols if s not in excluded]
+
+    def series_end_ms(self, key: SeriesKey) -> int:
+        """Effective coverage end for ONE series — only bars guaranteed CLOSED by the window end.
+
+        ``window_end_ms`` sits on the HOUR grid, which guarantees closure only for OHLCV
+        timeframes ≤ 1h: a 4h bar opening 08:00 inside a window ending 09:00 closes 12:00 —
+        still forming. The fetch layer refuses still-forming klines (the belt), so without
+        this clamp coverage/gap detection would forever demand a bar the source correctly
+        will not serve (the suspenders). OHLCV (stamped at the bar OPEN) is clamped down to
+        its own timeframe grid; close-stamped kline samples (mark/index/spread) and
+        event/snapshot rows (funding/open_interest) are realized AT their stamp, so every
+        stamp < ``window_end_ms`` is already final and needs no clamp."""
+        if key.data_type == OHLCV:
+            return (self.window_end_ms // key.interval_ms) * key.interval_ms
+        return self.window_end_ms
 
     def required_keys(self, symbol: str) -> list[SeriesKey]:
         """Every series this symbol must have over the coverage window."""

@@ -18,11 +18,26 @@ long windows. Two series are constrained:
   ~8d at ``1h``, ~33d at ``4h``, ~199d at ``1d``. Historical windows older than that simply have
   no OI; the validator (correctly) flags it. Sample OI coarsely, or treat it as best-effort.
 
+Kline timing rules (safety-critical for the append-only store):
+
+* **Only CLOSED klines are emitted.** The venue returns the still-forming bar; the store's
+  keep-first-write dedup would freeze that partial OHLCV forever (incremental update never
+  re-reads it, repair sees no gap). Any kline whose close time (``open + interval``) has not
+  passed yet is dropped at this fetch layer, for every kline-derived series (ohlcv, mark,
+  index, spread) using that series' own interval.
+* **Kline-derived point samples are stamped at the kline CLOSE time.** A mark/index close (and
+  the spread estimated from it) is observable exactly when the kline closes, so the row is
+  stamped ``open + interval`` — never at the open, which would hand decision-time consumers a
+  value realized up to one interval in their future (see ``src.data.schema`` module docs).
+  Funding rows are settlement events and open interest is a snapshot; both are realized AT
+  their own timestamp and keep it.
+
 Order-book and liquidation history are not collected (AGENTS.md "if available").
 """
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from src.data.schema import (
@@ -33,6 +48,7 @@ from src.data.schema import (
     OPEN_INTEREST,
     SPREAD,
     SeriesKey,
+    timeframe_ms,
 )
 from src.data.source import DataSource
 
@@ -99,8 +115,6 @@ class CcxtDataSource(DataSource):
         Bybit replies retCode 10006 ("Too many visits") under burst load; ccxt raises
         ``RateLimitExceeded``. We sleep ``retry_base_sec`` and double up to ``retry_max_sec`` per
         retry, so the download self-throttles to the exchange's pace rather than crashing."""
-        import time
-
         delay = self._retry_base_sec
         for attempt in range(self._max_retries + 1):
             try:
@@ -182,12 +196,15 @@ class CcxtDataSource(DataSource):
     def _paginate_ohlcv(
         self, symbol: str, timeframe: str, start_ms: int, end_ms: int, params: dict
     ):
-        iv_ms = (
-            self._ex.parse_timeframe(timeframe) * 1000
-            if hasattr(self._ex, "parse_timeframe")
-            else None
-        )
-        since = start_ms
+        """Yield CLOSED klines with open time in ``[start_ms, end_ms)``, oldest first.
+
+        Closed-bar guard: a kline is immutable only once its close time (``open + interval``)
+        has passed — the venue serves the in-progress bar too, and storing it would freeze a
+        partial candle forever (append-only keep-first dedup). The guard applies regardless of
+        the caller's window math, so every kline-derived series (ohlcv, mark, index, spread)
+        is safe even when ``end_ms`` reaches into the still-forming bar."""
+        iv_ms = timeframe_ms(timeframe)  # our own grid math (Appendix C), never the library's
+        since = max(start_ms, 0)
         last_seen = -1
         while since < end_ms:
             batch = self._call(
@@ -195,15 +212,16 @@ class CcxtDataSource(DataSource):
             )
             if not batch:
                 break
+            now_ms = int(time.time() * 1000)  # re-read per page (long downloads span hours)
             for candle in batch:
-                if candle[0] >= end_ms:
-                    return
+                if candle[0] >= end_ms or candle[0] + iv_ms > now_ms:
+                    return  # out of window, or still forming (batches ascend ⇒ so is the rest)
                 yield candle
             new_since = batch[-1][0]
             if new_since <= last_seen:
                 break  # no progress ⇒ stop (guards against repeated last page)
             last_seen = new_since
-            since = new_since + (iv_ms or 1)
+            since = new_since + iv_ms
 
     def _ohlcv_rows(self, symbol: str, timeframe: str, start_ms: int, end_ms: int) -> list[dict]:
         rows: list[dict] = []
@@ -223,9 +241,18 @@ class CcxtDataSource(DataSource):
     def _kline_value(
         self, symbol: str, timeframe: str, start_ms: int, end_ms: int, price: str, col: str
     ) -> list[dict]:
+        """Mark/index samples from klines, stamped at the kline CLOSE time.
+
+        The close value of the kline opening at ``o`` is observable exactly at ``o + iv``, so
+        the row is ``{"ts": o + iv, col: close}`` — stamping it at ``o`` would let decision-time
+        as-of joins read a value realized up to one interval in their future (look-ahead). The
+        kline window is therefore shifted back one interval so the STAMPED rows cover
+        ``[start_ms, end_ms)``; stamps stay on the grid (``o % iv == 0 ⇒ (o + iv) % iv == 0``)."""
+        iv = timeframe_ms(timeframe)
         rows: list[dict] = []
-        for c in self._paginate_ohlcv(symbol, timeframe, start_ms, end_ms, {"price": price}):
-            rows.append({"ts": int(c[0]), col: float(c[4])})  # close of the mark/index kline
+        params = {"price": price}
+        for c in self._paginate_ohlcv(symbol, timeframe, start_ms - iv, end_ms - iv, params):
+            rows.append({"ts": int(c[0]) + iv, col: float(c[4])})
         return rows
 
     def _funding_rows(self, key: SeriesKey, start_ms: int, end_ms: int) -> list[dict]:
@@ -290,16 +317,19 @@ class CcxtDataSource(DataSource):
         return rows
 
     def _spread_rows(self, symbol: str, timeframe: str, start_ms: int, end_ms: int) -> list[dict]:
-        # Estimated from each candle close (no public historical L1 spread on Bybit).
+        # Estimated from each candle close (no public historical L1 spread on Bybit). The close
+        # is observable at the candle CLOSE, so — like mark/index — the sample is stamped
+        # ``open + iv`` and the kline window is shifted back one interval (see _kline_value).
         frac = self._estimated_spread_bps / 10_000.0
+        iv = timeframe_ms(timeframe)
         rows: list[dict] = []
-        for c in self._paginate_ohlcv(symbol, timeframe, start_ms, end_ms, {}):
+        for c in self._paginate_ohlcv(symbol, timeframe, start_ms - iv, end_ms - iv, {}):
             mid = float(c[4])
             bid = mid * (1.0 - frac / 2.0)
             ask = mid * (1.0 + frac / 2.0)
             rows.append(
                 {
-                    "ts": int(c[0]),
+                    "ts": int(c[0]) + iv,
                     "bid": round(bid, 8),
                     "ask": round(ask, 8),
                     "spread": round(ask - bid, 8),

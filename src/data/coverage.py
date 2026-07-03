@@ -48,7 +48,9 @@ def compute_coverage(store: SeriesStore, cfg: DataConfig) -> CoverageReport:
     for symbol in cfg.active_symbols():
         for key in cfg.required_keys(symbol):
             report.required_series += 1
-            gap = find_gaps(store, key, start, end)
+            # Per-series end: only bars guaranteed closed by the window end are REQUIRED
+            # (a 4h bar can still be forming when the hour-grid window end is reached).
+            gap = find_gaps(store, key, start, cfg.series_end_ms(key))
             if gap.covered:
                 report.covered_series += 1
             else:

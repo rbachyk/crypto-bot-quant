@@ -211,10 +211,14 @@ class LiveCandidateFeed:
                     if dt == OPEN_INTEREST
                     else (self.data_cfg.funding_timeframe if dt == FUNDING else base_iv)
                 )
+                # end + 1 keeps the sample stamped exactly AT the boundary: kline-derived
+                # samples (mark/index/spread) are stamped at their kline CLOSE time, so the
+                # freshest closed value sits at ts == end. The source's closed-bar guard
+                # already refuses anything still forming, so the widened end is safe.
                 self._reader.set_series(
                     sym,
                     dt,
-                    src.fetch(SeriesKey(self.data_cfg.exchange_id, dt, sym, tf), start, end),
+                    src.fetch(SeriesKey(self.data_cfg.exchange_id, dt, sym, tf), start, end + 1),
                 )
 
     def _maybe_refresh_point_in_time(self) -> None:

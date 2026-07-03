@@ -101,18 +101,20 @@ def _ohlcv_from_returns(
 
 
 def _point_in_time(
-    seed: str, bars: list[dict], premium: list[float] | None = None
+    seed: str, bars: list[dict], iv: int, premium: list[float] | None = None
 ) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
     """Mark/index/OI/spread samples aligned to each bar.
 
-    When ``premium`` is given (Family B), ``mark = index·(1+premium[i])`` so the
-    decision-time ``premium`` feature equals the planted deviation; otherwise
-    mark/index carry only tiny independent noise (premium is not that family's
-    edge).
+    Stamping follows the production convention (src.data.schema): values derived from bar
+    ``i``'s close (mark/index/spread) become observable at the bar CLOSE, so they are stamped
+    ``ts_i + iv``; OI is a snapshot realized at its own sample time. When ``premium`` is given
+    (Family B), ``mark = index·(1+premium[i])`` so the ``premium`` feature at bar ``i``'s
+    decision time equals the planted deviation ``premium[i]`` — observable, never future;
+    otherwise mark/index carry only tiny independent noise (premium is not that family's edge).
     """
     mark, index, oi, spread = [], [], [], []
     for i, b in enumerate(bars):
-        ts, c = b["ts"], b["close"]
+        ts, c = b["ts"] + iv, b["close"]  # close-derived ⇒ stamped at the bar CLOSE
         idx_px = c * (1.0 + _sym(seed, "ix", ts) * 1.5e-4)
         if premium is not None:
             mk_px = idx_px * (1.0 + premium[i])
@@ -120,7 +122,7 @@ def _point_in_time(
             mk_px = c * (1.0 + _sym(seed, "mk", ts) * 1.5e-4)
         index.append({"ts": ts, "index_price": idx_px})
         mark.append({"ts": ts, "mark_price": mk_px})
-        oi.append({"ts": ts, "open_interest": 1e7 * (1.0 + _unit(seed, "oi", ts))})
+        oi.append({"ts": b["ts"], "open_interest": 1e7 * (1.0 + _unit(seed, "oi", b["ts"]))})
         frac = 0.0002 + _unit(seed, "sp", ts) * 0.0006
         spread.append(
             {
@@ -189,7 +191,13 @@ def _lead_lag_returns(cand: CandidateConfig, edge: bool) -> dict[str, list[float
 # Family B — Perpetual Premium / Basis Mean Reversion                         #
 # --------------------------------------------------------------------------- #
 def _basis_series(cand: CandidateConfig, edge: bool) -> dict[str, tuple[list[float], list[float]]]:
-    """Per symbol: (returns, premium). r[m] = -kappa(sign)·d[m] + noise; premium = d."""
+    """Per symbol: (returns, premium). r[m] = -kappa(sign)·d[m-1] + noise; premium = d.
+
+    The reversion is LAGGED one bar: bar ``m`` reverts the deviation ``d[m-1]`` that was
+    observable at bar ``m-1``'s close (where the premium sample is stamped). A strategy that
+    reads the decision-time premium therefore captures a genuinely CAUSAL edge — the planted
+    structure is "the premium you can see now mean-reverts over the NEXT bar", never a
+    contemporaneous (future) response."""
     f = cand.fixture
     v = f.values
     n = f.bars
@@ -201,17 +209,16 @@ def _basis_series(cand: CandidateConfig, edge: bool) -> dict[str, tuple[list[flo
     noise = float(v["noise_sigma"])
     out: dict[str, tuple[list[float], list[float]]] = {}
     for sym in symbols:
-        d = 0.0
-        prem = [0.0]
-        rets = [0.0]
         # d[0] established for bar 0; bar 0 return is 0 (base price).
         d = shock * _sym(f.seed, sym, "d", 0)
-        prem[0] = d
+        prem = [d]
+        rets = [0.0]
         for i in range(1, n):
+            d_prev = d  # the deviation observable at bar i-1's close
             d = rho * d + shock * _sym(f.seed, sym, "d", i)
             prem.append(d)
-            kappa = kappa_rich if d > 0 else kappa_cheap
-            rets.append(-kappa * d + _sym(f.seed, sym, "rn", i) * noise)
+            kappa = kappa_rich if d_prev > 0 else kappa_cheap
+            rets.append(-kappa * d_prev + _sym(f.seed, sym, "rn", i) * noise)
         out[sym] = (rets, prem)
     return out
 
@@ -261,7 +268,7 @@ def _build_inputs(
         seed = f"{cand.fixture.seed}:{symbol}"
         bars = _ohlcv_from_returns(seed, rets, iv)
         premium = premium_by_symbol.get(symbol) if premium_by_symbol else None
-        mark, index, oi, spread = _point_in_time(seed, bars, premium=premium)
+        mark, index, oi, spread = _point_in_time(seed, bars, iv, premium=premium)
         funding = _funding(seed, cand.fixture.bars, iv)
         reader = _FixtureReader(bars, mark, index, oi, spread, funding)
         frame = compute_features(symbol, reader, feat_cfg)

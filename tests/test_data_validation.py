@@ -141,6 +141,29 @@ def test_markindex_misalignment_is_critical(tmp_path) -> None:
     assert "markindex_alignment" in _critical_checks(store, cfg)
 
 
+def test_markindex_close_stamp_listing_edge_is_not_misalignment(tmp_path) -> None:
+    """A perp LISTING inside the window legitimately has its first mark/index sample one base
+    interval after its first bar: samples are stamped at the kline CLOSE, and no kline exists
+    before the listing bar to close at its open. That single leading offset must not trip the
+    alignment check (real misalignment — interior holes — stays critical, see above)."""
+    from src.data.schema import INDEX
+
+    cfg = small_cfg()
+    store = fresh_store(tmp_path)
+    populate(store, cfg)
+    iv = SeriesKey(cfg.exchange_id, MARK, cfg.symbols[0], cfg.base_timeframe).interval_ms
+    listing = cfg.window_start_ms + 4 * iv  # perp lists mid-window
+    for dt in ("ohlcv", MARK, INDEX, "open_interest", "spread"):
+        tf = "5m" if dt == "ohlcv" else cfg.base_timeframe
+        store.delete_range(SeriesKey(cfg.exchange_id, dt, cfg.symbols[0], tf),
+                           cfg.window_start_ms, listing)
+    for dt in (MARK, INDEX):
+        # First close-stamped sample lands one interval AFTER the listing bar's open.
+        store.delete_range(SeriesKey(cfg.exchange_id, dt, cfg.symbols[0], cfg.base_timeframe),
+                           listing, listing + iv)
+    assert "markindex_alignment" not in _critical_checks(store, cfg)
+
+
 def test_clock_drift_breach_is_critical(tmp_path) -> None:
     # Force an impossibly tight tolerance so any measurable skew trips it.
     cfg = small_cfg()

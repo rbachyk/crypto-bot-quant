@@ -7,8 +7,12 @@ notion of an "expected timestamp" (no ambiguity between backtest and live —
 the Parity Rule, Section 10).
 
 Timestamps are UTC epoch milliseconds (int). For OHLCV the timestamp is the
-candle **open** time; for point-in-time series (mark/index/OI/spread/funding)
-it is the sample time on the grid.
+candle **open** time. Point-in-time series are stamped at the moment their
+value becomes OBSERVABLE: kline-derived samples (mark/index/spread) carry a
+kline's close value stamped at the kline **close** time (``open + interval``),
+funding rows are stamped at the settlement time, and open-interest rows at the
+snapshot time. Decision-time as-of joins (``ts <= decision_ts``) are therefore
+causal by construction — no sample embeds a value realized after its stamp.
 """
 
 from __future__ import annotations

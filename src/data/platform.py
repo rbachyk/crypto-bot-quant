@@ -51,14 +51,17 @@ class DataPlatform:
         self.ingestor = Ingestor(self.source, self.store)
 
     # -- ingestion ------------------------------------------------------- #
+    # Ingestion + coverage use the PER-SERIES end (cfg.series_end_ms): a timeframe coarser
+    # than the hour-grid window end (e.g. 4h) may have a still-forming bar before the raw
+    # window end — it is neither required nor fetched (the source refuses partial klines).
     def download(self, key: SeriesKey) -> int:
-        return self.ingestor.download(key, self.cfg.window_start_ms, self.cfg.window_end_ms)
+        return self.ingestor.download(key, self.cfg.window_start_ms, self.cfg.series_end_ms(key))
 
     def update_incremental(self, key: SeriesKey) -> int:
         """Download only the candles that appeared since the last download (the tail up to the
         window end) — the efficient refresh that avoids re-fetching years of existing data."""
         return self.ingestor.update_incremental(
-            key, self.cfg.window_start_ms, self.cfg.window_end_ms
+            key, self.cfg.window_start_ms, self.cfg.series_end_ms(key)
         )
 
     def download_all(self) -> int:
@@ -75,7 +78,7 @@ class DataPlatform:
                 if not self.source.has_symbol(symbol):
                     continue
                 for key in self.cfg.required_keys(symbol):
-                    self.ingestor.repair(key, self.cfg.window_start_ms, self.cfg.window_end_ms)
+                    self.ingestor.repair(key, self.cfg.window_start_ms, self.cfg.series_end_ms(key))
         return compute_coverage(self.store, self.cfg)
 
     # -- validation ------------------------------------------------------ #

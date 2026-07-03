@@ -116,7 +116,12 @@ class StoreReader(FeatureDataReader):
 
     def series(self, symbol: str, data_type: str) -> list[dict]:
         key = SeriesKey(self.exchange_id, data_type, symbol, self._tf_for(data_type))
-        return self.store.read(key, self.start_ms, self.end_ms)
+        # Include the sample stamped exactly AT the window end: kline-derived samples
+        # (mark/index/spread) are stamped at their kline's CLOSE time, so the freshest row
+        # observable at the LAST decision time (= end_ms) sits at ts == end_ms — one stamp
+        # past the [start, end) bar window. ``_asof`` still caps every row at decision_ts,
+        # so nothing beyond a decision boundary is ever read (no look-ahead).
+        return self.store.read(key, self.start_ms, self.end_ms + 1)
 
 
 class TruncatedReader(FeatureDataReader):

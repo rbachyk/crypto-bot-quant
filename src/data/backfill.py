@@ -40,13 +40,13 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_data_config()
     platform = DataPlatform(cfg=cfg)
     start = parse_utc_ms(args.from_ts) if args.from_ts else cfg.window_start_ms
-    end = cfg.window_end_ms
 
     keys = _keys_for(cfg, args.symbol, args.series)
     total_written = 0
     still_missing = 0
     for key in keys:
-        result = platform.ingestor.repair(key, start, end)
+        # Per-series end: never demand a bar that may still be forming at the window end.
+        result = platform.ingestor.repair(key, start, cfg.series_end_ms(key))
         total_written += result.rows_written
         still_missing += result.gaps_after
         flag = "ok" if result.repaired else f"MISSING={result.gaps_after}"

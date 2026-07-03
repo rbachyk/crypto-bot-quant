@@ -143,15 +143,23 @@ def test_ohlcv_excludes_out_of_range(source: CcxtDataSource) -> None:
     assert [r["ts"] for r in rows] == [iv, 2 * iv, 3 * iv, 4 * iv]
 
 
-def test_mark_and_index_use_close(source: CcxtDataSource) -> None:
+def test_mark_and_index_use_close_stamped_at_kline_close(source: CcxtDataSource) -> None:
+    """A kline's close value is observable at the kline CLOSE, so the sample at ``ts`` carries
+    the close of the kline that OPENED at ``ts - iv`` (never the bar closing after ``ts``)."""
+    iv = TIMEFRAME_MS["5m"]
     start, end = _window("5m", 4)
     mark = source.fetch(SeriesKey("bybit", MARK, "BTC/USDT:USDT", "5m"), start, end)
     index = source.fetch(SeriesKey("bybit", INDEX, "BTC/USDT:USDT", "5m"), start, end)
     assert all("mark_price" in r for r in mark)
     assert all("index_price" in r for r in index)
-    # mark gets +1.0 bump, index +2.0 (per FakeBybit) at ts=0 -> close 100/101/102.
+    # No kline exists before open=0, so the first stamp is its close time ``iv`` (not 0).
+    assert [r["ts"] for r in mark] == [iv, 2 * iv, 3 * iv]
+    assert [r["ts"] for r in index] == [iv, 2 * iv, 3 * iv]
+    # mark gets +1.0 bump, index +2.0 (per FakeBybit): kline open=0 closes 101/102, stamped iv.
     assert mark[0]["mark_price"] == pytest.approx(101.0)
     assert index[0]["index_price"] == pytest.approx(102.0)
+    # And the value at each stamp is the PREVIOUS kline's close — never the one closing later.
+    assert mark[1]["mark_price"] == pytest.approx(102.0)  # close of kline open=iv
 
 
 def test_funding_rows(source: CcxtDataSource) -> None:
@@ -172,9 +180,12 @@ def test_open_interest_rows(source: CcxtDataSource) -> None:
 
 
 def test_spread_is_estimated(source: CcxtDataSource) -> None:
+    iv = TIMEFRAME_MS["5m"]
     start, end = _window("5m", 3)
     key = SeriesKey("bybit", SPREAD, "BTC/USDT:USDT", "5m")
     rows = source.fetch(key, start, end)
+    # Estimated from each kline close ⇒ stamped at the kline CLOSE time, like mark/index.
+    assert [r["ts"] for r in rows] == [iv, 2 * iv]
     assert all(set(r) == set(key.columns) for r in rows)
     for r in rows:
         assert r["ask"] > r["bid"] > 0
@@ -185,12 +196,79 @@ def test_spread_is_estimated(source: CcxtDataSource) -> None:
 def test_spread_bps_configurable() -> None:
     src = CcxtDataSource("bybit", estimated_spread_bps=12.0, client=FakeBybit())
     iv = TIMEFRAME_MS["5m"]
-    rows = src.fetch(SeriesKey("bybit", SPREAD, "BTC/USDT:USDT", "5m"), 0, iv)
+    rows = src.fetch(SeriesKey("bybit", SPREAD, "BTC/USDT:USDT", "5m"), 0, 2 * iv)
     assert rows[0]["spread_bps"] == pytest.approx(12.0)
 
 
 def test_ping(source: CcxtDataSource) -> None:
     assert source.ping() is True
+
+
+# --------------------------------------------------------------------------- #
+# Closed-bar guard: the venue also serves the STILL-FORMING kline; storing it   #
+# would freeze a partial candle forever (append-only keep-first dedup), so the  #
+# fetch layer must drop any kline whose close time has not passed — for every   #
+# kline-derived series, regardless of the caller's window math (C1 regression). #
+# --------------------------------------------------------------------------- #
+class _FormingBarClient:
+    """Serves three 4h klines, the LAST being the current still-forming bar."""
+
+    def __init__(self, opens: list[int]) -> None:
+        self.opens = opens
+
+    def load_markets(self) -> dict:
+        return {"BTC/USDT:USDT": {}}
+
+    def fetch_ohlcv(self, symbol, timeframe, since=0, limit=1000, params=None):  # noqa: A002
+        return [[o, 100.0, 101.0, 99.0, 100.5 + o, 10.0] for o in self.opens if o >= since]
+
+
+def _forming_4h_window() -> tuple[list[int], int, int]:
+    """Three 4h opens ending at the CURRENT (still-forming) bar + a window reaching into it."""
+    import time
+
+    iv = TIMEFRAME_MS["4h"]
+    cur_open = (int(time.time() * 1000) // iv) * iv  # closes in the future
+    opens = [cur_open - 2 * iv, cur_open - iv, cur_open]
+    return opens, opens[0], cur_open + iv
+
+
+def test_still_forming_4h_kline_is_not_emitted() -> None:
+    opens, start, end = _forming_4h_window()
+    src = CcxtDataSource("bybit", client=_FormingBarClient(opens))
+    rows = src.fetch(SeriesKey("bybit", OHLCV, "BTC/USDT:USDT", "4h"), start, end)
+    # Only the two CLOSED bars come through; the in-progress bar is dropped at the fetch layer.
+    assert [r["ts"] for r in rows] == opens[:2]
+
+
+def test_still_forming_4h_kline_is_never_stored(tmp_path) -> None:
+    """End-to-end belt: ingesting a window that reaches into the forming bar must not freeze a
+    partial candle in the append-only store (incremental update would never re-read it)."""
+    from src.data.ingest import Ingestor
+    from src.data.store import SeriesStore
+
+    opens, start, end = _forming_4h_window()
+    src = CcxtDataSource("bybit", client=_FormingBarClient(opens))
+    store = SeriesStore(tmp_path / "lake")
+    key = SeriesKey("bybit", OHLCV, "BTC/USDT:USDT", "4h")
+    assert Ingestor(src, store).download(key, start, end) == 2
+    assert opens[2] not in store.timestamps(key, start, end)  # the forming bar is absent
+    # latest_ts stays on the last CLOSED bar, so a later incremental update re-fetches the
+    # in-progress bar once it has closed instead of freezing the partial version forever.
+    assert store.latest_ts(key) == opens[1]
+
+
+def test_forming_kline_guard_applies_to_kline_derived_point_series() -> None:
+    """mark (and index/spread) samples come from klines too: no sample may be stamped at a time
+    that has not been reached — the forming kline contributes nothing."""
+    import time
+
+    opens, start, end = _forming_4h_window()
+    src = CcxtDataSource("bybit", client=_FormingBarClient(opens))
+    rows = src.fetch(SeriesKey("bybit", MARK, "BTC/USDT:USDT", "4h"), start, end)
+    # Closed klines only: opens[0]/[1] close at opens[1]/[2] — those are the stamps.
+    assert [r["ts"] for r in rows] == [opens[1], opens[2]]
+    assert all(r["ts"] <= int(time.time() * 1000) for r in rows)  # nothing from the future
 
 
 # --------------------------------------------------------------------------- #
