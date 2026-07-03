@@ -8,6 +8,7 @@ Heavy research/ML/RL jobs are added in their phases.
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
 from datetime import UTC, datetime
 
@@ -559,6 +560,7 @@ def _run_ml_shadow_pass(ctx: JobContext, params: dict) -> dict:
         [s.candidate for s in test_samples[:20]],
         settings=settings,
         write_to_db=True,
+        synthetic_source=True,  # reference dataset: tag rows so ML-PROMO excludes them
     )
     ctx.progress(1, 1, f"{len(result.shadow_log_ids)} shadow log entries written")
     assert not result.applied, "shadow pass must never set applied=True"
@@ -1003,10 +1005,9 @@ def _run_live_session(ctx: JobContext, params: dict) -> dict:
     # Clear this run's live open-positions panel rows when it ends — with a unique session_id per
     # run they would otherwise linger and accumulate across restarts (the basket path clears via
     # its end-of-run close_all). A stopped paper session has no live positions to display.
-    try:
+    # Cleanup must not fail the handler.
+    with contextlib.suppress(Exception):
         _persist_open_positions(result.session.session_id, [])
-    except Exception:  # noqa: BLE001 - cleanup must not fail the handler
-        pass
     net = sum(t.pnl for t in result.session.trades)
     status = "halted/stopped" if result.halted else "completed"
     ctx.progress(len(result.ticks), prog_total, f"{status}: {result.executed} executed")

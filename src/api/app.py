@@ -2634,7 +2634,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for gate_id, spec in catalog.items():
                 result = latest_by_gate.get(gate_id)
                 status = result.status.value if result else "not_run"
-                is_critical = spec.blocks_live == "true"
+                is_critical = spec.blocks_live_resolved()
                 if is_critical:
                     critical_total += 1
                     if status == "passed":
@@ -2663,7 +2663,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "name": spec.name,
                         "phase": spec.phase,
                         "status": status,
-                        "blocks_live": spec.blocks_live == "true",
+                        "blocks_live": spec.blocks_live_resolved(),
                         "depends_on": spec.depends_on,
                         "blocking_dependencies": blocking,
                         "pass_condition": spec.pass_condition,
@@ -2718,7 +2718,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "pass_condition": spec.pass_condition if spec else "",
                 "remediation_steps": spec.remediation_steps if spec else [],
                 "depends_on": spec.depends_on if spec else [],
-                "blocks_live": (spec.blocks_live == "true") if spec else True,
+                "blocks_live": spec.blocks_live_resolved() if spec else True,
                 "rerun_job": spec.rerun_job if spec else "",
             },
             "latest_result": {
@@ -2931,11 +2931,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if r.gate_id not in latest:
                     latest[r.gate_id] = r
 
-        critical_total = sum(1 for s in catalog.values() if s.blocks_live == "true")
+        critical_total = sum(1 for s in catalog.values() if s.blocks_live_resolved())
         critical_passed = sum(
             1
             for gid, s in catalog.items()
-            if s.blocks_live == "true"
+            if s.blocks_live_resolved()
             and (gr2 := latest.get(gid)) is not None
             and gr2.status is GateStatus.PASSED
         )
@@ -2966,7 +2966,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 f"<tr>"
                 f"<td><a href='/dashboard/gates/{gate_id}'>{gate_id}</a></td>"
                 f"<td>{_esc(spec.name)}</td>"
-                f"<td>{'✓' if spec.blocks_live == 'true' else ''}</td>"
+                f"<td>{'✓' if spec.blocks_live_resolved() else ''}</td>"
                 f"<td>{_status_badge(status)}</td>"
                 f"<td style='max-width:300px'>{next_action}</td>"
                 f"<td><form method='post' action='/api/gates/{gate_id}/run' style='display:inline'>"

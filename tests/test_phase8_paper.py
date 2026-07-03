@@ -695,6 +695,9 @@ def _seed_paper_b_data(*, with_backtest_ref: bool = True) -> None:
                     passed=True,
                     trade_count=50,
                     expectancy_r=0.3,  # paper 0.2R / backtest 0.3R → ratio 0.67, within bounds
+                    # report_path set so a leaked seed row can never trip
+                    # test_bt_persists_backtest_run_row's newest-row assertion.
+                    report_path=f"reports/backtest/{_SEED_STRATEGY}_seed.json",
                 )
             )
 
@@ -703,6 +706,11 @@ def _seed_paper_b_data(*, with_backtest_ref: bool = True) -> None:
 class TestPaperBGateCheck:
     """PAPER-B evaluates REAL persisted paper_runs/paper_trades — pass path needs seeded
     rows; with no data the gate must FAIL-CLOSED (it must never fabricate a session)."""
+
+    def teardown_method(self) -> None:
+        # The test DB persists across suite runs; leaked seed rows would shadow the
+        # newest reference BacktestRun that test_bt_persists_backtest_run_row asserts on.
+        _clear_paper_scope()
 
     def test_fails_closed_with_no_paper_sessions(self) -> None:
         from src.config import get_settings

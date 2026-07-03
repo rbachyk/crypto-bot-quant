@@ -451,8 +451,136 @@ def test_ml_config_meta_labeler_features():
 
 
 # --------------------------------------------------------------------------- #
-# Gate check (offline, no live DB)                                              #
+# Gate check — real-data performance criteria (audit H15)                       #
 # --------------------------------------------------------------------------- #
+
+_PERF_NAMES = (
+    "ml_expectancy_improves",
+    "ml_profit_factor_preserved",
+    "ml_tail_risk_reduced",
+    "ml_best_trades_preserved",
+)
+
+
+def test_real_performance_criteria_fail_closed_without_data():
+    """With no real linked shadow outcomes, all four performance criteria FAIL
+    with explicit remediation — the gate must never pass on synthetic data."""
+    from src.gates.phase9 import _real_performance_criteria
+    from src.ml.config import load_ml_config
+
+    criteria, score = _real_performance_criteria(0, [], load_ml_config())
+    assert score is None
+    assert [c.id for c in criteria] == list(_PERF_NAMES)
+    for c in criteria:
+        assert not c.passed
+        assert "REAL shadow decisions" in c.detail
+        assert "H18" in c.detail
+
+
+def test_real_performance_criteria_fail_closed_below_minimum():
+    """A handful of linked outcomes is still insufficient (min_train_samples)."""
+    from src.gates.phase9 import _real_performance_criteria
+    from src.ml.config import load_ml_config
+
+    linked = [(1, 0.5)] * 5
+    criteria, score = _real_performance_criteria(5, linked, load_ml_config())
+    assert score is None
+    assert all(not c.passed for c in criteria)
+
+
+def test_real_performance_criteria_pass_on_good_real_outcomes():
+    """When enough REAL outcomes exist and the model filtered the losers, the
+    four kill-criteria pass."""
+    from src.gates.phase9 import _real_performance_criteria
+    from src.ml.config import load_ml_config
+
+    # 20 winners the model took, 20 losers the model skipped.
+    linked = [(1, 0.5)] * 20 + [(0, -0.5)] * 20
+    criteria, score = _real_performance_criteria(40, linked, load_ml_config())
+    assert score is not None
+    assert all(c.passed for c in criteria), [(c.id, c.detail) for c in criteria]
+    assert score.expectancy_improvement > 0
+
+
+def test_real_performance_criteria_fail_on_negative_edge_model():
+    """A model that keeps losers and skips winners must FAIL on real outcomes."""
+    from src.gates.phase9 import _real_performance_criteria
+    from src.ml.config import load_ml_config
+
+    linked = [(0, 0.5)] * 20 + [(1, -0.5)] * 20  # takes only the losers
+    criteria, _score = _real_performance_criteria(40, linked, load_ml_config())
+    by_name = {c.id: c for c in criteria}
+    assert not by_name["ml_expectancy_improves"].passed
+
+
+@requires_db
+def test_load_real_shadow_outcomes_links_and_excludes_synthetic():
+    """The real-outcome loader excludes synthetic-tagged rows and joins the rest
+    to paper trades on the same symbol within the horizon."""
+    from datetime import UTC, datetime, timedelta
+
+    from src.db.base import session_scope
+    from src.db.models import PaperTradeRecord, ShadowLog
+    from src.gates.phase9 import _load_real_shadow_outcomes
+    from src.ml.shadow import SYNTHETIC_CONTEXT_KEY
+
+    symbol = "GATE9TST/USDT:USDT"  # unique symbol so shared-DB rows can't interfere
+    now = datetime.now(UTC)
+    row_ids: list[int] = []
+    trade_ids: list[int] = []
+    try:
+        with session_scope() as session:
+            real_row = ShadowLog(
+                ts=now - timedelta(hours=2),
+                model_id="meta_labeler_x",
+                model_type="meta_labeler",
+                mode="SHADOW",
+                symbol=symbol,
+                context_features={"signal_strength": 0.7},
+                prediction={"label": 1, "probability": 0.8},
+                applied=False,
+            )
+            synthetic_row = ShadowLog(
+                ts=now - timedelta(hours=2),
+                model_id="meta_labeler_x",
+                model_type="meta_labeler",
+                mode="SHADOW",
+                symbol=symbol,
+                context_features={SYNTHETIC_CONTEXT_KEY: 1.0},
+                prediction={"label": 1, "probability": 0.9},
+                applied=False,
+            )
+            session.add_all([real_row, synthetic_row])
+            session.flush()
+            row_ids = [real_row.id, synthetic_row.id]
+            trade = PaperTradeRecord(
+                session_id="gate9-test",
+                trade_id="gate9-t1",
+                created_at=now - timedelta(hours=1),
+                symbol=symbol,
+                strategy="test",
+                pnl_r=0.42,
+            )
+            session.add(trade)
+            session.flush()
+            trade_ids = [trade.id]
+
+        n_real, linked = _load_real_shadow_outcomes()
+        assert n_real >= 1
+        assert (1, 0.42) in linked
+        # The synthetic-tagged row must not have produced a second identical link
+        # for our symbol (only one real row was seeded).
+        assert sum(1 for label, pnl in linked if pnl == 0.42 and label == 1) == 1
+    finally:
+        with session_scope() as session:
+            if row_ids:
+                session.query(ShadowLog).filter(ShadowLog.id.in_(row_ids)).delete(
+                    synchronize_session=False
+                )
+            if trade_ids:
+                session.query(PaperTradeRecord).filter(
+                    PaperTradeRecord.id.in_(trade_ids)
+                ).delete(synchronize_session=False)
 
 
 @requires_db
@@ -466,6 +594,9 @@ def test_ml_promo_gate_runs(tmp_path):
     criteria = check_ml_promo(settings)
     assert isinstance(criteria, list)
     assert all(isinstance(c, Criterion) for c in criteria)
+    ids = [c.id for c in criteria]
+    for name in _PERF_NAMES:
+        assert name in ids, f"performance criterion {name} missing"
 
 
 @requires_db
@@ -497,14 +628,38 @@ def test_ml_promo_gate_shadow_imports(tmp_path):
 
 @requires_db
 def test_ml_promo_gate_trains_all_models(tmp_path):
-    """ml_models_train must pass — all 5 models must train successfully."""
+    """ml_models_train_plumbing must pass — all 5 models must train successfully."""
     from src.config import get_settings
     from src.gates.phase9 import check_ml_promo
 
     settings = get_settings()
     criteria = check_ml_promo(settings)
     by_name = {c.id: c for c in criteria}
-    assert "ml_models_train" in by_name
-    assert by_name["ml_models_train"].passed, (
-        f"model training failed: {by_name['ml_models_train'].detail}"
+    assert "ml_models_train_plumbing" in by_name
+    assert by_name["ml_models_train_plumbing"].passed, (
+        f"model training failed: {by_name['ml_models_train_plumbing'].detail}"
     )
+
+
+@requires_db
+def test_ml_promo_gate_cleans_up_its_shadow_log_writes(tmp_path):
+    """The gate's plumbing shadow-log rows are tagged synthetic AND deleted at the
+    end of the run — no residue accumulates in production tables (audit C4-adj)."""
+    from src.config import get_settings
+    from src.db.base import session_scope
+    from src.db.models import ShadowLog
+    from src.gates.phase9 import check_ml_promo
+    from src.ml.shadow import SYNTHETIC_CONTEXT_KEY
+
+    def _tagged_count() -> int:
+        with session_scope() as session:
+            rows = session.query(ShadowLog.context_features).all()
+        return sum(1 for (ctx,) in rows if (ctx or {}).get(SYNTHETIC_CONTEXT_KEY))
+
+    before = _tagged_count()
+    criteria = check_ml_promo(get_settings())
+    by_name = {c.id: c for c in criteria}
+    assert by_name["ml_shadow_log_writes_plumbing"].passed, (
+        by_name["ml_shadow_log_writes_plumbing"].detail
+    )
+    assert _tagged_count() == before, "gate left synthetic shadow_log rows behind"

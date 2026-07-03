@@ -18,11 +18,14 @@ Criteria checked:
   7. rl_stub_importable          — RLPolicyStub importable and produces valid action
   8. controller_shadow_applies_false — controller applied=False in SHADOW mode
   9. frozen_fallback_roundtrip   — snapshot / frozen-fallback write+load verified
-  10. learner_log_db             — LearnerLog model writable to learner_logs table
-  11. scorer_runs                — scorer evaluates synthetic decisions (WF + hold-out)
-  12. rollback_guard_fires       — RollbackGuard freezes on envelope breaker
-  13. drift_monitoring_runs      — drift scores computed over synthetic decisions
-  14. shadow_log_applied_false   — all SHADOW-mode learner_logs have applied=False
+  10. learner_log_db             — LearnerLog row writable (self-test row removed after)
+  11. scorer_plumbing            — scorer executes on synthetic decisions (mechanism only)
+  12. shadow_policy_beats_baseline — REAL SHADOW learner_logs with realized outcomes
+      scored against the promotion criteria; requires promotion_eligible=True and
+      fails closed when too few real decisions exist (audit H16)
+  13. rollback_guard_fires       — RollbackGuard freezes on envelope breaker
+  14. drift_monitoring_runs      — drift scores computed over synthetic decisions
+  15. shadow_log_applied_false   — all SHADOW-mode learner_logs have applied=False
 """
 
 from __future__ import annotations
@@ -34,6 +37,120 @@ from pathlib import Path
 
 from src.config import Settings
 from src.gates.result import Criterion
+
+# learner_id used by this gate's own DB write self-check (criterion 10). Rows are
+# deleted right after verification and always excluded from real-data scoring.
+_SELF_TEST_LEARNER_ID = "gate_test"
+
+# Pre-fix LEARN-PROMO-L runs fabricated learner_log rows carrying this rationale
+# marker (see src/gates/phase13.py, audit C4). They are pollution, never evidence;
+# excluded here as well in case any were written in SHADOW mode.
+_SYNTHETIC_RATIONALE_PREFIX = "approved recommendation #"
+
+
+def _load_real_shadow_decisions(cfg):  # -> list[ShadowDecision]
+    """REAL SHADOW-mode decisions for the configured learner, chronological.
+
+    A decision is REAL when:
+      * ``mode == "SHADOW"`` and ``learner_id == cfg.learner_id`` — the learner under
+        promotion review (this also excludes the RL gate's self-seeded rows, which use
+        the rl_policy learner_id — see src/gates/phase12.py);
+      * it has a realized outcome (scored decisions only);
+      * it does not carry a gate self-test / pre-fix synthetic marker.
+
+    Purge pre-fix self-test pollution permanently with::
+
+        DELETE FROM learner_logs
+        WHERE learner_id = 'gate_test'
+           OR proposed_action->>'rationale' LIKE 'approved recommendation #%';
+    """
+    from src.adaptation.scorer import ShadowDecision
+    from src.db.base import session_scope
+    from src.db.models import LearnerLog
+
+    decisions: list[ShadowDecision] = []
+    with session_scope() as session:
+        rows = (
+            session.query(LearnerLog)
+            .filter(
+                LearnerLog.mode == "SHADOW",
+                LearnerLog.learner_id == cfg.learner_id,
+                LearnerLog.realized_outcome.isnot(None),
+            )
+            .order_by(LearnerLog.ts)
+            .all()
+        )
+        for r in rows:
+            action = dict(r.proposed_action or {})
+            rationale = str(action.get("rationale") or "")
+            if rationale.startswith(_SYNTHETIC_RATIONALE_PREFIX):
+                continue
+            decisions.append(
+                ShadowDecision(
+                    ts=r.ts,
+                    symbol=r.symbol,
+                    projected_outcome=float(r.projected_outcome or 0.0),
+                    realized_outcome=float(r.realized_outcome),
+                    take=bool(action.get("take", True)),
+                    mode=r.mode,
+                )
+            )
+    return decisions
+
+
+def _score_real_shadow_decisions(decisions, cfg) -> Criterion:
+    """Build the ``shadow_policy_beats_baseline`` criterion from REAL decisions.
+
+    Pass requires ``promotion_eligible=True`` from the scorer (walk-forward folds
+    beat baseline, locked hold-out edge ≥ min, calibrated, drift bounded) AND
+    ``folds_passed ≥ scoring.min_wf_folds_positive``. Fails closed when fewer real
+    decisions exist than the configured eligibility minimums — the gate never
+    fabricates decisions (audit H16).
+    """
+    from src.adaptation.scorer import score_shadow_decisions
+
+    min_needed = max(cfg.min_samples_to_start, cfg.scoring.min_shadow_decisions)
+    if len(decisions) < min_needed:
+        return Criterion.fail(
+            "shadow_policy_beats_baseline",
+            f"insufficient REAL SHADOW decisions with realized outcomes for "
+            f"learner_id={cfg.learner_id}: n={len(decisions)} (need ≥ {min_needed}, "
+            "§21.1 eligibility). Remediation: run the learner in SHADOW mode alongside "
+            "paper trading and backfill realized outcomes into learner_logs, then re-run "
+            "gate:learn-promo-s. This gate does not fabricate decisions",
+        )
+
+    # baseline_mean=0.0R is a conservative floor for the deterministic baseline: the
+    # shadow policy must show genuinely positive realized edge, not merely beat a
+    # possibly-negative synthetic baseline (audit H16).
+    result = score_shadow_decisions(
+        decisions,
+        n_folds=4,
+        min_holdout_edge=cfg.scoring.min_holdout_edge,
+        calibration_max_brier=cfg.scoring.calibration_max_brier,
+        max_drift_per_window=cfg.scoring.max_drift_per_window,
+        drift_window=cfg.monitoring.drift_window,
+        baseline_mean=0.0,
+    )
+    holdout = None if result.holdout_edge is None else round(result.holdout_edge, 4)
+    brier = None if result.brier_score is None else round(result.brier_score, 4)
+    detail = (
+        f"REAL decisions n={result.n_decisions} (outcomes={result.n_with_outcome}) "
+        f"folds_passed={result.folds_passed}/{cfg.scoring.min_wf_folds_positive} required, "
+        f"holdout_edge={holdout} (min {cfg.scoring.min_holdout_edge}), "
+        f"brier={brier} (max {cfg.scoring.calibration_max_brier}), "
+        f"max_drift={result.max_drift:.4f} (max {cfg.scoring.max_drift_per_window}), "
+        f"promotion_eligible={result.promotion_eligible}"
+    )
+    passed = result.promotion_eligible and result.folds_passed >= cfg.scoring.min_wf_folds_positive
+    if passed:
+        return Criterion.ok("shadow_policy_beats_baseline", detail)
+    return Criterion.fail(
+        "shadow_policy_beats_baseline",
+        f"shadow policy does not beat baseline on real decisions: {detail}; "
+        f"scorer note: {result.note}. Keep the learner in SHADOW (do not promote) "
+        "until walk-forward + locked hold-out show positive calibrated edge",
+    )
 
 
 def check_learn_promo_s(settings: Settings) -> list[Criterion]:
@@ -416,7 +533,7 @@ def check_learn_promo_s(settings: Settings) -> list[Criterion]:
             rationale="gate self-test",
         )
         entry = write_learner_log(
-            learner_id="gate_test",
+            learner_id=_SELF_TEST_LEARNER_ID,
             learner_version="learner_0001",
             mode="SHADOW",
             symbol="BTCUSDT",
@@ -431,23 +548,28 @@ def check_learn_promo_s(settings: Settings) -> list[Criterion]:
         )
         db_ok = entry.applied is False and entry.mode == "SHADOW"
 
-        # Verify DB row was written.
+        # Verify DB row was written, then remove the self-test row(s): gate runs must
+        # not accumulate synthetic rows in production tables (audit C4-adjacent).
         from src.db.base import session_scope
         from src.db.models import LearnerLog
 
         with session_scope() as session:
             row = (
                 session.query(LearnerLog)
-                .filter_by(learner_id="gate_test")
+                .filter_by(learner_id=_SELF_TEST_LEARNER_ID)
                 .order_by(LearnerLog.id.desc())
                 .first()
             )
             db_row_ok = row is not None and row.mode == "SHADOW" and row.applied is False
+            session.query(LearnerLog).filter(
+                LearnerLog.learner_id == _SELF_TEST_LEARNER_ID
+            ).delete(synchronize_session=False)
 
         out.append(
             Criterion.ok(
                 "learner_log_db",
-                "LearnerLog row written to learner_logs; applied=False; mode=SHADOW",
+                "LearnerLog row written to learner_logs (applied=False; mode=SHADOW) "
+                "and self-test row removed after verification",
             )
             if db_ok and db_row_ok
             else Criterion.fail(
@@ -459,12 +581,14 @@ def check_learn_promo_s(settings: Settings) -> list[Criterion]:
         out.append(Criterion.fail("learner_log_db", f"raised: {exc}"))
 
     # ------------------------------------------------------------------ #
-    # 11. Scorer evaluates synthetic decisions                             #
+    # 11. PLUMBING: scorer executes on synthetic decisions                 #
     # ------------------------------------------------------------------ #
     try:
         from src.adaptation.scorer import ShadowDecision, score_shadow_decisions
 
-        # Build synthetic decisions with known outcomes (positive edge).
+        # Synthetic decisions with known outcomes prove the scorer MECHANISM only
+        # (folds, hold-out, Brier, drift). This is never a promotion signal — the
+        # pass verdict comes from shadow_policy_beats_baseline below (audit H16).
         decisions: list[ShadowDecision] = []
         for i in range(60):
             realized = 0.08 if i % 3 != 0 else -0.02  # win rate ~66%
@@ -484,7 +608,7 @@ def check_learn_promo_s(settings: Settings) -> list[Criterion]:
             min_holdout_edge=0.0,
             calibration_max_brier=0.30,
             max_drift_per_window=0.20,
-            baseline_mean=-0.01,  # learner beats a slightly negative baseline
+            baseline_mean=-0.01,
         )
         scorer_ok = (
             scorer_result.n_decisions == 60
@@ -494,23 +618,36 @@ def check_learn_promo_s(settings: Settings) -> list[Criterion]:
         )
         out.append(
             Criterion.ok(
-                "scorer_runs",
-                f"n={scorer_result.n_decisions} folds_passed={scorer_result.folds_passed} "
+                "scorer_plumbing",
+                f"scorer mechanism verified on synthetic decisions "
+                f"(n={scorer_result.n_decisions} folds_passed={scorer_result.folds_passed} "
                 f"holdout_edge={scorer_result.holdout_edge:.3f} "
-                f"brier={scorer_result.brier_score:.3f} "
-                f"eligible={scorer_result.promotion_eligible}",
+                f"brier={scorer_result.brier_score:.3f}); verdict intentionally ignored — "
+                "promotion hinges on shadow_policy_beats_baseline (real data)",
             )
             if scorer_ok
             else Criterion.fail(
-                "scorer_runs",
+                "scorer_plumbing",
                 f"n_decisions={scorer_result.n_decisions} n_outcome={scorer_result.n_with_outcome}",
             )
         )
     except Exception as exc:  # noqa: BLE001
-        out.append(Criterion.fail("scorer_runs", f"raised: {exc}"))
+        out.append(Criterion.fail("scorer_plumbing", f"raised: {exc}"))
 
     # ------------------------------------------------------------------ #
-    # 12. RollbackGuard freezes on envelope breaker                       #
+    # 12. REAL: shadow policy beats baseline on persisted decisions        #
+    # ------------------------------------------------------------------ #
+    try:
+        from src.adaptation.config import load_adaptation_config
+
+        adaptation_cfg = load_adaptation_config()
+        real_decisions = _load_real_shadow_decisions(adaptation_cfg)
+        out.append(_score_real_shadow_decisions(real_decisions, adaptation_cfg))
+    except Exception as exc:  # noqa: BLE001
+        out.append(Criterion.fail("shadow_policy_beats_baseline", f"raised: {exc}"))
+
+    # ------------------------------------------------------------------ #
+    # 13. RollbackGuard freezes on envelope breaker                       #
     # ------------------------------------------------------------------ #
     try:
         from src.adaptation.action_space import ActionBounds
@@ -544,7 +681,7 @@ def check_learn_promo_s(settings: Settings) -> list[Criterion]:
         out.append(Criterion.fail("rollback_guard_fires", f"raised: {exc}"))
 
     # ------------------------------------------------------------------ #
-    # 13. Drift monitoring computes scores over synthetic decisions         #
+    # 14. Drift monitoring computes scores over synthetic decisions         #
     # ------------------------------------------------------------------ #
     try:
         from src.adaptation.scorer import ShadowDecision, score_shadow_decisions
@@ -582,7 +719,7 @@ def check_learn_promo_s(settings: Settings) -> list[Criterion]:
         out.append(Criterion.fail("drift_monitoring_runs", f"raised: {exc}"))
 
     # ------------------------------------------------------------------ #
-    # 14. All SHADOW learner_logs have applied=False                       #
+    # 15. All SHADOW learner_logs have applied=False                       #
     # ------------------------------------------------------------------ #
     try:
         from src.db.base import session_scope

@@ -459,7 +459,7 @@ def compute_gate_stats(window: TimeWindow) -> GateStats:
             stats.total += 1
 
         # Live readiness: critical gates that are PASSED.
-        critical_ids = [g for g, spec in catalog.items() if spec.blocks_live == "true"]
+        critical_ids = [g for g, spec in catalog.items() if spec.blocks_live_resolved()]
         stats.total_critical_gates = len(critical_ids)
         critical_passed = sum(
             1

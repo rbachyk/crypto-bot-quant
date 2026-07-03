@@ -34,6 +34,12 @@ from .models.symbol_ranker import SymbolRanker
 
 _MODE = "SHADOW"
 
+# Context-features marker stamped on shadow_log rows produced from the SYNTHETIC
+# reference dataset (gate plumbing self-checks, demo jobs). Readers that evaluate
+# REAL shadow performance (the ML-PROMO gate) must exclude rows carrying this key —
+# synthetic rows are pipeline exercises, never evidence the model works (audit H15).
+SYNTHETIC_CONTEXT_KEY = "synthetic_reference"
+
 
 @dataclass
 class ShadowBundle:
@@ -154,8 +160,14 @@ class ShadowPredictor:
         *,
         settings: Settings | None = None,
         write_to_db: bool = True,
+        synthetic_source: bool = False,
     ) -> ShadowRunResult:
-        """Run all shadow models; log predictions.  Returns :class:`ShadowRunResult`."""
+        """Run all shadow models; log predictions.  Returns :class:`ShadowRunResult`.
+
+        ``synthetic_source=True`` tags every written shadow_log row with
+        :data:`SYNTHETIC_CONTEXT_KEY` so real-performance readers can exclude it.
+        Callers running on the reference dataset MUST pass it.
+        """
         settings = settings or get_settings()
         config_version = settings.config_version
         model_version = self.cfg.model_version
@@ -186,7 +198,10 @@ class ShadowPredictor:
 
         if write_to_db:
             log_ids = _write_shadow_logs(
-                bundles, model_version=model_version, config_version=config_version
+                bundles,
+                model_version=model_version,
+                config_version=config_version,
+                synthetic_source=synthetic_source,
             )
 
         return ShadowRunResult(
@@ -202,6 +217,7 @@ def _write_shadow_logs(
     *,
     model_version: str,
     config_version: str,
+    synthetic_source: bool = False,
 ) -> list[int]:
     """Persist shadow log entries; return inserted IDs."""
     from src.db.base import session_scope
@@ -223,6 +239,8 @@ def _write_shadow_logs(
     with session_scope() as session:
         for bundle in bundles:
             ctx = candidate_to_row(bundle.candidate)
+            if synthetic_source:
+                ctx[SYNTHETIC_CONTEXT_KEY] = 1.0
             for attr, mtype in _PRED_ATTRS:
                 pred: ShadowPrediction | None = getattr(bundle, attr)
                 if pred is None:

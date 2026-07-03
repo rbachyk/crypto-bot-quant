@@ -822,3 +822,189 @@ class TestShadowIntegration:
         guard_result = enforce(bad_action2, envelope=envelope)
         assert guard_result.rejected
         assert "max_leverage" in (guard_result.rejection_reason or "")
+
+
+# ======================================================================== #
+# LEARN-PROMO-S — real-data promotion criterion (audit H16)                 #
+# ======================================================================== #
+
+
+class TestRealShadowPromotionCriterion:
+    """shadow_policy_beats_baseline: scored from REAL learner_logs, fail-closed."""
+
+    def _cfg(self):
+        from src.adaptation.config import load_adaptation_config
+
+        return load_adaptation_config()
+
+    def _decisions(self, n: int, realized_pattern, projected: float = 0.06):
+        from src.adaptation.scorer import ShadowDecision
+
+        return [
+            ShadowDecision(
+                ts=datetime.now(UTC),
+                symbol="BTCUSDT",
+                projected_outcome=projected,
+                realized_outcome=realized_pattern(i),
+                take=True,
+                mode="SHADOW",
+            )
+            for i in range(n)
+        ]
+
+    def test_fails_closed_with_no_decisions(self):
+        from src.gates.phase11 import _score_real_shadow_decisions
+
+        crit = _score_real_shadow_decisions([], self._cfg())
+        assert crit.id == "shadow_policy_beats_baseline"
+        assert not crit.passed
+        assert "insufficient REAL SHADOW decisions" in crit.detail
+        assert "does not fabricate" in crit.detail
+
+    def test_fails_closed_below_min_samples(self):
+        from src.gates.phase11 import _score_real_shadow_decisions
+
+        cfg = self._cfg()
+        decisions = self._decisions(10, lambda i: 0.08)
+        crit = _score_real_shadow_decisions(decisions, cfg)
+        assert not crit.passed
+        assert "insufficient" in crit.detail
+
+    def test_positive_edge_policy_passes(self):
+        from src.gates.phase11 import _score_real_shadow_decisions
+
+        cfg = self._cfg()
+        n = max(cfg.min_samples_to_start, cfg.scoring.min_shadow_decisions) + 10
+        decisions = self._decisions(n, lambda i: 0.08 if i % 3 != 0 else -0.02)
+        crit = _score_real_shadow_decisions(decisions, cfg)
+        assert crit.passed, crit.detail
+        assert "promotion_eligible=True" in crit.detail
+
+    def test_negative_edge_policy_fails(self):
+        """The audit H16 regression: a negative-edge shadow learner must FAIL."""
+        from src.gates.phase11 import _score_real_shadow_decisions
+
+        cfg = self._cfg()
+        n = max(cfg.min_samples_to_start, cfg.scoring.min_shadow_decisions) + 10
+        decisions = self._decisions(n, lambda i: -0.08 if i % 3 != 0 else 0.02)
+        crit = _score_real_shadow_decisions(decisions, cfg)
+        assert not crit.passed
+        assert "does not beat baseline" in crit.detail
+
+    def test_loader_excludes_self_test_and_synthetic_rows(self):
+        """_load_real_shadow_decisions: only the configured learner's SHADOW rows
+        with realized outcomes count; gate self-test and pre-fix synthetic-marker
+        rows are excluded."""
+        from tests.conftest import DB_OK
+
+        if not DB_OK:
+            pytest.skip("database not reachable")
+
+        from src.db.base import session_scope
+        from src.db.models import LearnerLog
+        from src.gates.phase11 import (
+            _SELF_TEST_LEARNER_ID,
+            _SYNTHETIC_RATIONALE_PREFIX,
+            _load_real_shadow_decisions,
+        )
+
+        cfg = self._cfg()
+        marker_symbol = "GATE11TST"
+        ids: list[int] = []
+        try:
+            with session_scope() as session:
+                genuine = LearnerLog(
+                    learner_id=cfg.learner_id,
+                    learner_version=cfg.learner_version,
+                    mode="SHADOW",
+                    symbol=marker_symbol,
+                    proposed_action={"take": True, "rationale": "shadow decision"},
+                    projected_outcome=0.05,
+                    realized_outcome=0.11,
+                    applied=False,
+                )
+                self_test = LearnerLog(
+                    learner_id=_SELF_TEST_LEARNER_ID,
+                    learner_version=cfg.learner_version,
+                    mode="SHADOW",
+                    symbol=marker_symbol,
+                    proposed_action={"take": True, "rationale": "gate self-test"},
+                    projected_outcome=0.05,
+                    realized_outcome=0.99,
+                    applied=False,
+                )
+                synthetic = LearnerLog(
+                    learner_id=cfg.learner_id,
+                    learner_version=cfg.learner_version,
+                    mode="SHADOW",
+                    symbol=marker_symbol,
+                    proposed_action={
+                        "take": True,
+                        "rationale": f"{_SYNTHETIC_RATIONALE_PREFIX}7",
+                    },
+                    projected_outcome=0.05,
+                    realized_outcome=0.99,
+                    applied=False,
+                )
+                no_outcome = LearnerLog(
+                    learner_id=cfg.learner_id,
+                    learner_version=cfg.learner_version,
+                    mode="SHADOW",
+                    symbol=marker_symbol,
+                    proposed_action={"take": True, "rationale": "shadow decision"},
+                    projected_outcome=0.05,
+                    realized_outcome=None,
+                    applied=False,
+                )
+                session.add_all([genuine, self_test, synthetic, no_outcome])
+                session.flush()
+                ids = [genuine.id, self_test.id, synthetic.id, no_outcome.id]
+
+            decisions = _load_real_shadow_decisions(cfg)
+            ours = [d for d in decisions if d.symbol == marker_symbol]
+            assert len(ours) == 1, f"expected exactly the genuine row, got {len(ours)}"
+            assert ours[0].realized_outcome == pytest.approx(0.11)
+        finally:
+            with session_scope() as session:
+                if ids:
+                    session.query(LearnerLog).filter(LearnerLog.id.in_(ids)).delete(
+                        synchronize_session=False
+                    )
+
+    def test_gate_exposes_plumbing_and_real_criteria(self):
+        """Full gate run: scorer_plumbing verifies mechanism; the promotion verdict
+        criterion is present and (on a system without real learner data) FAILS."""
+        from tests.conftest import DB_OK
+
+        if not DB_OK:
+            pytest.skip("database not reachable")
+
+        from src.config import get_settings
+        from src.gates.phase11 import check_learn_promo_s
+
+        criteria = check_learn_promo_s(get_settings())
+        by_name = {c.id: c for c in criteria}
+        assert "scorer_plumbing" in by_name
+        assert "shadow_policy_beats_baseline" in by_name
+        assert by_name["scorer_plumbing"].passed, by_name["scorer_plumbing"].detail
+        assert "scorer_runs" not in by_name  # old always-green criterion removed
+
+    def test_gate_removes_its_learner_log_self_test_rows(self):
+        from tests.conftest import DB_OK
+
+        if not DB_OK:
+            pytest.skip("database not reachable")
+
+        from src.config import get_settings
+        from src.db.base import session_scope
+        from src.db.models import LearnerLog
+        from src.gates.phase11 import _SELF_TEST_LEARNER_ID, check_learn_promo_s
+
+        check_learn_promo_s(get_settings())
+        with session_scope() as session:
+            leftover = (
+                session.query(LearnerLog)
+                .filter(LearnerLog.learner_id == _SELF_TEST_LEARNER_ID)
+                .count()
+            )
+        assert leftover == 0, "gate left self-test learner_log rows behind"
