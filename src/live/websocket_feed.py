@@ -115,7 +115,8 @@ class WebsocketFeedSource:
             if candles:
                 # ccxt.pro emits the currently-FORMING candle as the last element; advancing on it
                 # feeds a partial bar into the feature pipeline. Take the last candle whose close
-                # time has passed (ts + interval <= now); skip the cycle if only a forming bar is in.
+                # time has passed (ts + interval <= now); skip the cycle if only a forming bar
+                # is present.
                 from src.data.schema import timeframe_ms
 
                 iv = timeframe_ms(self.timeframe)

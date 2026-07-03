@@ -41,6 +41,12 @@ class DataSource(abc.ABC):
     def has_symbol(self, symbol: str) -> bool:
         """Whether the source has history for ``symbol`` at all."""
 
+    def server_time_ms(self) -> int | None:
+        """The venue's current server time (epoch ms), or ``None`` when the source has no
+        external clock (offline sources). Used by validation's clock-drift check; returning
+        ``None`` marks that check *not applicable* instead of faking a pass."""
+        return None
+
 
 def _unit(*parts: object) -> float:
     """Deterministic float in [0, 1) from the hash of ``parts``."""

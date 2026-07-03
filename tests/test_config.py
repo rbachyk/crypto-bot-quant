@@ -123,3 +123,20 @@ def test_versions_payload_has_all_identifiers() -> None:
         "EXECUTION_POLICY_VERSION",
     ):
         assert key in v
+
+
+def test_heartbeat_ttl_must_exceed_heartbeat_interval() -> None:
+    # L36: a TTL at or below the heartbeat interval makes the reaper declare LIVE workers
+    # dead and duplicate their in-flight jobs — refuse the config at startup.
+    with pytest.raises(ValueError, match="WORKER_HEARTBEAT_TTL_SEC"):
+        _s(worker_heartbeat_sec=30, worker_heartbeat_ttl_sec=30)
+    with pytest.raises(ValueError, match="WORKER_HEARTBEAT_TTL_SEC"):
+        _s(worker_heartbeat_sec=30, worker_heartbeat_ttl_sec=10)
+    assert _s(worker_heartbeat_sec=10, worker_heartbeat_ttl_sec=30).worker_heartbeat_ttl_sec == 30
+
+
+def test_dead_settings_removed() -> None:
+    # L37: settings with zero consumers were removed — silently-ignored knobs are worse than
+    # none (an operator setting OBJECT_STORAGE_URL/ENABLE_RL_SHADOW would believe they work).
+    for dead in ("object_storage_url", "enable_online_learning_shadow", "enable_rl_shadow"):
+        assert dead not in Settings.model_fields

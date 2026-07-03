@@ -20,12 +20,16 @@ from __future__ import annotations
 import statistics
 from dataclasses import dataclass, field
 
+import structlog
+
 from src.data.config import DataConfig
 from src.data.gaps import find_gaps
 from src.data.schema import OHLCV, SPREAD, SeriesKey
 from src.data.store import SeriesStore
 from src.db.models import SymbolStatus
 from src.universe.config import UniverseConfig
+
+_log = structlog.get_logger("universe.filters")
 
 _DAY_MS = 86_400_000
 
@@ -103,10 +107,33 @@ class UniverseFilterEvaluator:
         self.store = store
         self.data_cfg = data_cfg
         self.uni_cfg = uni_cfg
+        # Resolve the evaluation timeframe against the DATA config's actual OHLCV grids at
+        # load: an eval_timeframe the lake does not own (e.g. universe.yaml "1m" vs the Bybit
+        # lake's 5m/1h/4h) would silently evaluate notional/history/age on an EMPTY series
+        # (everything 0 ⇒ every symbol research_only). Fallback to base_timeframe rather than
+        # a hard error because ONE universe.yaml is shared across data configs (skeleton vs
+        # bybit): base_timeframe is guaranteed present and is the finest grid the platform
+        # owns, so the volume/history/age metrics stay well-defined; the substitution is
+        # logged so a config drift is visible, not silent.
+        if uni_cfg.eval_timeframe in data_cfg.timeframes:
+            self.eval_timeframe = uni_cfg.eval_timeframe
+        else:
+            self.eval_timeframe = data_cfg.base_timeframe
+            _log.warning(
+                "eval_timeframe_fallback",
+                configured=uni_cfg.eval_timeframe,
+                available=list(data_cfg.timeframes),
+                using=data_cfg.base_timeframe,
+                note="universe.yaml eval_timeframe is not an owned OHLCV timeframe of the "
+                "data config; falling back to base_timeframe",
+            )
 
     # -- metric helpers -------------------------------------------------- #
+    # Series keys are built with the DATA config's exchange_id — the single source of truth
+    # for where the lake data lives; uni_cfg.exchange_id is policy metadata only (a stale
+    # universe.yaml exchange_id must not make every series lookup miss).
     def _ohlcv_key(self, symbol: str) -> SeriesKey:
-        return SeriesKey(self.uni_cfg.exchange_id, OHLCV, symbol, self.uni_cfg.eval_timeframe)
+        return SeriesKey(self.data_cfg.exchange_id, OHLCV, symbol, self.eval_timeframe)
 
     def _daily_notional(self, symbol: str) -> float:
         key = self._ohlcv_key(symbol)
@@ -142,7 +169,7 @@ class UniverseFilterEvaluator:
         return 0.0 if expected == 0 else 100.0 * missing / expected
 
     def _median_spread_bps(self, symbol: str) -> float | None:
-        key = SeriesKey(self.uni_cfg.exchange_id, SPREAD, symbol, self.data_cfg.base_timeframe)
+        key = SeriesKey(self.data_cfg.exchange_id, SPREAD, symbol, self.data_cfg.base_timeframe)
         rows = self.store.read(key, self.data_cfg.window_start_ms, self.data_cfg.window_end_ms)
         if not rows:
             return None

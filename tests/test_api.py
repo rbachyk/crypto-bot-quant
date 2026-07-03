@@ -6,6 +6,7 @@ shell must reject unauthenticated requests.
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 from src.api import create_app
 from src.config import Settings
@@ -209,7 +210,7 @@ def test_clear_orphan_open_positions_drops_prior_run_same_stream_only() -> None:
         _clear_orphan_open_positions(new)  # what the new run does at start
         with session_scope() as s:
             assert s.query(OpenPosition).filter_by(session_id=old).count() == 0  # prior run cleared
-            assert s.query(OpenPosition).filter_by(session_id=other).count() == 1  # other stream kept
+            assert s.query(OpenPosition).filter_by(session_id=other).count() == 1  # other kept
     finally:
         with session_scope() as s:
             for sid in (old, new, other):
@@ -360,7 +361,192 @@ def test_approvals_create_list_decide_loop(monkeypatch) -> None:
     listing = client.get("/api/approvals", auth=AUTH).json()
     assert any(a["id"] == aid and a["status"] == "pending" for a in listing)
 
+    # L39: the requester may NOT approve their own live_activation — four-eyes needs a
+    # SECOND operator identity (with one shared credential, activation stays impossible).
+    selfie = client.post(f"/api/approvals/{aid}/approve", auth=AUTH)
+    assert selfie.status_code == 403
+    assert "second" in selfie.json()["detail"].lower()
+
+    # Simulate the second operator (the request came from someone else) → decidable.
+    from src.db.base import session_scope
+    from src.db.models import Approval
+
+    with session_scope() as s:
+        s.get(Approval, aid).requested_by = "op2"
     approved = client.post(f"/api/approvals/{aid}/approve", auth=AUTH)
     assert approved.status_code == 200 and approved.json()["status"] == "approved"
     # Re-deciding a non-pending approval is rejected.
     assert client.post(f"/api/approvals/{aid}/approve", auth=AUTH).status_code == 400
+
+
+# --- /readyz (L38) -----------------------------------------------------------
+
+
+@requires_db
+@requires_redis
+def test_readyz_reports_ready() -> None:
+    r = client.get("/readyz")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "healthy"
+    assert {c["name"] for c in body["components"]} == {"database", "redis"}
+
+
+def test_readyz_503_when_redis_unreachable() -> None:
+    iso = Settings(
+        _env_file=None,
+        app_env="paper",
+        dashboard_auth_mode="basic",
+        dashboard_username="admin",
+        dashboard_password="secret",
+        redis_url="redis://127.0.0.1:1/0",
+    )
+    r = TestClient(create_app(iso)).get("/readyz")
+    assert r.status_code == 503
+    assert r.json()["status"] == "unhealthy"
+
+
+# --- live reset requires a second-operator approval (M28) ---------------------
+
+
+@requires_db
+def test_live_reset_is_approval_gated_archives_then_deletes(tmp_path) -> None:
+    """M28: env=live reset is never a one-click delete. The endpoint only RAISES a pending
+    live_reset approval; the requester cannot self-approve (four-eyes); a second operator's
+    approval executes archive-then-delete (compliance record exported before removal)."""
+    import json
+    import uuid
+    from pathlib import Path
+
+    from src.db.base import session_scope
+    from src.db.models import Approval, ApprovalStatus, PaperRun, PaperTradeRecord
+
+    iso = Settings(
+        _env_file=None,
+        app_env="paper",
+        dashboard_auth_mode="basic",
+        dashboard_username="admin",
+        dashboard_password="secret",
+        backup_path=tmp_path / "backups",
+    )
+    c = TestClient(create_app(iso))
+
+    sid = f"live:m28_{uuid.uuid4().hex[:8]}"
+    with session_scope() as s:
+        s.add(PaperRun(session_id=sid))
+        s.add(
+            PaperTradeRecord(
+                session_id=sid, trade_id=f"t_{sid}", symbol="BTC/USDT:USDT",
+                strategy="basis_reversion", side=1, pnl=1.0, pnl_r=0.1,
+            )
+        )
+    try:
+        # 1. The reset endpoint deletes NOTHING for live — it raises a pending approval.
+        r = c.post("/api/live/reset?env=live&confirm=true", auth=AUTH, follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"] == "/dashboard/approvals"
+        with session_scope() as s:
+            assert s.query(PaperRun).filter_by(session_id=sid).count() == 1  # still there
+            approval = (
+                s.query(Approval)
+                .filter_by(subject_type="live_reset", status=ApprovalStatus.PENDING)
+                .order_by(Approval.id.desc())
+                .first()
+            )
+            assert approval is not None and approval.requested_by == "admin"
+            aid = approval.id
+
+        # 2. Self-approval of the destructive request is rejected (L39 four-eyes).
+        selfie = c.post(f"/api/approvals/{aid}/approve", auth=AUTH)
+        assert selfie.status_code == 403
+        with session_scope() as s:
+            assert s.query(PaperRun).filter_by(session_id=sid).count() == 1
+
+        # 3. A second operator's approval executes: archive written, THEN rows deleted.
+        with session_scope() as s:
+            s.get(Approval, aid).requested_by = "other-operator"
+        done = c.post(f"/api/approvals/{aid}/approve", auth=AUTH)
+        assert done.status_code == 200
+        body = done.json()
+        assert body["status"] == "approved" and body.get("archive")
+        archive = Path(body["archive"])
+        assert archive.exists() and str(archive).startswith(str(tmp_path / "backups"))
+        dumped = json.loads(archive.read_text())
+        assert any(row["session_id"] == sid for row in dumped["tables"]["paper_runs"])
+        assert any(row["session_id"] == sid for row in dumped["tables"]["paper_trades"])
+        with session_scope() as s:
+            assert s.query(PaperRun).filter_by(session_id=sid).count() == 0  # now deleted
+    finally:
+        with session_scope() as s:
+            s.query(PaperTradeRecord).filter_by(session_id=sid).delete()
+            s.query(PaperRun).filter_by(session_id=sid).delete()
+            s.query(Approval).filter_by(subject_type="live_reset").delete()
+
+
+@requires_db
+def test_demo_reset_stays_one_click() -> None:
+    """M28 keeps demo/testnet/paper resets one-click — only live is approval-gated."""
+    import uuid
+
+    from src.db.base import session_scope
+    from src.db.models import PaperRun
+
+    sid = f"demo:m28_oneclick_{uuid.uuid4().hex[:8]}"
+    with session_scope() as s:
+        s.add(PaperRun(session_id=sid))
+    try:
+        r = client.post("/api/live/reset?env=demo&confirm=true", auth=AUTH,
+                        follow_redirects=False)
+        assert r.status_code == 303
+        with session_scope() as s:
+            assert s.query(PaperRun).filter_by(session_id=sid).count() == 0  # deleted directly
+    finally:
+        with session_scope() as s:
+            s.query(PaperRun).filter_by(session_id=sid).delete()
+
+
+# --- atomic check+enqueue (L40) ------------------------------------------------
+
+
+@requires_db
+@requires_redis
+def test_enqueue_exclusive_is_atomic_under_concurrent_start() -> None:
+    """L40: the check-then-enqueue critical section is serialized by a Redis SETNX lock —
+    a concurrent Start holding the lock gets 409 and enqueues NOTHING; after a successful
+    enqueue the lock is released and the duplicate is caught by the active-job check."""
+    import uuid
+
+    from fastapi import HTTPException
+    from src.api.app import _enqueue_exclusive
+    from src.db.base import session_scope
+    from src.db.models import Job
+    from src.jobs import JobQueue
+
+    q = JobQueue(_settings)
+    job_type = f"m40_{uuid.uuid4().hex[:8]}"
+    lock_key = f"qbot:enqueue-lock:{job_type}"
+    try:
+        # A concurrent Start holds the lock → this one loses with 409, enqueues nothing.
+        assert q.redis.set(lock_key, "other-click", nx=True, ex=15)
+        with pytest.raises(HTTPException) as exc:
+            _enqueue_exclusive(q, job_type, {}, requested_by="admin", conflict_detail="dup")
+        assert exc.value.status_code == 409
+        with session_scope() as s:
+            assert s.query(Job).filter_by(job_type=job_type).count() == 0
+
+        # Lock free → enqueue succeeds and RELEASES the lock.
+        q.redis.delete(lock_key)
+        job_id = _enqueue_exclusive(
+            q, job_type, {}, requested_by="admin", conflict_detail="dup"
+        )
+        assert job_id and q.redis.get(lock_key) is None
+
+        # A later duplicate is still refused: the QUEUED job trips the active-job check.
+        with pytest.raises(HTTPException) as exc2:
+            _enqueue_exclusive(q, job_type, {}, requested_by="admin", conflict_detail="dup")
+        assert exc2.value.status_code == 409
+        with session_scope() as s:
+            assert s.query(Job).filter_by(job_type=job_type).count() == 1  # no double-book
+    finally:
+        q.redis.delete(lock_key)
+        with session_scope() as s:
+            s.query(Job).filter_by(job_type=job_type).delete()

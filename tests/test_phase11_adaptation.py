@@ -561,12 +561,39 @@ class TestScorer:
         assert len(result.drift_scores) >= 1
         assert all(s >= 0 for s in result.drift_scores)
 
-    def test_brier_score_computed(self):
+    def test_brier_score_computed_from_win_probability(self):
+        """M31: Brier is computed from the policy's genuine probability field."""
+        from src.adaptation.scorer import score_shadow_decisions
+
+        decisions = self._decisions(30, pnl=0.05, projected=0.04)
+        for d in decisions:
+            d.win_probability = 0.7
+        result = score_shadow_decisions(decisions)
+        # All realized positive, p=0.7 → Brier = (0.7-1)^2 = 0.09.
+        assert result.brier_score == pytest.approx(0.09)
+        assert result.calibration_passed is True
+
+    def test_brier_not_evaluated_without_win_probability(self):
+        """M31: no win_probability → calibration not evaluated, never fake-passed;
+        an R-scale projected_outcome must NOT be sigmoided into a pseudo-probability."""
         from src.adaptation.scorer import score_shadow_decisions
 
         decisions = self._decisions(30, pnl=0.05, projected=0.04)
         result = score_shadow_decisions(decisions)
-        assert result.brier_score is not None
+        assert result.brier_score is None
+        assert result.calibration_passed is None
+        assert "calibration not evaluated" in result.note
+
+    def test_badly_calibrated_probability_blocks_promotion(self):
+        """M31: a real but bad probability now actually fails the calibration gate."""
+        from src.adaptation.scorer import score_shadow_decisions
+
+        decisions = self._decisions(40, pnl=0.05, projected=0.04)  # all positive outcomes
+        for d in decisions:
+            d.win_probability = 0.05  # confidently wrong → Brier ≈ 0.90
+        result = score_shadow_decisions(decisions, baseline_mean=-0.01)
+        assert result.calibration_passed is False
+        assert not result.promotion_eligible
 
     def test_large_drift_fails_calibration(self):
         from src.adaptation.scorer import score_shadow_decisions
@@ -1008,3 +1035,484 @@ class TestRealShadowPromotionCriterion:
                 .count()
             )
         assert leftover == 0, "gate left self-test learner_log rows behind"
+
+
+# ======================================================================== #
+# H17 — freeze/rollback restores the frozen fallback (or reports disabled)  #
+# ======================================================================== #
+
+
+class TestFrozenFallbackSemantics:
+    """Audit H17: freeze() activates the approved fallback snapshot in SHADOW,
+    or the controller honestly reports learner-disabled when none exists."""
+
+    def _trained_policy(self):
+        from src.adaptation.policies.online_logreg import OnlineLogRegPolicy
+        from src.adaptation.policy_base import Context, Outcome
+
+        policy = OnlineLogRegPolicy(learner_id="ff_approved", learner_version="learner_0009")
+        ctx = Context(signal_strength=0.7, expected_edge_frac=0.02)
+        action = policy.decide(ctx)
+        for pnl in [0.1, -0.05, 0.2, 0.15, -0.03]:
+            policy.update(ctx, action, Outcome(realized_pnl_r=pnl, trade_taken=True))
+        return policy
+
+    def _ctrl(self, fallback_path):
+        from src.adaptation.action_space import ActionBounds
+        from src.adaptation.controller import LearnerController, LearnerMode
+        from src.adaptation.policies.online_logreg import OnlineLogRegPolicy
+
+        return LearnerController(
+            policy=OnlineLogRegPolicy(),
+            bounds=ActionBounds(),
+            mode=LearnerMode.LIVE_BOUNDED,
+            fallback_snapshot_path=fallback_path,
+        )
+
+    def test_freeze_with_snapshot_runs_fallback_in_shadow(self):
+        from src.adaptation.policy_base import Context
+        from src.adaptation.versioning import make_frozen_fallback
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snap_dir = Path(tmpdir)
+            approved = self._trained_policy()
+            path = make_frozen_fallback(approved.snapshot(), snap_dir)
+            ctrl = self._ctrl(path)
+
+            ctrl.freeze(reason="test rollback")
+            assert ctrl.is_frozen()
+            assert ctrl.fallback_active
+            assert not ctrl.learner_disabled
+            # The fallback slot holds the APPROVED snapshot's state.
+            assert ctrl.frozen_policy.learner_id == "ff_approved"
+
+            # Decisions still flow: valid (not rejected), SHADOW, never applied.
+            for _ in range(3):
+                dec = ctrl.run(Context(signal_strength=0.8, expected_edge_frac=0.03))
+                assert not dec.rejected, dec.rejection_reason
+                assert dec.action is not None
+                assert dec.action.mode == "SHADOW"  # never LIVE while frozen
+                assert not dec.applied
+
+    def test_freeze_without_snapshot_reports_disabled(self):
+        from src.adaptation.policy_base import Context
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ctrl = self._ctrl(Path(tmpdir) / "missing_fallback.pkl")
+            ctrl.freeze(reason="breaker fired")
+            assert ctrl.is_frozen()
+            assert not ctrl.fallback_active  # never claims a fallback is active
+            assert ctrl.learner_disabled
+
+            dec = ctrl.run(Context(signal_strength=0.8))
+            assert dec.rejected
+            assert dec.action is None
+            assert not dec.applied
+            assert "DISABLED" in (dec.rejection_reason or "")
+            assert "breaker fired" in (dec.rejection_reason or "")
+
+    def test_freeze_records_reason(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ctrl = self._ctrl(Path(tmpdir) / "missing.pkl")
+            ctrl.freeze(reason="divergence > 0.20")
+            assert ctrl.frozen_reason == "divergence > 0.20"
+
+    def test_frozen_fallback_not_trained_by_outcomes(self):
+        """The fallback is the approved snapshot; record_outcome must not mutate it."""
+        from src.adaptation.policy_base import Context, Outcome
+        from src.adaptation.versioning import make_frozen_fallback
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            approved = self._trained_policy()
+            path = make_frozen_fallback(approved.snapshot(), Path(tmpdir))
+            ctrl = self._ctrl(path)
+            ctrl.freeze(reason="test")
+            ctx = Context(signal_strength=0.7)
+            dec = ctrl.run(ctx)
+            n_before = ctrl.frozen_policy._n_updates
+            ctrl.record_outcome(ctx, dec, Outcome(realized_pnl_r=0.5, trade_taken=True))
+            assert ctrl.frozen_policy._n_updates == n_before
+
+    def test_revert_event_and_alert_are_honest(self):
+        """RollbackGuard.revert: fallback_active truthfully reflects reality and
+        the alert text says fallback-active vs learner-disabled accordingly."""
+        from src.adaptation.rollback import RollbackGuard
+        from src.adaptation.versioning import make_frozen_fallback
+        from src.monitoring.alerts import AlertSink
+
+        class _CaptureSink(AlertSink):
+            def __init__(self):
+                self.alerts = []
+
+            def send(self, alert):
+                self.alerts.append(alert)
+                return True
+
+        # Without a snapshot → disabled, honestly reported.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sink = _CaptureSink()
+            ctrl = self._ctrl(Path(tmpdir) / "missing.pkl")
+            guard = RollbackGuard(alert_sink=sink)
+            event = guard.revert(ctrl, trigger="envelope_breaker", detail="daily loss")
+            assert event.controller_frozen
+            assert event.fallback_active is False
+            assert "DISABLED" in sink.alerts[0].recommended_action
+            assert "no frozen-fallback snapshot" in sink.alerts[0].recommended_action
+
+        # With a snapshot → fallback restored into the slot and reported active.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sink = _CaptureSink()
+            approved = self._trained_policy()
+            path = make_frozen_fallback(approved.snapshot(), Path(tmpdir))
+            ctrl = self._ctrl(path)
+            guard = RollbackGuard(alert_sink=sink)
+            event = guard.revert(ctrl, trigger="divergence", detail="live-vs-shadow")
+            assert event.fallback_active is True
+            assert ctrl.frozen_policy is not None
+            assert ctrl.frozen_policy.learner_id == "ff_approved"
+            assert "frozen-fallback policy active in SHADOW" in sink.alerts[0].recommended_action
+
+
+# ======================================================================== #
+# M32 — underperformance window over last N REALIZED decisions              #
+# ======================================================================== #
+
+
+class TestRollbackRealizedWindow:
+    def _make(self, **kw):
+        from src.adaptation.action_space import ActionBounds
+        from src.adaptation.controller import LearnerController, LearnerMode
+        from src.adaptation.policies.online_logreg import OnlineLogRegPolicy
+        from src.adaptation.rollback import RollbackGuard
+
+        ctrl = LearnerController(
+            policy=OnlineLogRegPolicy(), bounds=ActionBounds(), mode=LearnerMode.LIVE_BOUNDED
+        )
+        return ctrl, RollbackGuard(**kw)
+
+    def test_pending_outcomes_do_not_disable_trigger(self):
+        """M32 regression: interleaved pending (None) outcomes must not stop the
+        underperformance trigger from evaluating the last N realized decisions."""
+        ctrl, guard = self._make(rollback_window=4, rollback_margin=0.01)
+        for _ in range(4):
+            guard.add_decision(projected_outcome=0.10, realized_outcome=0.05)
+            guard.add_decision(projected_outcome=0.10, realized_outcome=None)  # pending
+        event = guard.check(ctrl)
+        assert event is not None
+        assert event.trigger == "underperformance"
+        assert ctrl.is_frozen()
+
+    def test_not_triggered_until_enough_realized(self):
+        ctrl, guard = self._make(rollback_window=4, rollback_margin=0.01)
+        for _ in range(3):  # only 3 realized < window of 4
+            guard.add_decision(projected_outcome=0.10, realized_outcome=0.05)
+        for _ in range(10):
+            guard.add_decision(projected_outcome=0.10, realized_outcome=None)
+        assert guard.check(ctrl) is None
+        assert not ctrl.is_frozen()
+
+
+# ======================================================================== #
+# M34 — scoring config wired into promotion eligibility                     #
+# ======================================================================== #
+
+
+class TestScorerConfigWiring:
+    def _decisions(self, n, pnl=0.08, projected=0.06):
+        from src.adaptation.scorer import ShadowDecision
+
+        return [
+            ShadowDecision(
+                ts=datetime.now(UTC),
+                symbol="BTCUSDT",
+                projected_outcome=projected,
+                realized_outcome=pnl,
+                take=True,
+                mode="SHADOW",
+            )
+            for _ in range(n)
+        ]
+
+    def test_min_shadow_decisions_gates_eligibility(self):
+        """M34 regression: a handful of outcomes must not reach eligibility when
+        config demands more."""
+        from src.adaptation.scorer import score_shadow_decisions
+
+        decisions = self._decisions(8)
+        result = score_shadow_decisions(
+            decisions, baseline_mean=-0.01, min_shadow_decisions=50
+        )
+        assert not result.promotion_eligible
+        assert "min_shadow_decisions" in result.note
+
+        eligible = score_shadow_decisions(
+            self._decisions(60), baseline_mean=-0.01, min_shadow_decisions=50
+        )
+        assert eligible.promotion_eligible
+
+    def test_min_wf_folds_positive_enforced(self):
+        from src.adaptation.scorer import score_shadow_decisions
+
+        decisions = self._decisions(60)
+        # n_folds=4 → 3 walk-forward folds, all beating baseline -0.01.
+        result = score_shadow_decisions(
+            decisions, baseline_mean=-0.01, n_folds=4, min_wf_folds_positive=3
+        )
+        assert result.folds_passed == 3
+        assert result.promotion_eligible
+
+        # Demand more positive folds than exist → not eligible.
+        strict = score_shadow_decisions(
+            decisions, baseline_mean=-0.01, n_folds=4, min_wf_folds_positive=4
+        )
+        assert not strict.promotion_eligible
+        assert "min_wf_folds_positive" in strict.note
+
+    def test_n_folds_1_does_not_crash(self):
+        """M34: n_folds=1 must not raise ZeroDivisionError."""
+        from src.adaptation.scorer import score_shadow_decisions
+
+        result = score_shadow_decisions(self._decisions(20), n_folds=1, baseline_mean=-0.01)
+        assert result.folds == []
+        assert result.holdout_edge is not None
+
+
+# ======================================================================== #
+# M37 — online logreg feature normalization (Welford running stats)         #
+# ======================================================================== #
+
+
+class TestOnlineLogRegNormalization:
+    def test_running_stats_updated_and_applied(self):
+        from src.adaptation.policies.online_logreg import OnlineLogRegPolicy
+        from src.adaptation.policy_base import Context, Outcome
+
+        policy = OnlineLogRegPolicy()
+        # Features spanning orders of magnitude (spread_bps ~1e1, edge ~1e-3).
+        for i in range(20):
+            ctx = Context(
+                signal_strength=0.5 + 0.02 * i,
+                expected_edge_frac=0.001 + 0.0001 * i,
+                spread_bps=30.0 + i,
+                slippage_est=0.0005,
+                atr_pct=0.01,
+                funding_z=0.5,
+            )
+            action = policy.decide(ctx)
+            policy.update(ctx, action, Outcome(realized_pnl_r=0.1 if i % 2 else -0.1))
+        assert policy._scaler.n == 20
+        # Running mean tracks the big-magnitude feature (spread_bps index 2).
+        assert policy._scaler.mean[2] == pytest.approx(30.0 + 19 / 2, rel=0.01)
+        # Transform standardises: a sample at the mean maps to ~0 for that feature.
+        mean_sample = list(policy._scaler.mean)
+        transformed = policy._scaler.transform(mean_sample)
+        assert all(abs(v) < 1e-9 for v in transformed)
+        # decide() still yields valid actions after normalized training.
+        dec = policy.decide(Context(signal_strength=0.9, spread_bps=31.0))
+        assert dec.size_bucket in (0.0, 0.25, 0.5, 1.0)
+
+    def test_snapshot_persists_running_stats(self):
+        from src.adaptation.policies.online_logreg import OnlineLogRegPolicy
+        from src.adaptation.policy_base import Context, Outcome
+
+        policy = OnlineLogRegPolicy()
+        ctx = Context(signal_strength=0.6, spread_bps=12.0)
+        action = policy.decide(ctx)
+        for pnl in [0.1, -0.2, 0.3]:
+            policy.update(ctx, action, Outcome(realized_pnl_r=pnl))
+        blob = policy.snapshot()
+
+        restored = OnlineLogRegPolicy()
+        restored.load(blob)
+        assert restored._scaler.n == policy._scaler.n
+        assert restored._scaler.mean == policy._scaler.mean
+        assert restored._scaler.m2 == policy._scaler.m2
+
+    def test_legacy_snapshot_without_stats_loads(self):
+        """Snapshot compat: pre-M37 blobs (no norm_stats) load with fresh stats."""
+        import pickle
+
+        from src.adaptation.policies.online_logreg import OnlineLogRegPolicy
+
+        donor = OnlineLogRegPolicy(learner_id="legacy", learner_version="learner_0001")
+        legacy_blob = pickle.dumps(
+            {
+                "model": donor._model,
+                "scaler": None,  # legacy unused StandardScaler slot
+                "n_updates": 0,
+                "learner_id": "legacy",
+                "learner_version": "learner_0001",
+                "feature_names": donor.feature_names,
+            }
+        )
+        policy = OnlineLogRegPolicy()
+        policy.load(legacy_blob)
+        assert policy.learner_id == "legacy"
+        assert policy._scaler.n == 0  # fresh stats, accumulate from zero
+
+    def test_win_probability_only_when_trained(self):
+        """M31: the 0.5 untrained placeholder is never emitted as a probability."""
+        from src.adaptation.policies.online_logreg import OnlineLogRegPolicy
+        from src.adaptation.policy_base import Context, Outcome
+
+        policy = OnlineLogRegPolicy()
+        ctx = Context(signal_strength=0.7)
+        assert policy.decide(ctx).win_probability is None  # untrained
+        action = policy.decide(ctx)
+        for pnl in [0.1, -0.1, 0.2]:
+            policy.update(ctx, action, Outcome(realized_pnl_r=pnl))
+        trained_action = policy.decide(ctx)
+        assert trained_action.win_probability is not None
+        assert 0.0 <= trained_action.win_probability <= 1.0
+        assert trained_action.projected_outcome_r is None  # no R-scale estimate
+
+
+# ======================================================================== #
+# M31 — bandit emits R-scale projection; store persists contract fields     #
+# ======================================================================== #
+
+
+class TestOutcomeProjectionContract:
+    def test_bandit_projected_outcome_is_r_scale(self):
+        from src.adaptation.policies.bandit import GaussianTSBandit
+        from src.adaptation.policy_base import Context, Outcome
+
+        bandit = GaussianTSBandit()
+        ctx = Context(strategy_id="strat_A")
+        first = bandit.decide(ctx)
+        assert first.projected_outcome_r == pytest.approx(0.0)  # prior mean
+        assert first.win_probability is None
+        for _ in range(5):
+            bandit.update(ctx, first, Outcome(realized_pnl_r=0.4, trade_taken=True))
+        action = bandit.decide(ctx)
+        assert action.projected_outcome_r == pytest.approx(bandit._arms["strat_A"].mu)
+        assert action.projected_outcome_r > 0.0
+
+    def test_store_serializes_contract_fields(self):
+        from src.adaptation.action_space import BoundedAction
+        from src.adaptation.store import get_memory_sink, reset_memory_sink, write_learner_log
+
+        reset_memory_sink()
+        action = BoundedAction(
+            size_bucket=0.5,
+            learner_id="m31",
+            learner_version="v0",
+            mode="SHADOW",
+            rationale="contract",
+            projected_outcome_r=0.12,
+            win_probability=0.66,
+        )
+        write_learner_log(
+            learner_id="m31",
+            learner_version="v0",
+            mode="SHADOW",
+            symbol=None,
+            context_features={},
+            proposed_action=action,
+            projected_outcome=0.12,
+            realized_outcome=None,
+            applied=False,
+            clamped_fields=[],
+            write_to_db=False,
+        )
+        entry = get_memory_sink().recent()[0]
+        assert entry.proposed_action["projected_outcome_r"] == pytest.approx(0.12)
+        assert entry.proposed_action["win_probability"] == pytest.approx(0.66)
+
+
+# ======================================================================== #
+# L30 — learner_log DB write failures are visible                           #
+# ======================================================================== #
+
+
+class TestStoreFailureVisibility:
+    def test_db_write_failure_counted_and_health_degraded(self, monkeypatch, caplog):
+        import logging
+
+        import src.adaptation.store as store_mod
+        from src.adaptation.action_space import BoundedAction
+
+        store_mod.reset_memory_sink()
+        store_mod.reset_db_write_failure_count()
+
+        def _boom(*a, **kw):
+            raise RuntimeError("db down")
+
+        # Force the DB path to fail inside _write_to_db.
+        import src.db.base as db_base
+
+        monkeypatch.setattr(db_base, "session_scope", _boom)
+
+        action = BoundedAction(
+            size_bucket=0.5,
+            learner_id="l30",
+            learner_version="v0",
+            mode="SHADOW",
+            rationale="failure test",
+        )
+        with caplog.at_level(logging.ERROR, logger="src.adaptation.store"):
+            entry = store_mod.write_learner_log(
+                learner_id="l30",
+                learner_version="v0",
+                mode="SHADOW",
+                symbol=None,
+                context_features={},
+                proposed_action=action,
+                projected_outcome=0.0,
+                realized_outcome=None,
+                applied=False,
+                clamped_fields=[],
+                write_to_db=True,
+            )
+        assert entry is not None  # never blocks the decision path
+        assert store_mod.get_db_write_failure_count() == 1
+        assert any("learner_log DB write FAILED" in r.message for r in caplog.records)
+
+        health = store_mod.learner_store_health()
+        assert health.name == "learner_store"
+        assert not health.healthy
+        assert "1 learner_log DB write(s) failed" in health.detail
+
+        store_mod.reset_db_write_failure_count()
+        assert store_mod.learner_store_health().healthy
+
+
+# ======================================================================== #
+# L31 — bandit conjugate update behaves as (now) documented                 #
+# ======================================================================== #
+
+
+class TestBanditDocumentedBehaviour:
+    def test_weights_rank_based_not_renormalized(self):
+        from src.adaptation.policies.bandit import GaussianTSBandit
+        from src.adaptation.policy_base import Context, Outcome
+
+        bandit = GaussianTSBandit(w_min=0.0, w_max=2.0)
+        for sid, r in (("a", 0.5), ("b", -0.5), ("c", 0.1)):
+            ctx = Context(strategy_id=sid)
+            act = bandit.decide(ctx)
+            bandit.update(ctx, act, Outcome(realized_pnl_r=r, trade_taken=True))
+        action = bandit.decide(Context(strategy_id="a"))
+        weights = action.strategy_weights
+        assert set(weights) == {"a", "b", "c"}
+        # Rank-based: top arm gets w_max; weights don't sum to 1 (no renormalization).
+        assert max(weights.values()) == pytest.approx(2.0)
+        assert sum(weights.values()) != pytest.approx(1.0)
+        # Even the negative-outcome arm keeps its (bounded) rank weight ≥ w_min.
+        assert all(0.0 <= w <= 2.0 for w in weights.values())
+
+    def test_conjugate_update_shrinks_variance_and_moves_mean(self):
+        from src.adaptation.policies.bandit import GaussianTSBandit
+        from src.adaptation.policy_base import Context, Outcome
+
+        bandit = GaussianTSBandit()
+        ctx = Context(strategy_id="s")
+        act = bandit.decide(ctx)
+        arm0_var = bandit._arms["s"].var
+        bandit.update(ctx, act, Outcome(realized_pnl_r=1.0, trade_taken=True))
+        arm = bandit._arms["s"]
+        assert arm.var < arm0_var  # posterior variance shrinks
+        assert 0.0 < arm.mu < 1.0  # mean moves toward the observation
+        # Known-noise conjugate update with prior var 1, obs noise 1 → posterior 0.5.
+        assert arm.var == pytest.approx(0.5)
+        assert arm.mu == pytest.approx(0.5)

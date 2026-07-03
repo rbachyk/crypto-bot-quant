@@ -164,6 +164,17 @@ class CcxtDataSource(DataSource):
         except Exception:  # noqa: BLE001 - reachability failure ⇒ treat as no history
             return False
 
+    # -- server clock ----------------------------------------------------- #
+    def server_time_ms(self) -> int | None:
+        """The exchange's server time (epoch ms) via ccxt ``fetch_time``, for validation's
+        clock-drift check. ``None`` when the endpoint is unavailable/unreachable so the
+        check reports *not applicable* rather than failing a whole snapshot on a network blip."""
+        try:
+            value = self._call(self._ex.fetch_time)
+            return int(value) if value else None
+        except Exception:  # noqa: BLE001 - no server clock ⇒ check is not applicable
+            return None
+
     # -- fetch ----------------------------------------------------------- #
     def fetch(self, key: SeriesKey, start_ms: int, end_ms: int) -> list[dict]:
         iv = key.interval_ms

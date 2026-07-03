@@ -121,8 +121,13 @@ def test_funding_breaker_trips() -> None:
 def test_per_symbol_loss_breaker_names_the_symbol() -> None:
     cfg = load_risk_config()
     loss = -(cfg.breakers.per_symbol_loss_limit + 0.01) * 10_000.0
-    v = _breakers().evaluate(_inp(per_symbol_pnl={"ETH/USDT:USDT": loss}))
+    inp = _inp(per_symbol_pnl={"ETH/USDT:USDT": loss})
+    # Candidate on the bleeding symbol → symbol-scoped trip (M8).
+    v = _breakers().evaluate(inp, symbol="ETH/USDT:USDT")
     assert v.tripped and "per_symbol_loss[ETH/USDT:USDT]" in v.reason
+    assert v.symbol == "ETH/USDT:USDT"
+    # A candidate on ANY OTHER symbol keeps trading — the halt never goes book-wide.
+    assert not _breakers().evaluate(inp, symbol="BTC/USDT:USDT").tripped
 
 
 def test_no_trip_when_within_limits() -> None:

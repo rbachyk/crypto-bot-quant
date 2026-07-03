@@ -224,12 +224,20 @@ class OrderBuilder:
         take_profit: Order | None = None
         trailing: Order | None = None
 
-        # Trailing stop: parity with the backtest uses the STRATEGY'S OWN offset (atr_trail_mult×
-        # atr, carried on the candidate), falling back to the config offset. Floored at the stop
-        # so the trail never sits tighter than the hard stop. Exchange-native (survives downtime).
-        trail_off = max(candidate.trail_frac, self.cfg.trailing_offset_frac)
+        # Trailing stop — ONE convention everywhere (M11): live trails at the strategy's RAW
+        # trail_frac, the exact number the backtest (Position.trail_dist = trail_frac × entry,
+        # src/backtest/engine.py) and realtime paper (engine._trail_dist) ratchet with. The old
+        # max(trail, config, stop_frac) floor was a local design choice, NOT a Bybit constraint
+        # (Bybit accepts any positive trailing distance down to one tick), and it made the live
+        # trail strictly wider than validated whenever atr_trail_mult×atr < stop_frac. The fixed
+        # stop leg still rides alongside, so exits remain the same stop/trail OR the backtest
+        # models. Fallbacks apply only when the candidate carries NO trail of its own: the config
+        # offset, then stop_frac (a no-fixed-TP entry must still have a trailing exit).
+        trail_off = (
+            candidate.trail_frac if candidate.trail_frac > 0 else self.cfg.trailing_offset_frac
+        )
         if trail_off > 0 or no_fixed_tp:
-            offset = max(trail_off, candidate.stop_frac)
+            offset = trail_off if trail_off > 0 else candidate.stop_frac
             trailing = Order(
                 client_id=self.ownership.new_client_id("trail"),
                 symbol=candidate.symbol,

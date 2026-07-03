@@ -43,6 +43,30 @@ def release(
     typer.echo("Kill switch cleared.")
 
 
+@app.command("risk-reset")
+def risk_reset(
+    env: str = typer.Option(
+        ..., help="trading environment whose halt state to clear (demo | testnet | live)"
+    ),
+    confirm: bool = typer.Option(False, "--confirm", help="required to clear the halt state"),
+) -> None:
+    """MANUAL reset of the persisted risk-halt state (M9, Section 2.2).
+
+    A tripped daily-loss / max-drawdown / weekly-loss breaker halts new entries and SURVIVES
+    restarts; this is the explicit operator action that clears it (and refills the bounded-live
+    order budget). Without --confirm it only prints the current persisted state."""
+    from src.risk.state import RiskStateStore
+
+    store = RiskStateStore(env=env)
+    if not confirm:
+        typer.echo(f"Refusing to reset without --confirm. Current state ({env}):")
+        typer.echo(json.dumps(store.load(), indent=2))
+        raise typer.Exit(code=1)
+    cleared = store.reset(actor="cli")
+    typer.echo(f"Risk halt state cleared for env={env}:")
+    typer.echo(json.dumps(cleared, indent=2))
+
+
 @app.command()
 def health() -> None:
     """Print a health report for this node's dependencies."""

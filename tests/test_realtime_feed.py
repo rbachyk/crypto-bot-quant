@@ -98,7 +98,8 @@ def test_partial_seed_is_reseeded_not_left_dark() -> None:
     )
     # simulate a partial prior seed: only symbols[0] has a window, the second symbol is empty
     feed._reader.seed_ohlcv(
-        SYM, DeterministicSource(EX).fetch(SeriesKey(EX, OHLCV, SYM, TF), SEED_END - 300 * IV, SEED_END)
+        SYM,
+        DeterministicSource(EX).fetch(SeriesKey(EX, OHLCV, SYM, TF), SEED_END - 300 * IV, SEED_END),
     )
     assert feed._reader.ohlcv(SYM) and not feed._reader.ohlcv("ETH/USDT:USDT")
     list(feed.groups())  # entering the stream must re-seed the empty symbol (guard checks ALL)

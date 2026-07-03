@@ -19,15 +19,22 @@ from src.backtest.service import build_lake_inputs, lake_candidate_strategy, mak
 from src.config import Settings, get_settings
 from src.data.config import DataConfig, load_data_config
 from src.data.store import SeriesStore
+from src.execution.order import NO_FIXED_TP_FRAC
 from src.paper.engine import PaperCandidateInput, PaperTradingEngine
 from src.paper.report import PaperReport, build_paper_report
 from src.paper.run import persist_paper_session
 from src.paper.session import PaperSession
 from src.ranking import Candidate
-from src.regime import detect_regime
+from src.regime import RegimeTracker, detect_regime
 from src.strategies.promotion import is_strategy_promoted
 
 _DEFAULT_HOLD_BARS = 12  # forward horizon for the realized move when a signal omits one
+
+# Claimed edge (in R multiples of the stop distance) for a NO-FIXED-TP sentinel signal (L11).
+# Deliberately conservative: 1R keeps the negative-EV-after-costs blocker meaningful for
+# momentum candidates — the raw sentinel (tp_frac ≥ 0.5, i.e. a "50%+ edge") made it
+# mathematically unable to reject them.
+_SENTINEL_EDGE_R = 1.0
 
 
 def build_candidate(
@@ -42,11 +49,16 @@ def build_candidate(
     promoted: bool,
     data_ok: bool = True,
     risk_scale: float = 1.0,
+    regime: str | None = None,
 ) -> Candidate:
     """Build a ranking Candidate from a decision-time feature row + a strategy signal.
 
     Shared by the snapshot paper builder and the real-time live feed so both go through the
-    identical Candidate construction + Section-11 regime labelling (the Parity Rule)."""
+    identical Candidate construction + Section-11 regime labelling (the Parity Rule).
+    ``regime`` carries the caller's STATEFUL per-symbol :class:`~src.regime.RegimeTracker`
+    label (anti-whipsaw — the trade-labeling convention shared with the backtest engine);
+    the stateless ``detect_regime`` fallback is only for callers that see isolated rows
+    and cannot carry tracker state."""
     return Candidate(
         symbol=symbol,
         strategy=strat_id,
@@ -62,7 +74,7 @@ def build_candidate(
         trail_frac=float(getattr(sig, "trail_frac", 0.0)),
         hold_bars=int(getattr(sig, "hold_bars", 0) or 0),
         risk_scale=float(risk_scale),
-        regime=detect_regime(row, spread_bps=spread_bps, data_ok=data_ok),
+        regime=regime or detect_regime(row, spread_bps=spread_bps, data_ok=data_ok),
         session=int(row.get("session_code", 0)),
         features={
             "atr_pct": float(row.get("atr_pct", 0.0)),
@@ -71,7 +83,15 @@ def build_candidate(
         },
         signal_strength=min(1.0, abs(float(row.get("ret_short", 0.0))) / 0.02),
         confirmation=0.6,
-        expected_edge_frac=sig.tp_frac,
+        # L11: a sentinel tp_frac (≥ NO_FIXED_TP_FRAC = "no fixed TP", momentum) is exit
+        # geometry, NOT an edge claim — feeding it in as the expected edge made the EV-after-
+        # costs blocker unable to reject. Sentinel signals claim a conservative 1R edge
+        # (stop distance × _SENTINEL_EDGE_R) instead; finite TPs pass through unchanged.
+        expected_edge_frac=(
+            sig.tp_frac
+            if sig.tp_frac < NO_FIXED_TP_FRAC
+            else _SENTINEL_EDGE_R * sig.stop_frac
+        ),
         spread_bps=spread_bps,
         slippage_est=0.0005,
         latency_ms=5.0,
@@ -162,20 +182,30 @@ def _eval_strategy_over_lake(
         # signal. Time is the shared coordinate; the forward hold then walks N array bars from
         # there (preserving the "hold N bars" semantics across any interior gaps).
         pos_by_ts = {int(b["ts"]): i for i, b in enumerate(si.bars)}
+        # Stateful per-symbol regime labeling (anti-whipsaw), seeded at the window start —
+        # the same convention as the backtest engine and the live feed, so regime-conditional
+        # stats agree across environments (M4). Updated on EVERY decision row (including
+        # pre-activation ones) so the tracker state matches a live session's history.
+        tracker = RegimeTracker()
         for row in si.frame.rows:
-            if row["decision_ts"] < si.activation_ts:
+            dts = int(row["decision_ts"])
+            spread_bps = float(si.spread_bps_at(dts))
+            # Inject decision-time execution-safety inputs so the strategy-level regime gate
+            # can reach R7_TOXIC_EXECUTION / R8_DATA_UNSAFE (copy — frames stay unmutated).
+            row = {**row, "spread_bps": spread_bps, "data_ok": True}
+            tracked = tracker.update(row, spread_bps=spread_bps, data_ok=True)
+            if dts < si.activation_ts:
                 continue
             sig = strategy.evaluate(row)
             if sig is None:
                 continue
-            entry_bar = pos_by_ts.get(int(row["decision_ts"]))
+            entry_bar = pos_by_ts.get(dts)
             if entry_bar is None:
                 continue  # no tradable bar at this timestamp (pre-listing or interior gap)
             entry_price = float(si.bars[entry_bar]["open"])
             exit_bar = min(entry_bar + hold_bars, n - 1)
             exit_price = float(si.bars[exit_bar]["close"])
             exit_move_frac = exit_price / entry_price - 1.0 if entry_price > 0 else 0.0
-            spread_bps = si.spread_bps_at(int(row["decision_ts"]))
             cand = build_candidate(
                 si.symbol,
                 row,
@@ -186,6 +216,7 @@ def _eval_strategy_over_lake(
                 spread_bps=spread_bps,
                 promoted=promoted,
                 risk_scale=float(getattr(strategy, "risk_scale", 1.0)),
+                regime=tracked,
             )
             out.append(
                 PaperCandidateInput(
@@ -322,6 +353,10 @@ def run_lake_paper_session(
         universe_version=settings.universe_version,
         settings=settings,
     )
+    # L10: hold horizons (exit_ts) are counted in THIS session's decision bars, not 1m bars.
+    from src.data.schema import timeframe_ms
+
+    engine.set_bar_interval(timeframe_ms(tf))
     session = engine.new_session(name)
     engine.process_candidates(inputs, session)
     session.ended_at = datetime.now(UTC)

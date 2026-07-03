@@ -91,12 +91,19 @@ class LiveActivationGuard:
         limits: LiveLimits | None = None,
         gates_pass: Callable[[], bool] = _gates_all_pass,
         approved: Callable[[], bool] = _live_activation_approved,
+        state_store=None,
     ) -> None:
         self.settings = settings or get_settings()
         self.limits = limits or load_live_limits()
         self._gates_pass = gates_pass
         self._approved = approved
-        self._orders_placed = 0
+        # M9: the bounded-live order budget is PERSISTED (RiskStateStore, keyed by env) so a
+        # process restart cannot refill it — the count restores here and writes through on every
+        # successful placement. Cleared only by the operator's explicit `qbot risk-reset`.
+        self._state_store = state_store
+        self._orders_placed = (
+            int(state_store.get("guard_orders_placed", 0) or 0) if state_store is not None else 0
+        )
         self._open_positions = 0
         # Optional source of the CURRENT concurrent owned-position count. When wired (by the live
         # loop, from the reconciled venue mirror) the max_open_positions cap binds to REAL
@@ -128,10 +135,22 @@ class LiveActivationGuard:
         cap = self.limits.account_equity * self.limits.max_order_notional_pct
         if notional > cap + 1e-9:
             return False, f"bounded-live cap: order notional {notional:.2f} > {cap:.2f}"
-        # Authorised: record usage so the per-session caps actually bind.
-        self._orders_placed += 1
-        self._open_positions += 1
+        # Authorisation only (L13): the budget is consumed by record_order_placed() once the
+        # exchange ACCEPTS the order — an authorised-but-rejected placement burns no slot.
         return True, "ok"
+
+    def record_order_placed(self, *, opened: bool = True) -> None:
+        """Consume one bounded-live order slot — called by the venue AFTER the exchange accepted
+        the entry order (L13: authorisation alone no longer burns budget, so a guard-approved
+        order the exchange rejects doesn't shrink the session cap). ``opened`` bumps the fallback
+        concurrent-position counter only when a position actually opened (fill observed); wired
+        deployments count real concurrency via set_position_source instead. Persists the consumed
+        budget (M9) so a restart cannot refill it."""
+        self._orders_placed += 1
+        if opened:
+            self._open_positions += 1
+        if self._state_store is not None:
+            self._state_store.update(guard_orders_placed=self._orders_placed)
 
     def register_close(self) -> None:
         """A live position closed — free a concurrent-position slot."""

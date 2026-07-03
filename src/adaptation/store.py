@@ -7,6 +7,7 @@ a lightweight in-memory sink for unit tests (``write_to_db=False``).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -14,7 +15,41 @@ from typing import TYPE_CHECKING
 from src.adaptation.action_space import BoundedAction
 
 if TYPE_CHECKING:
-    pass
+    from src.monitoring.health import ComponentHealth
+
+logger = logging.getLogger(__name__)
+
+# Count of failed learner_log DB writes since process start (audit L30): the
+# Section 21.8 audit trail silently stopping is a degraded-health condition
+# that must be visible, not swallowed.
+_db_write_failures: int = 0
+
+
+def get_db_write_failure_count() -> int:
+    """Number of learner_log DB writes that failed since process start."""
+    return _db_write_failures
+
+
+def reset_db_write_failure_count() -> None:
+    global _db_write_failures  # noqa: PLW0603
+    _db_write_failures = 0
+
+
+def learner_store_health() -> ComponentHealth:
+    """Health probe in the :mod:`src.monitoring.health` component style.
+
+    Unhealthy as soon as any learner_log DB write has failed — the Section 21.8
+    audit log is then incomplete and needs operator attention.
+    """
+    from src.monitoring.health import ComponentHealth
+
+    if _db_write_failures == 0:
+        return ComponentHealth("learner_store", True, "all learner_log DB writes persisted")
+    return ComponentHealth(
+        "learner_store",
+        False,
+        f"{_db_write_failures} learner_log DB write(s) failed — audit log incomplete",
+    )
 
 
 @dataclass
@@ -93,6 +128,10 @@ def write_learner_log(
         "learner_version": proposed_action.learner_version,
         "mode": proposed_action.mode,
         "rationale": proposed_action.rationale,
+        # M31 contract fields (see policy_base): R-scale projection and the
+        # policy's genuine probability (None when the policy has none).
+        "projected_outcome_r": proposed_action.projected_outcome_r,
+        "win_probability": proposed_action.win_probability,
     }
     entry = LearnerLogEntry(
         ts=datetime.now(UTC),
@@ -140,4 +179,15 @@ def _write_to_db(entry: LearnerLogEntry) -> None:
             )
             session.add(row)
     except Exception:  # noqa: BLE001
-        pass  # never block on log failure
+        # Never block the decision path on a log failure — but never hide it
+        # either (audit L30): count it and log loudly so repeated failures are
+        # visible via learner_store_health().
+        global _db_write_failures  # noqa: PLW0603
+        _db_write_failures += 1
+        logger.exception(
+            "learner_log DB write FAILED (failure #%d, learner_id=%s mode=%s) — "
+            "the Section 21.8 audit log is not persisting; check learner_store_health()",
+            _db_write_failures,
+            entry.learner_id,
+            entry.mode,
+        )

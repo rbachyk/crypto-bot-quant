@@ -204,6 +204,7 @@ class CcxtLiveVenue:
         avg_obs: float | None = None
         fee = 0.0
         entry_still_resting = False
+        order_accepted = False  # exchange ACCEPTED an entry order (L13: consumes guard budget)
         try:
             resp = self._ex.create_order(
                 plan.symbol, order_type, entry.side, entry.qty, price, params
@@ -223,6 +224,7 @@ class CcxtLiveVenue:
             # for a resting order, so we poll the order status and book only what actually
             # filled; any unfilled remainder is cancelled at the window end. ``fill_ratio``
             # is a simulated-venue knob and is deliberately ignored here.
+            order_accepted = True
             filled_qty, avg_obs, fee, entry_still_resting = self._observe_entry_fill(
                 resp, plan.symbol, entry
             )
@@ -244,6 +246,9 @@ class CcxtLiveVenue:
                 plan, entry, entry.qty - filled_qty, params
             )
             fee += taker_fee
+            # A post-only crossing REJECTION never consumed budget; if the escalation's market
+            # order filled, an order was genuinely accepted — count it (L13).
+            order_accepted = order_accepted or taker_qty > 0
 
         total_qty = filled_qty + taker_qty
         # Average fill price is the observed one; fall back to the limit price only when
@@ -299,6 +304,13 @@ class CcxtLiveVenue:
             tp_order_id=f"{entry.client_id}:tp" if has_tp else None,
             owned=True,
         )
+        # L13: consume the bounded-live order budget on SUCCESSFUL placement (the exchange
+        # accepted an entry order), not at authorisation — a guard-approved order the exchange
+        # rejected (post-only crossing, API error) must not burn a session slot.
+        if self.is_live and self._guard is not None and order_accepted:
+            record = getattr(self._guard, "record_order_placed", None)
+            if callable(record):
+                record(opened=filled_qty > 0)
         resting: list[str] = []
         if filled_qty > 0:
             self.positions[plan.symbol] = position

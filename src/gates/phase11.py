@@ -85,6 +85,7 @@ def _load_real_shadow_decisions(cfg):  # -> list[ShadowDecision]
             rationale = str(action.get("rationale") or "")
             if rationale.startswith(_SYNTHETIC_RATIONALE_PREFIX):
                 continue
+            win_prob = action.get("win_probability")
             decisions.append(
                 ShadowDecision(
                     ts=r.ts,
@@ -93,6 +94,8 @@ def _load_real_shadow_decisions(cfg):  # -> list[ShadowDecision]
                     realized_outcome=float(r.realized_outcome),
                     take=bool(action.get("take", True)),
                     mode=r.mode,
+                    # M31: calibration only from a genuine policy probability.
+                    win_probability=float(win_prob) if win_prob is not None else None,
                 )
             )
     return decisions
@@ -131,6 +134,10 @@ def _score_real_shadow_decisions(decisions, cfg) -> Criterion:
         max_drift_per_window=cfg.scoring.max_drift_per_window,
         drift_window=cfg.monitoring.drift_window,
         baseline_mean=0.0,
+        # Audit M34: promotion eligibility enforces the configured minimums
+        # (previously dead config — ~8 outcomes could reach eligibility).
+        min_shadow_decisions=cfg.scoring.min_shadow_decisions,
+        min_wf_folds_positive=cfg.scoring.min_wf_folds_positive,
     )
     holdout = None if result.holdout_edge is None else round(result.holdout_edge, 4)
     brier = None if result.brier_score is None else round(result.brier_score, 4)
@@ -596,10 +603,11 @@ def check_learn_promo_s(settings: Settings) -> list[Criterion]:
                 ShadowDecision(
                     ts=datetime.now(UTC),
                     symbol="BTCUSDT",
-                    projected_outcome=0.06,
+                    projected_outcome=0.06,  # R-scale projection (M31 contract)
                     realized_outcome=realized,
                     take=True,
                     mode="SHADOW",
+                    win_probability=0.66,  # exercises the Brier mechanism (M31)
                 )
             )
         scorer_result = score_shadow_decisions(

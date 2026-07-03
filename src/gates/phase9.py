@@ -71,6 +71,56 @@ def _as_utc(ts: datetime) -> datetime:
     return ts.replace(tzinfo=UTC) if ts.tzinfo is None else ts
 
 
+# Deterministic shuffle seeds for the leakage noise check (criterion 7). The
+# criterion averages over all of them: leakage is systematic and survives
+# averaging; single-split luck (± ~0.15R at n_test≈25) does not.
+_LEAKAGE_NOISE_SEEDS = (7, 13, 99, 123, 2024)
+
+
+def _noise_shuffle_delta(ml_cfg: MLConfig, settings: Settings, noise_seed: int) -> float:
+    """Expectancy improvement of a model trained/evaluated on outcome-shuffled noise.
+
+    Builds the reference dataset, then shuffles the ENTIRE outcome tuple
+    ``(label, realized_pnl, hold_bars)`` across candidates — never the label
+    alone. Shuffling only the label leaves each candidate's realized_pnl
+    attached to its features, and the reference dataset's features genuinely
+    predict pnl by construction, so any feature-driven prediction evaluated
+    against the unshuffled pnl showed a large spurious "improvement". Tuple
+    shuffling keeps label↔outcome consistent within each pair (so real
+    train/test contamination — a model memorising test outcomes — still shows
+    up as positive improvement) while destroying the feature→outcome link a
+    leakage-free model could exploit; its expected improvement is ≈ 0.
+    """
+    from src.ml.labels import (
+        LabeledSample,
+        baseline_expectancy,
+        build_reference_dataset,
+        filtered_expectancy,
+        train_test_split,
+    )
+    from src.ml.shadow import ShadowPredictor
+
+    noise_samples = build_reference_dataset(seed=42)
+    rng = random.Random(noise_seed)
+    outcomes = [(s.label, s.realized_pnl, s.hold_bars) for s in noise_samples]
+    rng.shuffle(outcomes)
+    noise_samples_shuffled = [
+        LabeledSample(candidate=s.candidate, label=lbl, realized_pnl=pnl, hold_bars=hold)
+        for s, (lbl, pnl, hold) in zip(noise_samples, outcomes, strict=True)
+    ]
+    noise_train, noise_test = train_test_split(noise_samples_shuffled, seed=noise_seed)
+
+    noise_predictor = ShadowPredictor.from_config(ml_cfg)
+    noise_predictor.train(noise_train)
+    noise_result = noise_predictor.run(
+        [s.candidate for s in noise_test],
+        settings=settings,
+        write_to_db=False,  # noise run: no DB writes
+    )
+    noise_preds = [b.meta_label.label if b.meta_label else 1 for b in noise_result.bundles]
+    return filtered_expectancy(noise_test, noise_preds) - baseline_expectancy(noise_test)
+
+
 def _load_real_shadow_outcomes() -> tuple[int, list[tuple[int, float]]]:
     """REAL meta-labeler shadow decisions joined to realized paper-trade outcomes.
 
@@ -253,10 +303,7 @@ def check_ml_promo(settings: Settings) -> list[Criterion]:
         from src.ml.config import load_ml_config
         from src.ml.features import FEATURE_NAMES, build_feature_matrix
         from src.ml.labels import (
-            LabeledSample,
-            baseline_expectancy,
             build_reference_dataset,
-            filtered_expectancy,
             train_test_split,
         )
         from src.ml.models import (  # noqa: F401
@@ -425,51 +472,35 @@ def check_ml_promo(settings: Settings) -> list[Criterion]:
     # 7. PLUMBING: leakage check — noise dataset → ≈0 improvement          #
     # ------------------------------------------------------------------ #
     try:
-        # Build a noise dataset by shuffling labels randomly.
-        noise_samples = build_reference_dataset(seed=42)
-        rng = random.Random(99)
-        shuffled_labels = [s.label for s in noise_samples]
-        rng.shuffle(shuffled_labels)
-
-        noise_samples_shuffled = [
-            LabeledSample(
-                candidate=s.candidate,
-                label=lbl,
-                realized_pnl=s.realized_pnl,
-                hold_bars=s.hold_bars,
-            )
-            for s, lbl in zip(noise_samples, shuffled_labels, strict=False)
+        # Noise = the reference dataset with the ENTIRE outcome tuple
+        # (label, realized_pnl, hold_bars) shuffled across candidates — see
+        # _noise_shuffle_delta for why shuffling the label alone (the pre-fix
+        # construction) produced a deterministic false positive. The mean over
+        # several deterministic shuffles is used because leakage is systematic
+        # and survives averaging; single-split luck does not.
+        noise_deltas = [
+            _noise_shuffle_delta(ml_cfg, settings, noise_seed)
+            for noise_seed in _LEAKAGE_NOISE_SEEDS
         ]
-        noise_train, noise_test = train_test_split(noise_samples_shuffled, seed=99)
-
-        noise_predictor = ShadowPredictor.from_config(ml_cfg)
-        noise_predictor.train(noise_train)
-        noise_result = noise_predictor.run(
-            [s.candidate for s in noise_test],
-            settings=settings,
-            write_to_db=False,  # noise run: no DB writes
-        )
-        noise_preds = [b.meta_label.label if b.meta_label else 1 for b in noise_result.bundles]
-        noise_baseline = baseline_expectancy(noise_test)
-        noise_filtered = filtered_expectancy(noise_test, noise_preds)
-        noise_delta = noise_filtered - noise_baseline
-        # Leakage only manifests as positive improvement on RANDOMLY-SHUFFLED labels — a model
-        # that "improves" expectancy on pure noise is reading something it shouldn't. A negative
-        # delta means the model correctly avoided trades on shuffled labels (expected, not
-        # leakage). The threshold is tight (0.10R): on a deterministic noise split a leakage-free
-        # model should sit near 0, so anything materially positive is suspicious.
+        noise_delta = sum(noise_deltas) / len(noise_deltas)
+        # Leakage only manifests as positive improvement on shuffled outcomes — a model that
+        # "improves" expectancy on pure noise is reading something it shouldn't. A negative
+        # delta means the model's filtering was uninformative on noise (expected, not leakage).
         leakage_threshold = 0.10
         leakage_ok = noise_delta <= leakage_threshold
+        per_seed = ", ".join(f"{d:+.4f}" for d in noise_deltas)
         out.append(
             Criterion.ok(
                 "ml_leakage_check_plumbing",
-                f"noise improvement={noise_delta:.4f}R (≤ {leakage_threshold:.2f} → no leakage)",
+                f"mean noise improvement={noise_delta:.4f}R over {len(noise_deltas)} shuffles "
+                f"[{per_seed}] (≤ {leakage_threshold:.2f} → no leakage)",
             )
             if leakage_ok
             else Criterion.fail(
                 "ml_leakage_check_plumbing",
-                f"noise improvement={noise_delta:.4f}R exceeds {leakage_threshold:.2f}"
-                " → possible leakage",
+                f"mean noise improvement={noise_delta:.4f}R over {len(noise_deltas)} shuffles "
+                f"[{per_seed}] exceeds {leakage_threshold:.2f} → possible leakage "
+                "(model reads outcome information it should not have)",
             )
         )
     except Exception as exc:  # noqa: BLE001

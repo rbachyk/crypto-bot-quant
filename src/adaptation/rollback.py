@@ -11,10 +11,12 @@ when any of the five rollback conditions fire:
   5. Manual learner kill switch (freeze() call).
 
 On rollback, :meth:`RollbackGuard.revert` performs the full Section 21.7 atomic
-sequence: freeze the controller (the frozen fallback policy becomes effective and no
-learner action is ever applied again), cancel pending learner-influenced **new** orders
-only (never an open position's exchange-side stop), emit the ``learner_rollback`` alert,
-and write the event to ``learner_log``. Recovery FROZEN → LIVE_BOUNDED is MANUAL only.
+sequence: freeze the controller (the frozen fallback snapshot is loaded and becomes the
+effective policy in SHADOW mode; no learner action is ever applied again — or, if no
+fallback snapshot exists, the learner is honestly reported DISABLED), cancel pending
+learner-influenced **new** orders only (never an open position's exchange-side stop),
+emit the ``learner_rollback`` alert, and write the event to ``learner_log``.
+Recovery FROZEN → LIVE_BOUNDED is MANUAL only.
 """
 
 from __future__ import annotations
@@ -122,10 +124,12 @@ class RollbackGuard:
                 f"live-vs-shadow divergence > {self.max_divergence}",
             )
 
-        # Trigger 1: underperformance vs own projection.
-        window = [
-            d for d in self._decisions[-self.rollback_window :] if d.realized_outcome is not None
-        ]
+        # Trigger 1: underperformance vs own projection, evaluated over the last
+        # ``rollback_window`` REALIZED decisions. (Audit M32: filtering the last
+        # N decisions down to realized ones required N consecutive realized
+        # outcomes — a single pending outcome silently disabled the trigger.)
+        realized = [d for d in self._decisions if d.realized_outcome is not None]
+        window = realized[-self.rollback_window :]
         if len(window) >= self.rollback_window:
             mean_realized = sum(d.realized_outcome for d in window) / len(window)  # type: ignore[misc]
             mean_projected = sum(d.projected_outcome for d in window) / len(window)
@@ -142,10 +146,14 @@ class RollbackGuard:
     def revert(
         self, controller: LearnerController, *, trigger: str, detail: str
     ) -> RollbackEvent:
-        """Atomic revert to the frozen fallback (Section 21.7).
+        """Atomic revert to the frozen fallback (Section 21.7; audit H17).
 
-        1. Freeze the controller so the **frozen fallback policy** becomes effective and
-           no learner action is ever applied again until a manual review.
+        1. Freeze the controller: ``controller.freeze`` loads the last-approved
+           snapshot into the fallback slot (via versioning) and the fallback
+           runs in SHADOW mode only — no learner action is ever applied again
+           until a manual review. If no fallback snapshot exists the controller
+           is learner-disabled and this event/alert says so honestly
+           (``fallback_active=False``), never claiming a fallback is active.
         2. Cancel pending learner-influenced **new** orders only — never an open
            position's exchange-side stop (via the injected ``cancel_orders`` hook).
         3. Emit the ``learner_rollback`` alert.
@@ -157,21 +165,28 @@ class RollbackGuard:
             trigger=trigger,
             detail=detail,
             controller_frozen=controller.is_frozen(),
-            fallback_active=controller.is_frozen() and controller.frozen_policy is not None,
+            fallback_active=controller.fallback_active,
         )
         if self.cancel_orders is not None:
             event.orders_cancelled = int(self.cancel_orders())
         if self.alert_sink is not None:
+            if event.fallback_active:
+                recommended = (
+                    "learner FROZEN; approved frozen-fallback policy active in SHADOW mode "
+                    f"(never applied); recovery is manual after review — {detail}"
+                )
+            else:
+                recommended = (
+                    "learner FROZEN and DISABLED — no frozen-fallback snapshot available; "
+                    f"restore a fallback snapshot, then recover manually after review — {detail}"
+                )
             self.alert_sink.send(
                 Alert(
                     title=f"learner_rollback: {trigger}",
                     severity=AlertSeverity.CRITICAL,
                     component="adaptation.rollback",
                     environment=self.environment,
-                    recommended_action=(
-                        "learner FROZEN on frozen fallback; recovery is manual after review — "
-                        f"{detail}"
-                    ),
+                    recommended_action=recommended,
                 )
             )
         if self.log_writer is not None:

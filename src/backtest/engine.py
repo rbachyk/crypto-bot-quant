@@ -187,7 +187,13 @@ class _Open:
 
 
 def _regime_of(row: dict, spread_bps: float = 0.0) -> str:
-    """Deterministic Section-11 regime label (R-code) from decision-time features."""
+    """STATELESS Section-11 regime label (R-code) from one decision-time feature row.
+
+    Point-query convention: kept for callers that see only isolated rows and cannot carry
+    tracker state (the cross-sectional engine samples rows at rebalance boundaries only, so
+    bar-to-bar persistence is undefined there). The per-trade :class:`BacktestEngine` labels
+    trades via a per-symbol :class:`~src.regime.RegimeTracker` instead (anti-whipsaw,
+    ``min_persist_bars``), matching the live convention — see ``_tracked_regimes``."""
     from src.regime import detect_regime
 
     return detect_regime(row, spread_bps=spread_bps, data_ok=True)
@@ -223,6 +229,9 @@ class BacktestEngine:
         # up "this symbol's row at the bar being managed" (and peers, for cross-asset). Built only
         # when a strategy exposes manage()/manage_portfolio() (see run()).
         self._rows_by_ts: dict[str, dict[int, dict]] = {}
+        # Stateful regime labels per symbol/decision_ts (RegimeTracker, anti-whipsaw) used for
+        # trade labeling — parity with the live tracker convention. Built per run().
+        self._regime_by_ts: dict[str, dict[int, str]] = {}
 
     def run(self, inputs: list[SymbolInput]) -> BacktestResult:
         result = BacktestResult(
@@ -252,6 +261,10 @@ class BacktestEngine:
         # The timeline is the ascending union of every symbol's real bar timestamps, so we visit
         # only timestamps where some symbol actually trades (no empty pre-listing slots).
         timeline = sorted({b["ts"] for s in inputs for b in s.bars})
+        # Stateful per-symbol regime labels (anti-whipsaw), seeded at the window start — the
+        # SAME convention a live session's tracker applies, so regime-conditional stats match
+        # live around transitions instead of flipping on every one-bar excursion.
+        self._regime_by_ts = {s.symbol: self._tracked_regimes(s) for s in inputs}
         # Per-symbol: signals keyed by entry timestamp (decision made on the prior bar's close).
         # Each entry carries the originating feature row so entry never re-scans.
         if self.is_portfolio:
@@ -328,6 +341,34 @@ class BacktestEngine:
         result.rejected_by_reason = self._reject_summary(result.rejected)
         return result
 
+    # -- regime tracking --------------------------------------------------- #
+    def _tracked_regimes(self, sym_in: SymbolInput) -> dict[int, str]:
+        """Walk the symbol's full decision-row history through a stateful
+        :class:`~src.regime.RegimeTracker` (seeded fresh at the window start) and return the
+        tracked label per ``decision_ts``. Trade labels read from this map, so backtest
+        regime-conditional stats carry the SAME anti-whipsaw persistence
+        (``min_persist_bars``, protective regimes engage immediately) a live tracker applies,
+        instead of the stateless per-row label that flips on every one-bar excursion."""
+        from src.regime import RegimeTracker
+
+        tracker = RegimeTracker()
+        out: dict[int, str] = {}
+        for row in sym_in.frame.rows:  # rows are chronological
+            dts = int(row["decision_ts"])
+            out[dts] = tracker.update(
+                row, spread_bps=float(sym_in.spread_bps_at(dts)), data_ok=True
+            )
+        return out
+
+    def _augment_row(self, sym_in: SymbolInput, row: dict) -> dict:
+        """Copy of ``row`` carrying the decision-time execution-safety inputs (``spread_bps``
+        from the symbol's spread model, ``data_ok`` — True in backtest: the snapshot is
+        validated before the run) so the strategy-level regime gate can reach
+        R7_TOXIC_EXECUTION / R8_DATA_UNSAFE exactly like the live path. A copy, so cached /
+        shared feature frames are never mutated."""
+        dts = int(row["decision_ts"])
+        return {**row, "spread_bps": float(sym_in.spread_bps_at(dts)), "data_ok": True}
+
     # -- signal precomputation ------------------------------------------- #
     def _signals(self, sym_in: SymbolInput) -> dict[int, tuple[Signal, dict]]:
         """Map entry timestamp -> (Signal, originating row). decision_ts == entry ts.
@@ -345,7 +386,9 @@ class BacktestEngine:
             if entry_ts not in bars:
                 continue  # no tradable bar at this timestamp (pre-listing or interior gap)
             # Per-symbol path runs only when is_portfolio is False (see run()), so the
-            # strategy implements the plain Strategy protocol.
+            # strategy implements the plain Strategy protocol. The row is augmented with the
+            # decision-time spread / data flag so the strategy's regime gate sees them (M4).
+            row = self._augment_row(sym_in, row)
             sig = cast(Strategy, self.strategy).evaluate(row)
             if sig is not None:
                 # Deterministic on a collision: if two feature rows share an entry timestamp
@@ -371,6 +414,7 @@ class BacktestEngine:
         for ``decision_ts`` fills at the bar whose ts == ``decision_ts``.
         """
         out: dict[str, dict[int, tuple[Signal, dict]]] = {s.symbol: {} for s in inputs}
+        inputs_by_symbol = {s.symbol: s for s in inputs}
         rows_by_dts: dict[str, dict[int, dict]] = {
             s.symbol: {int(r["decision_ts"]): r for r in s.frame.rows} for s in inputs
         }
@@ -379,7 +423,13 @@ class BacktestEngine:
 
         all_dts = sorted({dts for m in rows_by_dts.values() for dts in m})
         for dts in all_dts:
-            peers = {sym: m[dts] for sym, m in rows_by_dts.items() if dts in m}
+            # Each symbol's row augmented with ITS decision-time spread / data flag, so the
+            # strategy-level regime gate can reach R7/R8 for the evaluated symbol (M4).
+            peers = {
+                sym: self._augment_row(inputs_by_symbol[sym], m[dts])
+                for sym, m in rows_by_dts.items()
+                if dts in m
+            }
             for sym, row in peers.items():
                 if dts < activation_by_symbol[sym]:
                     continue  # symbol not yet in-universe (future-universe guard)
@@ -503,7 +553,10 @@ class BacktestEngine:
             entry_fee=entry_fee,
             funding=0.0,
             slippage_cost=entry_slip_cost,
-            regime=_regime_of(row, sym_in.spread_bps_at(decision_ts)),
+            # Tracked (anti-whipsaw) label — live parity; stateless fallback only if the
+            # decision_ts is somehow absent from the tracker map (defensive, shouldn't happen).
+            regime=self._regime_by_ts.get(sym_in.symbol, {}).get(decision_ts)
+            or _regime_of(row, spread_bps),
             session=int(row.get("session_code", 0)),
             next_funding_idx=self._first_funding_after(sym_in, decision_ts),
             trail_dist=sig.trail_frac * entry_price,

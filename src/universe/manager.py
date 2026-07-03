@@ -76,11 +76,15 @@ class UniverseManager:
         spec = self.meta_cfg.spec(symbol)
         fields = spec.fields if spec else {}
         verified = bool(verified_in_db and spec is not None and spec.is_complete_and_consistent())
+        # Keys use the DATA config's exchange_id (where the lake series actually live) and
+        # the platform's own grids: OI is stored on ``oi_grid`` (a coarser timeframe on venues
+        # like Bybit that only retain recent fine-grained OI) — checking it on base_timeframe
+        # would fail the HARD open_interest_available filter for every symbol.
         funding_key = SeriesKey(
-            self.uni_cfg.exchange_id, FUNDING, symbol, self.data_cfg.funding_timeframe
+            self.data_cfg.exchange_id, FUNDING, symbol, self.data_cfg.funding_timeframe
         )
         oi_key = SeriesKey(
-            self.uni_cfg.exchange_id, OPEN_INTEREST, symbol, self.data_cfg.base_timeframe
+            self.data_cfg.exchange_id, OPEN_INTEREST, symbol, self.data_cfg.oi_grid
         )
         return SymbolMetaView(
             verified=verified,

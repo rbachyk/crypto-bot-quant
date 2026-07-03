@@ -163,9 +163,9 @@ def persist_paper_session(
                     trade_id=t.trade_id,
                     # Stamp the row with the trade's OWN time (close, else entry), not insert-time
                     # now(). The incremental flush deletes+reinserts every ~20s, so a now()-default
-                    # created_at re-stamped every trade to "now" on a multi-day session — collapsing
-                    # the equity-curve time axis and the today/last_7d window filters. exit_ts is the
-                    # real close epoch for a closed live trade; persisting it is idempotent.
+                    # created_at re-stamped every trade to "now" on a multi-day session —
+                    # collapsing the equity-curve time axis and the today/last_7d window filters.
+                    # exit_ts is the real close epoch for a closed live trade; idempotent.
                     created_at=_trade_created_at(t),
                     symbol=t.symbol,
                     strategy=t.strategy,

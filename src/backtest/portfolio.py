@@ -297,6 +297,9 @@ class CrossSectionalEngine:
             entry_fee=entry_fee,
             funding=0.0,
             slippage_cost=slip_cost,
+            # Stateless point-query label (documented convention): baskets sample rows only at
+            # rebalance boundaries (non-adjacent bars), so bar-to-bar tracker persistence is
+            # undefined here — unlike the per-trade engine, which labels via RegimeTracker.
             regime=_regime_of(row, spread_bps),
             session=int(row.get("session_code", 0)),
             last_funding_ts=ts,  # settle only funding posted strictly after entry

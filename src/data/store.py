@@ -18,8 +18,13 @@ lives only in Postgres (Appendix B.4).
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import os
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -30,6 +35,27 @@ from src.data.schema import COLUMNS, FUNDING, SeriesKey
 
 # Integer columns (everything else is float64); ts is the primary key.
 _INT_COLUMNS = {"ts", "funding_interval_hours"}
+
+
+@contextmanager
+def _month_lock(path: Path) -> Iterator[None]:
+    """Exclusive OS-level lock serializing the read-merge-replace cycle on ONE month file.
+
+    ``write``/``delete_range`` are read-merge-rewrite: without a lock two concurrent writers
+    (scheduled incremental job vs manual backfill vs live seed) both read ``existing``, each
+    writes its own merge, and the last ``replace()`` silently drops the other's rows. An
+    ``flock`` on a sidecar ``<month>.lock`` file makes the critical section mutually exclusive
+    across processes AND threads (each acquisition opens its own file description), is
+    dependency-free, and works on this darwin/linux deployment. The lock file persists next to
+    the partition file (unlinking it would race fresh acquisitions on the old inode)."""
+    lock_path = path.with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w", encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def _arrow_schema(data_type: str) -> pa.Schema:
@@ -143,14 +169,15 @@ class SeriesStore:
         """Persist the listing watermark (monotone-min). A wider window can only move it
         EARLIER; it never moves up, and ``delete_range`` never touches it — so deleting
         head-of-series data leaves the watermark behind and the loss stays detectable."""
-        existing = self.listing_ts(key)
-        if existing is not None and existing <= int(ts):
-            return
         path = self._listing_path(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"listing_ts": int(ts)}), encoding="utf-8")
-        tmp.replace(path)
+        with _month_lock(path):  # monotone-min check + replace must be atomic vs other writers
+            existing = self.listing_ts(key)
+            if existing is not None and existing <= int(ts):
+                return
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.parent / f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+            tmp.write_text(json.dumps({"listing_ts": int(ts)}), encoding="utf-8")
+            tmp.replace(path)
 
     # -- write ----------------------------------------------------------- #
     def write(self, key: SeriesKey, rows: list[dict]) -> int:
@@ -167,14 +194,18 @@ class SeriesStore:
         schema = _arrow_schema(key.data_type)
         for (year, month), month_rows in by_month.items():
             path = self._month_file(key, year, month)
-            existing = {r["ts"]: r for r in self._read_file(path)}
-            before = len(existing)
-            for row in month_rows:
-                if row["ts"] not in existing:  # append-only: keep first write
-                    existing[row["ts"]] = {c: row[c] for c in cols}
-            new_written += len(existing) - before
-            merged = [existing[ts] for ts in sorted(existing)]
-            self._write_file(path, schema, cols, merged, key.data_type)
+            # Serialize the whole read-merge-replace against concurrent writers/deleters of
+            # this series-month: both merges then happen in sequence, so disjoint concurrent
+            # writes both survive (no lost rows) and dedup stays keep-first-write.
+            with _month_lock(path):
+                existing = {r["ts"]: r for r in self._read_file(path)}
+                before = len(existing)
+                for row in month_rows:
+                    if row["ts"] not in existing:  # append-only: keep first write
+                        existing[row["ts"]] = {c: row[c] for c in cols}
+                new_written += len(existing) - before
+                merged = [existing[ts] for ts in sorted(existing)]
+                self._write_file(path, schema, cols, merged, key.data_type)
         return new_written
 
     def _write_file(
@@ -190,10 +221,14 @@ class SeriesStore:
             for c in cols
         ]
         table = pa.Table.from_arrays(arrays, schema=schema)
-        # Atomic-ish replace: write to a temp file then rename.
-        tmp = path.with_suffix(".parquet.tmp")
-        pq.write_table(table, tmp)
-        tmp.replace(path)
+        # Atomic replace: write to a UNIQUE temp file (pid + random suffix — a fixed temp name
+        # would let two concurrent writers corrupt each other's half-written parquet) then rename.
+        tmp = path.parent / f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+        try:
+            pq.write_table(table, tmp)
+            tmp.replace(path)
+        finally:
+            tmp.unlink(missing_ok=True)  # no orphaned temp on a failed write
 
     def delete_range(self, key: SeriesKey, start_ms: int, end_ms: int) -> int:
         """Remove rows in ``[start_ms, end_ms)``. Used to re-download a bad range
@@ -209,14 +244,15 @@ class SeriesStore:
             if not year_dir.is_dir():
                 continue
             for mfile in sorted(year_dir.glob("*.parquet")):
-                rows = self._read_file(mfile)
-                kept = [r for r in rows if not (start_ms <= r["ts"] < end_ms)]
-                removed += len(rows) - len(kept)
-                if len(kept) != len(rows):
-                    if kept:
-                        self._write_file(mfile, schema, cols, kept, key.data_type)
-                    else:
-                        mfile.unlink()
+                with _month_lock(mfile):  # serialize against concurrent write() merges
+                    rows = self._read_file(mfile)
+                    kept = [r for r in rows if not (start_ms <= r["ts"] < end_ms)]
+                    removed += len(rows) - len(kept)
+                    if len(kept) != len(rows):
+                        if kept:
+                            self._write_file(mfile, schema, cols, kept, key.data_type)
+                        else:
+                            mfile.unlink()
         return removed
 
     # -- integrity ------------------------------------------------------- #

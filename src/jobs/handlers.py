@@ -347,6 +347,22 @@ def _build_dataset_version(ctx: JobContext, params: dict) -> dict:
     status = "VALID" if (run.coverage.covered and run.validation.passed) else "INVALID"
     ctx.log(f"snapshot {run.snapshot.snapshot_id}: {status}")
 
+    # --- verification-on-use + retention (M19/L17): surface whether the snapshot's recorded
+    # checksums still match the live store, then bound `as_of: now` snapshot growth by pruning
+    # old, unreferenced dataset versions (files + DB rows + quality reports together). --- #
+    verification = platform.verify_snapshot(run.snapshot.snapshot_id)
+    ctx.log(
+        f"snapshot verification: {verification.summary()}",
+        level="INFO" if verification.ok else "WARNING",
+    )
+    retention = platform.prune_snapshots()
+    if retention.get("pruned") or retention.get("kept_referenced"):
+        ctx.log(
+            f"retention (keep_last={retention['keep_last']}): pruned "
+            f"{len(retention['pruned'])} snapshot(s); {len(retention['kept_referenced'])} old "
+            "snapshot(s) kept (still referenced by runs/features/models)"
+        )
+
     # --- pre-build the engine inputs NOW (at download time), so validation/backtests load them
     # instantly instead of rebuilding (~hours on 4h, days on 5m for a 20-symbol universe).
     # Idempotent: an unchanged snapshot yields instant cache hits, so an incremental re-download
@@ -380,6 +396,8 @@ def _build_dataset_version(ctx: JobContext, params: dict) -> dict:
         "symbols_available": available,
         "covered": run.coverage.covered,
         "validation_passed": run.validation.passed,
+        "snapshot_verified": verification.ok,
+        "snapshots_pruned": len(retention.get("pruned", [])),
         "inputs_cached": built_shapes,
         "artifact_uri": run.report_path,
     }

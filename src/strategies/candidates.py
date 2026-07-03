@@ -54,12 +54,20 @@ class _BaseCandidate:
     def _regime_ok(self, row: dict) -> bool:
         """Regime gate (Section 11). Off by default (legacy: trade every bar). ``regimes`` is an
         allow-list (trade ONLY those); ``block_no_trade_regimes`` excludes the live safety regimes.
-        Computed from decision-time features already in the row (spread/data handled separately by
-        the engine's execution blockers, so spread_bps defaults here)."""
+        Computed from decision-time features in the row PLUS the execution-safety inputs the
+        caller injects into it (``spread_bps`` from the decision-time spread model / L1 feed,
+        ``data_ok`` from the data-freshness check) — so R7_TOXIC_EXECUTION and R8_DATA_UNSAFE
+        are reachable here in EVERY environment (backtest, replay paper, live), not only via the
+        live setup-quality gate. Absent keys degrade to the safe-side defaults (0 bps, data ok),
+        matching the legacy behaviour for callers that cannot know them."""
         p = self.params
         if not p.regimes and not p.block_no_trade_regimes:
             return True
-        regime = detect_regime(row)
+        regime = detect_regime(
+            row,
+            spread_bps=float(row.get("spread_bps", 0.0) or 0.0),
+            data_ok=bool(row.get("data_ok", True)),
+        )
         if p.regimes and regime not in p.regimes:
             return False
         return not (p.block_no_trade_regimes and regime in NO_TRADE_REGIMES)

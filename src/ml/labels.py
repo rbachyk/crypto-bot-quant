@@ -16,7 +16,7 @@ from __future__ import annotations
 import hashlib
 import math
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from src.ranking.candidate import Candidate
 
@@ -158,8 +158,13 @@ def build_reference_dataset(
         k = n_good + n_bad + i
         samples.append(_make(k, 0.65, 0.008, 4.0, 0.0006, -0.2, 0))
 
-    # Shuffle deterministically so train/test split doesn't track good→bad order.
+    # Shuffle deterministically so train/test split doesn't track good→bad order,
+    # then reassign decision_ts in shuffled order: train_test_split sorts
+    # chronologically (audit L33), so timestamps must follow the shuffled order
+    # or sorting would restore the good→bad class ordering.
     rng.shuffle(samples)
+    for idx, s in enumerate(samples):
+        s.candidate = replace(s.candidate, decision_ts=1_700_000_000_000 + idx * 60_000)
     return samples
 
 
@@ -169,12 +174,15 @@ def train_test_split(
     """CHRONOLOGICAL split: train on the earlier ``1-test_fraction``, test on the most-recent
     ``test_fraction``. NEVER a random shuffle — a random split leaks future trade outcomes into
     training (temporal leakage that inflates the meta-labeler's apparent skill once real paper
-    trades feed it). Real samples arrive in time order; the synthetic reference dataset is
-    pre-shuffled for class balance, so a front/back split there is still balanced. ``seed`` is
-    accepted for call-site compatibility but unused (the split is deterministic)."""
+    trades feed it). Samples are explicitly sorted by ``candidate.decision_ts`` first (audit
+    L33): an unsorted real-outcome batch would otherwise reintroduce the leakage the front/back
+    split exists to prevent. The synthetic reference dataset assigns timestamps in its shuffled
+    order, so its class balance survives the sort. ``seed`` is accepted for call-site
+    compatibility but unused (the split is deterministic)."""
     _ = seed
-    split = max(1, int(len(samples) * (1.0 - test_fraction)))
-    return list(samples[:split]), list(samples[split:])
+    ordered = sorted(samples, key=lambda s: s.candidate.decision_ts)
+    split = max(1, int(len(ordered) * (1.0 - test_fraction)))
+    return ordered[:split], ordered[split:]
 
 
 def count_positives(samples: list[LabeledSample]) -> int:

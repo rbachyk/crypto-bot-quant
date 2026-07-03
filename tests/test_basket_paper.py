@@ -271,8 +271,8 @@ def test_funding_settled_by_timestamp_survives_event_list_rebuild() -> None:
                session=0, last_funding_ts=0)
 
     def _sin(events):
-        return SymbolInput(symbol=sym, bars=[],
-                           frame=FeatureFrame(symbol=sym, timeframe="1h", feature_names=[], rows=[]),
+        frame = FeatureFrame(symbol=sym, timeframe="1h", feature_names=[], rows=[])
+        return SymbolInput(symbol=sym, bars=[], frame=frame,
                            spread_samples=[], funding_events=events)
 
     one = eng.funding.payment(side=1, notional=100.0, funding_rate=0.001)

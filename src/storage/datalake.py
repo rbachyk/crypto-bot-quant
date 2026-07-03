@@ -15,6 +15,10 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+import structlog
+
+_log = structlog.get_logger("storage.datalake")
+
 # Monotonic-ish counter so two snapshots created in the same second differ.
 _counter = 0
 
@@ -48,6 +52,14 @@ class DatasetManifest:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def manifest_checksum(payload: dict) -> str:
+    """Deterministic checksum of a manifest's CONTENT: the ``checksum`` field itself is
+    zeroed before hashing (hashing a JSON that contains the previous checksum makes the
+    stored value unverifiable). First 16 hex of sha256 over the canonical dump."""
+    content = json.dumps({**payload, "checksum": ""}, indent=2, sort_keys=True)
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
 
 
 class DataLake:
@@ -100,15 +112,33 @@ class DataLake:
     def write_manifest(self, manifest: DatasetManifest) -> Path:
         ddir = self.dataset_dir(manifest.snapshot_id)
         ddir.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(manifest.to_dict(), indent=2, sort_keys=True)
-        manifest.checksum = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+        # Checksum over the CONTENT with the checksum field zeroed (so a reader can recompute
+        # and verify it; a rewrite of a manifest that already carried a checksum stays stable).
+        manifest.checksum = manifest_checksum(manifest.to_dict())
         path = ddir / "manifest.json"
         path.write_text(json.dumps(manifest.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
         return path
 
     def read_manifest(self, snapshot_id: str) -> DatasetManifest:
+        """Read + VERIFY a manifest: the stored checksum must match the recomputed content
+        checksum (raises ``ValueError`` on mismatch — a tampered/corrupted manifest must not
+        be silently consumed). Manifests written before checksums were verifiable (missing /
+        empty field) are accepted with a warning and get a valid checksum on the next write."""
         path = self.dataset_dir(snapshot_id) / "manifest.json"
         data = json.loads(path.read_text(encoding="utf-8"))
+        stored = str(data.get("checksum", "") or "")
+        if not stored:
+            _log.warning(
+                "manifest_checksum_missing", snapshot_id=snapshot_id, path=str(path),
+                note="legacy manifest accepted; checksum will be written on next write",
+            )
+        else:
+            expected = manifest_checksum(data)
+            if stored != expected:
+                raise ValueError(
+                    f"manifest checksum mismatch for {snapshot_id}: stored {stored} != "
+                    f"computed {expected} ({path}) — manifest content was modified after write"
+                )
         return DatasetManifest(**data)
 
     def list_snapshots(self) -> list[str]:

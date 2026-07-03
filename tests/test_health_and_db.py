@@ -41,3 +41,33 @@ def test_health_report_healthy() -> None:
     names = {c.name for c in report.components}
     assert {"database", "redis", "storage"} <= names
     assert report.healthy is True, report.to_dict()
+
+
+def test_redis_probe_has_bounded_timeouts(monkeypatch) -> None:
+    """L35: the Redis probe must set BOTH connect and socket timeouts — a hung-but-accepting
+    Redis would otherwise block PING forever and hang every health endpoint."""
+    import redis as redis_mod
+    from src.config import get_settings
+    from src.monitoring.health import _check_redis
+
+    captured: dict = {}
+    real_from_url = redis_mod.Redis.from_url
+
+    def _spy(url, **kwargs):
+        captured.update(kwargs)
+        return real_from_url(url, **kwargs)
+
+    monkeypatch.setattr(redis_mod.Redis, "from_url", _spy)
+    _check_redis(get_settings())
+    assert captured.get("socket_connect_timeout") == 1
+    assert captured.get("socket_timeout") == 1
+
+
+@requires_db
+@requires_redis
+def test_readiness_probe_covers_db_and_redis() -> None:
+    from src.monitoring import check_readiness
+
+    report = check_readiness()
+    assert {c.name for c in report.components} == {"database", "redis"}
+    assert report.healthy is True, report.to_dict()

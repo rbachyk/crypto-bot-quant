@@ -631,6 +631,33 @@ class TestConfigFreeze:
 # ======================================================================== #
 
 
+def _seed_paper_b_result(status: str) -> int:
+    """Insert a PAPER-B GateResult with the given status (LIVE-8 reads the newest one);
+    returns its id so the caller can delete it — the shared test DB persists across runs."""
+    from src.db.base import session_scope
+    from src.db.models import Gate, GateResult, GateStatus
+
+    with session_scope() as db:
+        if db.get(Gate, "PAPER-B") is None:  # FK target; normally synced from gates.yaml
+            db.add(Gate(gate_id="PAPER-B", name="Strategy Paper (seeded for test)"))
+            db.flush()
+        gr = GateResult(gate_id="PAPER-B", status=GateStatus(status), run_by="test")
+        db.add(gr)
+        db.flush()
+        return int(gr.id)
+
+
+def _delete_gate_results(ids: list[int]) -> None:
+    from src.db.base import session_scope
+    from src.db.models import GateResult
+
+    with session_scope() as db:
+        for i in ids:
+            row = db.get(GateResult, i)
+            if row is not None:
+                db.delete(row)
+
+
 class TestLive:
     def test_soak_infrastructure_ready(self):
         """Infrastructure for a 72h soak test is importable."""
@@ -727,16 +754,39 @@ class TestLive:
         """Full LIVE gate check returns all criteria PASS.
 
         NOTE: When run via the gate runner (make run-gate GATE=LIVE), all upstream
-        dependencies are checked first. Here we call check_live() directly.
+        dependencies are checked first. Here we call check_live() directly, so a
+        PASSED PAPER-B gate result is seeded for the LIVE-8 criterion (which reads
+        the persisted gate history the runner would have produced).
         """
         from src.gates.phase13 import check_live
 
         settings = get_settings()
-        criteria = check_live(settings)
+        seeded_id = _seed_paper_b_result("passed")
+        try:
+            criteria = check_live(settings)
+        finally:
+            _delete_gate_results([seeded_id])
 
         assert len(criteria) > 0
         failed = [c.id for c in criteria if not c.passed]
         assert not failed, f"LIVE gate failed criteria: {failed}"
+
+    def test_live_8_fails_when_latest_paper_b_not_passed(self):
+        """LIVE-8 regression (audit L24): the criterion exists and fails closed
+        when the most recent persisted PAPER-B gate run is not PASSED."""
+        from src.gates.phase13 import check_live
+
+        settings = get_settings()
+        passed_id = _seed_paper_b_result("passed")
+        blocked_id = _seed_paper_b_result("blocked")  # newer → latest
+        try:
+            criteria = {c.id: c for c in check_live(settings)}
+        finally:
+            _delete_gate_results([passed_id, blocked_id])
+
+        assert "live_8_paper_b" in criteria, "LIVE-8 criterion missing (silent gap)"
+        assert not criteria["live_8_paper_b"].passed
+        assert "blocked" in criteria["live_8_paper_b"].detail
 
 
 # ======================================================================== #
@@ -851,9 +901,17 @@ class TestPhase13GateIntegration:
         assert not failed, f"CONFIG-FREEZE via CHECKS failed: {failed}"
 
     def test_live_gate_full(self):
-        """LIVE gate runs and passes via CHECKS registry."""
+        """LIVE gate runs and passes via CHECKS registry.
+
+        LIVE-8 reads the newest persisted PAPER-B gate result (fail-closed), so a
+        PASSED one is seeded here — the runner's dependency chain would have
+        produced it in a real gate run."""
         from src.gates.checks import run_check
 
-        criteria = run_check("LIVE")
+        seeded_id = _seed_paper_b_result("passed")
+        try:
+            criteria = run_check("LIVE")
+        finally:
+            _delete_gate_results([seeded_id])
         failed = [c.id for c in criteria if not c.passed]
         assert not failed, f"LIVE via CHECKS failed: {failed}"

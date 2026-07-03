@@ -11,6 +11,7 @@ from src.data.schema import (
     SPREAD,
     SeriesKey,
 )
+from src.data.source import DeterministicSource
 from src.data.validation import DataValidator
 
 from tests._data_helpers import fresh_store, populate, small_cfg
@@ -179,13 +180,53 @@ def test_markindex_close_stamp_listing_edge_is_not_misalignment(tmp_path) -> Non
     assert "markindex_alignment" not in _critical_checks(store, cfg)
 
 
-def test_clock_drift_breach_is_critical(tmp_path) -> None:
-    # Force an impossibly tight tolerance so any measurable skew trips it.
-    cfg = small_cfg()
-    cfg = replace(cfg, thresholds=replace(cfg.thresholds, clock_drift_tolerance_s=-1.0))
+# --------------------------------------------------------------------------- #
+# L15: clock drift measured against the EXCHANGE server time, or honestly N/A  #
+# --------------------------------------------------------------------------- #
+class _ClockSource(DeterministicSource):
+    """Offline source that also reports a (fake) exchange server time."""
+
+    def __init__(self, offset_ms: float) -> None:
+        super().__init__("skeleton")
+        self._offset_ms = offset_ms
+
+    def server_time_ms(self) -> int | None:
+        import time
+
+        return int(time.time() * 1000 + self._offset_ms)
+
+
+def test_clock_drift_vs_server_time_breach_is_critical(tmp_path) -> None:
+    cfg = small_cfg()  # tolerance 2.0s
     store = fresh_store(tmp_path)
     populate(store, cfg)
-    assert "clock_drift" in _critical_checks(store, cfg)
+    report = DataValidator(store, cfg, source=_ClockSource(offset_ms=10_000)).validate()
+    assert "clock_drift" in {v.check for v in report.critical}
+
+
+def test_clock_drift_within_tolerance_passes(tmp_path) -> None:
+    cfg = small_cfg()
+    store = fresh_store(tmp_path)
+    populate(store, cfg)
+    report = DataValidator(store, cfg, source=_ClockSource(offset_ms=0.0)).validate()
+    assert "clock_drift" not in {v.check for v in report.violations}
+    assert "clock_drift" not in report.not_applicable  # genuinely measured, not skipped
+
+
+def test_clock_drift_not_applicable_without_server_clock(tmp_path) -> None:
+    """No external clock (offline source / no source): the check must be recorded as NOT
+    APPLICABLE — neither a fake pass (the old wall-vs-monotonic no-op) nor a violation."""
+    cfg = small_cfg()
+    store = fresh_store(tmp_path)
+    populate(store, cfg)
+    for validator in (
+        DataValidator(store, cfg),  # no source at all
+        DataValidator(store, cfg, source=DeterministicSource("skeleton")),  # offline source
+    ):
+        report = validator.validate()
+        assert "clock_drift" not in {v.check for v in report.violations}
+        assert "clock_drift" in report.not_applicable
+        assert report.to_dict()["not_applicable"]["clock_drift"]
 
 
 class _FakeStore:

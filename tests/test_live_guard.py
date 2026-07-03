@@ -87,17 +87,29 @@ def test_denies_when_order_notional_exceeds_cap() -> None:
 
 
 def test_enforces_max_orders_per_session() -> None:
+    # L13: authorisation alone burns no budget — the slot is consumed by
+    # record_order_placed() once the exchange accepts the order.
     g = _guard()
     assert g.allow_live_order(_plan())[0]
+    g.record_order_placed()
     assert g.allow_live_order(_plan())[0]
+    g.record_order_placed()
     ok, reason = g.allow_live_order(_plan())  # third exceeds max_orders_per_session=2
     assert not ok and "max_orders_per_session" in reason
+
+
+def test_rejected_placement_burns_no_session_slot() -> None:
+    """A guard-approved order the exchange rejects must not shrink the session cap (L13)."""
+    g = _guard()
+    for _ in range(5):  # authorise repeatedly, never record a placement
+        assert g.allow_live_order(_plan())[0]
 
 
 def test_enforces_max_open_positions_and_register_close() -> None:
     limits = LiveLimits(max_orders_per_session=5, max_open_positions=1, account_equity=10_000.0)
     g = _guard(limits=limits)
     assert g.allow_live_order(_plan())[0]
+    g.record_order_placed()  # exchange accepted, position opened
     ok, reason = g.allow_live_order(_plan())  # second concurrent position blocked
     assert not ok and "max_open_positions" in reason
     g.register_close()  # a position closed frees a slot

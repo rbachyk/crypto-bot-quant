@@ -38,6 +38,9 @@ class BreakerInputs:
 class BreakerVerdict:
     tripped: bool
     reason: str = ""
+    # Set when the trip is SYMBOL-SCOPED (the per-symbol loss breaker, M8): only new entries
+    # on THIS symbol are blocked; the rest of the book keeps trading. None = a global halt.
+    symbol: str | None = None
 
 
 def _daily_loss_frac(inp: BreakerInputs) -> float:
@@ -59,8 +62,13 @@ class CircuitBreakers:
         self.cfg = cfg
         self.kill_switch = kill_switch
 
-    def evaluate(self, inp: BreakerInputs) -> BreakerVerdict:
-        """Return the first tripped breaker, in capital-preserving priority order."""
+    def evaluate(self, inp: BreakerInputs, *, symbol: str | None = None) -> BreakerVerdict:
+        """Return the first tripped breaker, in capital-preserving priority order.
+
+        ``symbol`` is the candidate's symbol: the per-symbol loss breaker (M8) is evaluated
+        against it alone and returns a SYMBOL-SCOPED verdict (``verdict.symbol`` set) — it
+        halts new entries on that symbol only, never the whole book. All other breakers are
+        global. With ``symbol=None`` the per-symbol breaker is skipped (nothing to scope)."""
         # 1) Manual kill switch (Section 2.2) — highest priority halt.
         if self.kill_switch is not None and self.kill_switch.engaged():
             return BreakerVerdict(True, "kill_switch_engaged")
@@ -105,16 +113,19 @@ class CircuitBreakers:
                 True, f"funding_breaker({fb:.4f}>={self.cfg.breakers.funding_breaker_limit})"
             )
 
-        # 8) Per-symbol loss breaker → halt only the offending symbol.
-        if inp.equity > 0:
-            for sym, pnl in inp.per_symbol_pnl.items():
-                loss = (-pnl / inp.equity) if pnl < 0 else 0.0
-                if loss >= self.cfg.breakers.per_symbol_loss_limit:
-                    return BreakerVerdict(
-                        True,
-                        f"per_symbol_loss[{sym}]({loss:.4f}>="
-                        f"{self.cfg.breakers.per_symbol_loss_limit})",
-                    )
+        # 8) Per-symbol loss breaker → halt only the offending symbol (M8: symbol-scoped —
+        #    checked against the CANDIDATE's symbol only, so one bleeding symbol blocks its own
+        #    new entries while the rest of the book keeps trading).
+        if symbol is not None and inp.equity > 0:
+            pnl = inp.per_symbol_pnl.get(symbol, 0.0)
+            loss = (-pnl / inp.equity) if pnl < 0 else 0.0
+            if loss >= self.cfg.breakers.per_symbol_loss_limit:
+                return BreakerVerdict(
+                    True,
+                    f"per_symbol_loss[{symbol}]({loss:.4f}>="
+                    f"{self.cfg.breakers.per_symbol_loss_limit})",
+                    symbol=symbol,
+                )
 
         # 9) Abnormal-slippage cooldown.
         if self.cfg.breakers.abnormal_slippage_cooldown and inp.abnormal_slippage_active:

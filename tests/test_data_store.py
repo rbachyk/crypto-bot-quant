@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+
 from src.data.schema import OHLCV, SeriesKey
 from src.data.store import SeriesStore
 
@@ -72,6 +76,66 @@ def test_delete_range(tmp_path) -> None:
     store.write(KEY, [_row(ts) for ts in (0, 60_000, 120_000, 180_000)])
     assert store.delete_range(KEY, 60_000, 180_000) == 2
     assert [r["ts"] for r in store.read(KEY)] == [0, 180_000]
+
+
+# --------------------------------------------------------------------------- #
+# M18: concurrent writers must not lose rows (per-month flock + unique tmps)   #
+# --------------------------------------------------------------------------- #
+def _writer_process(args: tuple[str, int, int]) -> int:
+    """Top-level worker (picklable for spawn): write ``n`` rows starting at ``offset_ts``,
+    interleaved on a 2×60s grid, in many small batches to maximise merge interleaving."""
+    root, offset_ts, n = args
+    store = SeriesStore(Path(root))
+    for i in range(n):
+        store.write(KEY, [_row(offset_ts + i * 120_000)])
+    return n
+
+
+def test_concurrent_processes_writing_disjoint_rows_both_survive(tmp_path) -> None:
+    """Two PROCESSES writing disjoint rows to the SAME series-month: pre-fix, both read the
+    same ``existing``, both rewrote the month file, and the last replace() silently dropped
+    the other's rows. The per-month lock serializes the read-merge-replace, so every row
+    from both writers must survive."""
+    n = 30
+    with ProcessPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(_writer_process, [(str(tmp_path), 0, n), (str(tmp_path), 60_000, n)])
+        )
+    assert results == [n, n]
+    store = SeriesStore(tmp_path)
+    ts = [r["ts"] for r in store.read(KEY)]
+    assert ts == sorted(set(range(0, n * 120_000, 60_000)))  # all 2n rows, none lost
+
+
+def test_concurrent_threads_writing_disjoint_rows_both_survive(tmp_path) -> None:
+    """Same invariant across THREADS (flock acquisitions on separate file descriptions
+    exclude each other within one process too)."""
+    store = SeriesStore(tmp_path)
+    n = 30
+    errors: list[Exception] = []
+
+    def work(offset_ts: int) -> None:
+        try:
+            for i in range(n):
+                store.write(KEY, [_row(offset_ts + i * 120_000)])
+        except Exception as exc:  # noqa: BLE001 - surface thread failures in the assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work, args=(off,)) for off in (0, 60_000)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    ts = [r["ts"] for r in store.read(KEY)]
+    assert ts == sorted(set(range(0, n * 120_000, 60_000)))
+
+
+def test_write_leaves_no_temp_files(tmp_path) -> None:
+    store = SeriesStore(tmp_path)
+    store.write(KEY, [_row(0), _row(60_000)])
+    store.write(KEY, [_row(120_000)])
+    assert list(tmp_path.rglob("*.tmp")) == []
 
 
 def test_month_partitioning(tmp_path) -> None:

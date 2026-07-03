@@ -92,6 +92,7 @@ class StoreReader(FeatureDataReader):
         end_ms: int,
         *,
         oi_timeframe: str | None = None,
+        funding_lookback_ms: int = 0,
     ) -> None:
         self.store = store
         self.exchange_id = exchange_id
@@ -102,6 +103,11 @@ class StoreReader(FeatureDataReader):
         self.oi_timeframe = oi_timeframe or base_timeframe
         self.start_ms = start_ms
         self.end_ms = end_ms
+        # Extra funding history read BEFORE start_ms (typically funding_z's rolling lookback),
+        # so the fixed-length funding_z window is fully populated from the first feature row —
+        # its value at a given ts then depends only on the lake, never on where the run window
+        # starts. Read-only history: bars/engine windows are untouched.
+        self.funding_lookback_ms = max(0, int(funding_lookback_ms))
 
     def _tf_for(self, data_type: str) -> str:
         if data_type == FUNDING:
@@ -121,7 +127,10 @@ class StoreReader(FeatureDataReader):
         # observable at the LAST decision time (= end_ms) sits at ts == end_ms — one stamp
         # past the [start, end) bar window. ``_asof`` still caps every row at decision_ts,
         # so nothing beyond a decision boundary is ever read (no look-ahead).
-        return self.store.read(key, self.start_ms, self.end_ms + 1)
+        start = self.start_ms
+        if data_type == FUNDING and self.funding_lookback_ms:
+            start = max(0, start - self.funding_lookback_ms)  # funding_z rolling warm-up
+        return self.store.read(key, start, self.end_ms + 1)
 
 
 class TruncatedReader(FeatureDataReader):
@@ -224,8 +233,15 @@ def _asof(
     return cur, prev
 
 
-def _asof_history(samples: list[dict], field_name: str, decision_ts: int) -> list[float]:
-    return [float(r[field_name]) for r in samples if r["ts"] <= decision_ts]
+def _asof_window_history(
+    samples: list[dict], field_name: str, decision_ts: int, window_ms: int
+) -> list[float]:
+    """Values of samples inside the FIXED trailing window ``(decision_ts - window_ms,
+    decision_ts]``. Deliberately not an expanding history anchored at the run's window
+    start: the result depends only on absolute time, so a statistic over it scores the same
+    symbol/ts identically regardless of the run window's depth (reproducibility + parity)."""
+    lo = decision_ts - window_ms
+    return [float(r[field_name]) for r in samples if lo < r["ts"] <= decision_ts]
 
 
 def _asof_row(samples: list[dict], decision_ts: int) -> dict | None:
@@ -313,8 +329,18 @@ def compute_features(symbol: str, reader: FeatureDataReader, cfg: FeatureConfig)
             premium = 0.0
         fund_row = _asof_row(funding, decision_ts)
         funding_rate = float(fund_row["funding_rate"]) if fund_row is not None else 0.0
-        fund_hist = _asof_history(funding, "funding_rate", decision_ts)
-        if len(fund_hist) >= 3:
+        # funding_z: z-score of the current rate against a FIXED-LENGTH rolling window of
+        # trailing settlements (config: funding_z.lookback_days), NOT an expanding window
+        # anchored at the run's window start — expanding made the same symbol/ts score
+        # differently per run-window depth (breaking reproducibility and backtest↔live
+        # parity for funding_carry, which ranks by this feature). Warm-up: with fewer than
+        # funding_z.min_samples settlements in the window the feature is UNAVAILABLE and
+        # stays at the neutral 0.0 sentinel rather than being z-scored against a handful
+        # of points (same convention as premium without mark/index samples).
+        fund_hist = _asof_window_history(
+            funding, "funding_rate", decision_ts, cfg.funding_z_lookback_ms
+        )
+        if len(fund_hist) >= max(2, cfg.funding_z_min_samples):
             f_std = _std(fund_hist)
             f_mean = sum(fund_hist) / len(fund_hist)
             funding_z = (funding_rate - f_mean) / f_std if f_std > 0 else 0.0

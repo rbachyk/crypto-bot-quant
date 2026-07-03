@@ -314,7 +314,7 @@ def check_queue(settings: Settings) -> list[Criterion]:
     # Run the enqueue/consume/cancel probe on an ISOLATED redis DB so a running stack's
     # workers (`make docker-up`, db 0) can't consume the probe jobs mid-check and flake the
     # gate. The reachability check above already proves the production redis server works.
-    probe_url = settings.redis_url.rsplit("/", 1)[0] + "/15"
+    probe_url = _redis_probe_url(settings.redis_url)
     probe_client = redis.Redis.from_url(probe_url, decode_responses=True)
     queue = JobQueue(settings, redis_client=probe_client)
     worker = Worker(settings, redis_client=probe_client)
@@ -381,6 +381,19 @@ def check_queue(settings: Settings) -> list[Criterion]:
     except Exception as exc:  # noqa: BLE001
         out.append(Criterion.fail("retry_and_failures_visible", f"error: {exc}"))
     return out
+
+
+def _redis_probe_url(redis_url: str, db: int = 15) -> str:
+    """Derive the isolated-DB probe URL from ``redis_url`` (audit L20).
+
+    Parses the URL properly instead of ``rsplit("/", 1)`` so a URL without a
+    ``/db`` suffix (``redis://host:6379``) keeps its host/port and only the
+    path (database number) is replaced.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(redis_url)
+    return urlunsplit((parts.scheme, parts.netloc, f"/{db}", parts.query, parts.fragment))
 
 
 def _load_job(job_id: str):  # type: ignore[no-untyped-def]
@@ -516,6 +529,19 @@ def check_data_cov(settings: Settings) -> list[Criterion]:
         else Criterion.fail("manifest_complete", "manifest missing required fields")
     )
 
+    # Verification-on-use (M19): the snapshot's recorded per-series checksums must still match
+    # the live store — snapshots pin metadata, not bytes, so a delete_range + re-download inside
+    # a snapshotted window is only caught by re-verifying at consumption time.
+    try:
+        verification = platform.verify_snapshot(snapshot.snapshot_id)
+        out.append(
+            Criterion.ok("snapshot_checksums_verified", verification.summary())
+            if verification.ok
+            else Criterion.fail("snapshot_checksums_verified", verification.summary())
+        )
+    except Exception as exc:  # noqa: BLE001
+        out.append(Criterion.fail("snapshot_checksums_verified", f"error: {exc}"))
+
     # Relational dataset-version index recorded (Appendix B.4).
     try:
         from src.db.base import session_scope
@@ -538,6 +564,9 @@ def check_data_cov(settings: Settings) -> list[Criterion]:
 # --------------------------------------------------------------------------- #
 # DQ (Phase 2+)                                                                #
 # --------------------------------------------------------------------------- #
+# Stable core list of Section 23 checks, kept for DISPLAY: each always emits a
+# criterion so the dashboard shows the full check battery even when clean. The
+# gate's criteria are NOT limited to this list — see check_dq (audit M22).
 _DQ_CHECKS = [
     "missing_candles",
     "duplicates",
@@ -561,27 +590,42 @@ def check_dq(settings: Settings) -> list[Criterion]:
     """
     from src.data import DataPlatform, load_data_config
 
-    out: list[Criterion] = []
     platform = DataPlatform(settings=settings, cfg=load_data_config())
     report = platform.validate()
     path = platform.write_quality_report(report, dataset_version=None)
 
-    critical_by_check: dict[str, list[str]] = {}
-    for v in report.critical:
-        critical_by_check.setdefault(v.check, []).append(f"{v.series or 'global'}: {v.detail}")
-
-    for check in _DQ_CHECKS:
-        hits = critical_by_check.get(check)
-        if not hits:
-            out.append(Criterion.ok(check, "no critical violation"))
-        else:
-            out.append(Criterion.fail(check, "; ".join(hits[:3])))
-
+    out = _dq_criteria(report)
     out.append(
         Criterion.ok("validation_report_written", path)
         if path
         else Criterion.fail("validation_report_written", "report not written")
     )
+    return out
+
+
+def _dq_criteria(report) -> list[Criterion]:  # type: ignore[no-untyped-def]
+    """One criterion per data-quality check present in *report*.
+
+    Criteria are derived from the check names ACTUALLY present in the
+    validation report — the stable core list (display), every check the
+    validator ran, and any check name carrying a critical violation. A new
+    or renamed validator check therefore can never silently bypass the gate:
+    an unknown critical always FAILs a criterion here (audit M22).
+    """
+    out: list[Criterion] = []
+    critical_by_check: dict[str, list[str]] = {}
+    for v in report.critical:
+        critical_by_check.setdefault(v.check, []).append(f"{v.series or 'global'}: {v.detail}")
+
+    check_names = dict.fromkeys(
+        [*_DQ_CHECKS, *getattr(report, "checks_run", []), *critical_by_check]
+    )
+    for check in check_names:
+        hits = critical_by_check.get(check)
+        if not hits:
+            out.append(Criterion.ok(check, "no critical violation"))
+        else:
+            out.append(Criterion.fail(check, "; ".join(hits[:3])))
     return out
 
 
@@ -617,15 +661,8 @@ def check_meta(settings: Settings) -> list[Criterion]:
             .all()
         }
         # Detect any stale (older metadata_version) or UNVERIFIED rows for our symbols.
-        stale_or_unverified = (
-            session.query(ExchangeMetadata.symbol, ExchangeMetadata.metadata_version)
-            .filter(
-                ExchangeMetadata.exchange_id == cfg.exchange_id,
-                ExchangeMetadata.symbol.in_(symbols),
-                ExchangeMetadata.verification_status == VerificationStatus.UNVERIFIED,
-                ExchangeMetadata.metadata_version != cfg.metadata_version,
-            )
-            .count()
+        stale_or_unverified = _count_stale_or_unverified(
+            session, cfg.exchange_id, cfg.metadata_version, symbols
         )
 
         out.append(Criterion.ok("metadata_synced", f"{written} symbols at {cfg.metadata_version}"))
@@ -703,6 +740,30 @@ def check_meta(settings: Settings) -> list[Criterion]:
         },
     )
     return out
+
+
+def _count_stale_or_unverified(
+    session, exchange_id: str, metadata_version: str, symbols: list[str]
+) -> int:  # type: ignore[no-untyped-def]
+    """Count metadata rows for active symbols that are UNVERIFIED **or** on an
+    old metadata version (audit L25: the conditions are alternatives, not a
+    conjunction — a stale-but-VERIFIED row must trip ``not_stale`` too)."""
+    from sqlalchemy import or_
+
+    from src.db.models import ExchangeMetadata, VerificationStatus
+
+    return (
+        session.query(ExchangeMetadata.symbol, ExchangeMetadata.metadata_version)
+        .filter(
+            ExchangeMetadata.exchange_id == exchange_id,
+            ExchangeMetadata.symbol.in_(symbols),
+            or_(
+                ExchangeMetadata.verification_status == VerificationStatus.UNVERIFIED,
+                ExchangeMetadata.metadata_version != metadata_version,
+            ),
+        )
+        .count()
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -876,6 +937,7 @@ def check_feat(settings: Settings) -> list[Criterion]:
             data_cfg.funding_timeframe,
             data_cfg.window_start_ms,
             data_cfg.window_end_ms,
+            funding_lookback_ms=feat_cfg.funding_z_lookback_ms,  # same reader as FeatureStore
         )
         v = causal_invariance_violations(sym, reader, feat_cfg)
         violations.extend(f"{cv.symbol}:{cv.feature}@{cv.bar_ts}" for cv in v)
@@ -1264,6 +1326,11 @@ def check_wf(settings: Settings) -> list[Criterion]:
 
     rpath = write_report(settings, wf.to_dict(), kind="walk_forward")
     # Persist a summary indexed row using the full-window report for context.
+    # The persisted ``passed`` flag is the SAME verdict the gate reports for the
+    # reference walk-forward run (the criteria computed above) — computed once,
+    # used twice, so backtest_runs can never say passed=True while the WF gate
+    # FAILs on this run (audit L26).
+    gate_verdict = all(c.passed for c in out)
     full = run_engine(cfg, meta, inputs, label="wf_full").report
     persist_backtest_run(
         cfg,
@@ -1271,7 +1338,7 @@ def check_wf(settings: Settings) -> list[Criterion]:
         kind="walk_forward",
         report_path=rpath,
         settings=settings,
-        passed=wf.passed,
+        passed=gate_verdict,
         summary_extra={"walk_forward": wf.to_dict()},
     )
 

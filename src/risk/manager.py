@@ -46,8 +46,10 @@ class AccountState:
     # (paper / no account data) skips that check.
     free_margin: float | None = None
     # The would-be liquidation price for a new position on the candidate's symbol, when the venue
-    # can estimate it (real venue). When provided, the pre-trade liquidation-distance blocker
-    # refuses an entry whose liquidation sits too close; None (paper) skips the check.
+    # can estimate it. NO producer currently exists (M7, documented): exchanges report liquidation
+    # prices only for OPEN positions, so every production path passes None and the pre-trade
+    # liquidation-distance blocker is EXPLICITLY not evaluated (see manager step 4a). Kept for a
+    # future venue-side estimator; injectable in tests.
     liquidation_price: float | None = None
 
 
@@ -104,11 +106,14 @@ class RiskManager:
         equity = state.portfolio.equity
         port = state.portfolio
 
-        # 0) Portfolio circuit breakers (Section 17): a tripped breaker halts ALL
-        #    new entries — this is a block, not a per-candidate reject.
-        verdict = self.breakers.evaluate(state.breakers)
+        # 0) Portfolio circuit breakers (Section 17): a GLOBAL trip halts ALL new entries
+        #    (action "block"); the per-symbol loss breaker is SYMBOL-SCOPED (M8) — it rejects
+        #    only candidates on the offending symbol, so one bleeding symbol never halts the
+        #    whole book. The candidate's symbol is threaded in for exactly that scoping.
+        verdict = self.breakers.evaluate(state.breakers, symbol=candidate.symbol)
         if verdict.tripped:
-            return RiskDecision(False, "block", blocker=verdict.reason, reasons=(verdict.reason,))
+            action = "reject" if verdict.symbol is not None else "block"
+            return RiskDecision(False, action, blocker=verdict.reason, reasons=(verdict.reason,))
 
         # 1) Order-ownership / reconciliation conflict (Section 7/17): an unknown
         #    order means we cannot trust exchange state → halt new entries.
@@ -217,9 +222,14 @@ class RiskManager:
         if leverage > self.envelope.max_leverage + 1e-9:
             return RiskDecision(False, "reject", reasons=("leverage_exceeds_envelope",))
 
-        # 4a) Pre-trade liquidation-distance blocker (Section 17). Only when the venue supplies the
-        #     would-be liquidation price (a real account): refuse an entry whose liquidation sits
-        #     closer than min_liquidation_distance.
+        # 4a) Pre-trade liquidation-distance blocker (Section 17). EXPLICITLY NOT EVALUATED
+        #     unless the caller supplies a would-be liquidation price — and today NO producer
+        #     exists (M7, documented choice): Bybit reports a liquidation price only for OPEN
+        #     positions, never pre-trade, and estimating one from notional/equity would be wrong
+        #     under cross margin (liquidation depends on the whole account). The field is kept on
+        #     AccountState so a future venue-side estimator can wire straight in; until then this
+        #     check is honestly skipped (liquidation_price=None), not silently dead. Position
+        #     safety is meanwhile bounded by the leverage cap (3a/4) + free-margin buffer (4b).
         if state.liquidation_price is not None and not self.breakers.liquidation_distance_ok(
             candidate.entry_price, state.liquidation_price, candidate.side
         ):

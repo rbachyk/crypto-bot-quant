@@ -108,26 +108,31 @@ class ShadowPredictor:
         return [self._meta, self._regime, self._exec, self._strat, self._sym]
 
     def train(self, samples: list) -> dict[str, dict]:
-        """Train all models on labeled samples.  Returns per-model metrics."""
-        from .features import feature_names_for
+        """Train all models on labeled samples.  Returns per-model metrics.
+
+        Per-model config is ENFORCED here (audit M35):
+          * ``enabled=false`` → the model is skipped (``status="skipped"``) and
+            stays untrained;
+          * fewer samples than ``min_train_samples`` → clean skip, no sklearn
+            crash on 1-2 samples;
+          * ``test_fraction`` → a chronological hold-out is carved off before
+            fitting and out-of-sample metrics are reported alongside the
+            training metrics.
+        """
         from .labels import LabeledSample
 
         assert all(isinstance(s, LabeledSample) for s in samples), "samples must be LabeledSample"
 
-        candidates = [s.candidate for s in samples]
         labels = [s.label for s in samples]
 
         metrics: dict[str, dict] = {}
-        for model, cfg_key in (
+        for model, model_cfg in (
             (self._meta, self.cfg.meta_labeler),
             (self._exec, self.cfg.exec_quality),
             (self._strat, self.cfg.strategy_selector),
             (self._sym, self.cfg.symbol_ranker),
         ):
-            feat_names = feature_names_for(cfg_key.features) if cfg_key.features else []
-            X = build_feature_matrix(candidates, feat_names or None)
-            m = model.train(X, labels, feat_names)  # type: ignore[union-attr]
-            metrics[model.model_type] = m  # type: ignore[union-attr]
+            metrics[model.model_type] = self._train_one(model, model_cfg, samples, labels)
 
         # Regime classifier uses encoded regime index as labels for multi-class.
         _REGIME_MAP = {
@@ -143,16 +148,63 @@ class ShadowPredictor:
             "range": 0,
         }
         regime_labels = [_REGIME_MAP.get(s.candidate.regime, 0) for s in samples]
-        rc_feat = (
-            feature_names_for(self.cfg.regime_classifier.features)
-            if self.cfg.regime_classifier.features
-            else []
+        metrics["regime_classifier"] = self._train_one(
+            self._regime, self.cfg.regime_classifier, samples, regime_labels
         )
-        X_rc = build_feature_matrix(candidates, rc_feat or None)
-        m_rc = self._regime.train(X_rc, regime_labels, rc_feat)
-        metrics["regime_classifier"] = m_rc
 
         return metrics
+
+    def _train_one(
+        self,
+        model: ShadowModel,
+        model_cfg,
+        samples: list,
+        labels: list[int],
+    ) -> dict:
+        """Train one model honoring its :class:`~src.ml.config.ModelCfg` (audit M35)."""
+        if not model_cfg.enabled:
+            return {"status": "skipped", "reason": "model disabled in ML config"}
+        if len(samples) < model_cfg.min_train_samples:
+            return {
+                "status": "skipped",
+                "reason": (
+                    f"insufficient samples: n={len(samples)} < "
+                    f"min_train_samples={model_cfg.min_train_samples}"
+                ),
+            }
+
+        # Chronological hold-out per the configured test_fraction.
+        n = len(samples)
+        test_fraction = float(model_cfg.test_fraction)
+        split = max(1, int(n * (1.0 - test_fraction))) if 0.0 < test_fraction < 1.0 else n
+        order = sorted(range(n), key=lambda i: samples[i].candidate.decision_ts)
+        train_idx, test_idx = order[:split], order[split:]
+
+        train_labels = [labels[i] for i in train_idx]
+        if len(set(train_labels)) < 2:
+            return {
+                "status": "skipped",
+                "reason": "single-class training data — nothing to learn",
+            }
+
+        feat_names = feature_names_for(model_cfg.features) if model_cfg.features else []
+        candidates = [s.candidate for s in samples]
+        X = build_feature_matrix(candidates, feat_names or None)
+        X_train = [X[i] for i in train_idx]
+        m = dict(model.train(X_train, train_labels, feat_names))
+        m.setdefault("status", "trained")
+        m["test_fraction"] = test_fraction
+
+        if test_idx:
+            X_test = [X[i] for i in test_idx]
+            y_test = [labels[i] for i in test_idx]
+            preds = model.predict(X_test)
+            correct = sum(1 for p, y in zip(preds, y_test, strict=False) if p.label == y)
+            m["test_samples"] = len(test_idx)
+            m["test_accuracy"] = round(correct / len(test_idx), 4)
+        else:
+            m["test_samples"] = 0
+        return m
 
     def run(
         self,
@@ -174,16 +226,20 @@ class ShadowPredictor:
         bundles: list[ShadowBundle] = []
         log_ids: list[int] = []
 
-        # Compute feature matrices for each model.
-        def _X(feature_list: list[str]) -> list[list[float]]:
-            names = feature_names_for(feature_list) if feature_list else []
-            return build_feature_matrix(candidates, names or None)
+        # Compute feature matrices for each model. Disabled models (audit M35)
+        # produce no predictions at all — their bundle slot stays None.
+        def _predict(model: ShadowModel, model_cfg) -> list[ShadowPrediction | None]:
+            if not model_cfg.enabled:
+                return [None] * len(candidates)
+            names = feature_names_for(model_cfg.features) if model_cfg.features else []
+            X = build_feature_matrix(candidates, names or None)
+            return list(model.predict(X))
 
-        meta_preds = self._meta.predict(_X(self.cfg.meta_labeler.features))
-        regime_preds = self._regime.predict(_X(self.cfg.regime_classifier.features))
-        exec_preds = self._exec.predict(_X(self.cfg.exec_quality.features))
-        strat_preds = self._strat.predict(_X(self.cfg.strategy_selector.features))
-        sym_preds = self._sym.predict(_X(self.cfg.symbol_ranker.features))
+        meta_preds = _predict(self._meta, self.cfg.meta_labeler)
+        regime_preds = _predict(self._regime, self.cfg.regime_classifier)
+        exec_preds = _predict(self._exec, self.cfg.exec_quality)
+        strat_preds = _predict(self._strat, self.cfg.strategy_selector)
+        sym_preds = _predict(self._sym, self.cfg.symbol_ranker)
 
         for i, cand in enumerate(candidates):
             bundle = ShadowBundle(

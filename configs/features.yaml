@@ -13,7 +13,12 @@
 version: 1
 
 features:
-  feature_set_version: feat_0001
+  # feat_0002: funding_z switched from an expanding z-score (anchored at the run's window
+  # start, so the same symbol/ts scored differently per run-window depth) to a fixed-length
+  # rolling window over the trailing `funding_z.lookback_days` of settlements, with a
+  # `min_samples` warm-up below which the feature is unavailable (neutral 0.0).
+  # funding_carry lake-validation numbers shift under feat_0002 — re-validate.
+  feature_set_version: feat_0002
 
   # The bar timeframe features are computed on (must be one of the OHLCV TFs in
   # configs/data.yaml). Point-in-time series (mark/index/funding/OI) are joined
@@ -35,3 +40,11 @@ features:
   leakage:
     synthetic_bars: 4000
     max_synthetic_expectancy_z: 4.0
+
+  # funding_z rolling z-score window (fixed length — identical in backtest and live).
+  # lookback_days bounds the trailing settlement window; min_samples is the warm-up
+  # floor below which funding_z is unavailable (neutral 0.0) instead of being z-scored
+  # against a handful of points. 30 days ≈ 90 settlements at the 8h base interval.
+  funding_z:
+    lookback_days: 30
+    min_samples: 30

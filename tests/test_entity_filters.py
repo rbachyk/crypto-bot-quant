@@ -88,3 +88,30 @@ def test_overview_renders_scope_selector(client: TestClient) -> None:
     text = client.get("/", auth=_AUTH).text
     assert "All strategies" in text and "All sessions" in text
     assert 'name="session"' in text and 'name="strategy"' in text
+
+
+def test_total_funding_paid_summed_from_trades() -> None:
+    """M29: per-trade funding (COST convention: >0 = paid, <0 = carry earned — see
+    src.paper.engine) must roll up into total_funding_paid; the stats API and the per-symbol
+    Costs card previously always reported 0.0, even for funding_carry."""
+    sid = "ef_session_funding"
+    with session_scope() as s:
+        s.query(PaperTradeRecord).filter_by(session_id=sid).delete()
+        s.add(
+            PaperTradeRecord(
+                session_id=sid, trade_id="f0", symbol="BTC/USDT:USDT",
+                strategy="funding_carry", side=1, pnl=10.0, pnl_r=1.0, funding=1.25,
+            )
+        )
+        s.add(
+            PaperTradeRecord(
+                session_id=sid, trade_id="f1", symbol="ETH/USDT:USDT",
+                strategy="funding_carry", side=-1, pnl=5.0, pnl_r=0.5, funding=-0.25,
+            )
+        )
+    try:
+        st = compute_trading_stats(resolve_window("all", None, None), session_id=sid)
+        assert st.total_funding_paid == 1.0  # 1.25 paid − 0.25 earned
+    finally:
+        with session_scope() as s:
+            s.query(PaperTradeRecord).filter_by(session_id=sid).delete()

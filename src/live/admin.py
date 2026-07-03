@@ -12,10 +12,13 @@ button gives immediate, visible feedback.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy import delete, func, select
 
+from src.config import Settings, get_settings
 from src.db.base import session_scope
 from src.db.models import (
     DecisionLog,
@@ -38,7 +41,7 @@ def _scope_env(query, model, env: str):
     """Scope a query on ``model`` to one environment by session_id — the SAME definition the
     dashboard stats use: ``paper`` = NOT a demo/testnet/live (or self-test) session; else
     ``{env}:`` prefix. Self-test runs are excluded from ``paper`` so Reset Paper does not also
-    delete them (they're not paper trading, and stats already exclude them — keep scopes aligned)."""
+    delete them (not paper trading, and stats already exclude them — keep scopes aligned)."""
     if not env or env == "all":
         return query
     if env == "paper":
@@ -85,6 +88,34 @@ def summarize_env_stats(env: str = "demo") -> EnvStatsSummary:
     return EnvStatsSummary(env, *counts)
 
 
+def archive_env_stats(env: str, settings: Settings | None = None) -> str | None:
+    """Export every persisted row for ``env`` (history tables + open positions) to a timestamped
+    JSON file under ``<backup_path>/env_resets/`` and return its path.
+
+    Used before a LIVE reset so the trade history and decision logs (the compliance record) are
+    never destroyed outright — a reset of real-money history archives first, then deletes.
+    Returns None when the environment has no rows (nothing to archive)."""
+    settings = settings or get_settings()
+    dump: dict[str, list[dict]] = {}
+    with session_scope() as db:
+        for model in (*_SESSION_TABLES, OpenPosition):
+            rows = db.execute(_scope_env(select(model), model, env)).scalars().all()
+            dump[model.__tablename__] = [
+                {c.key: getattr(r, c.key) for c in model.__table__.columns} for r in rows
+            ]
+    if not any(dump.values()):
+        return None
+    out_dir = settings.backup_path / "env_resets"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+    path = out_dir / f"{env}_reset_{stamp}.json"
+    path.write_text(
+        json.dumps({"env": env, "archived_at": stamp, "tables": dump}, indent=2, default=str),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
 def reset_env_stats(env: str = "demo") -> EnvStatsSummary:
     """Delete every persisted row for one environment and return what was removed.
 
@@ -95,9 +126,9 @@ def reset_env_stats(env: str = "demo") -> EnvStatsSummary:
     with session_scope() as db:
         for model in _SESSION_TABLES:
             db.execute(_scope_env(delete(model), model, env))
-        # Also clear the env's LIVE open-position rows. They're transient display state (not history,
-        # so not counted in the summary), but a reset must drop them too — otherwise stale legs from
-        # a prior/crashed run linger on the dashboard forever (open_positions isn't auto-cleared on a
-        # hard kill). A running session simply rewrites its own rows on the next tick.
+        # Also clear the env's LIVE open-position rows. They're transient display state (not
+        # history, so not counted in the summary), but a reset must drop them too — otherwise
+        # stale legs from a prior/crashed run linger on the dashboard forever (open_positions
+        # isn't auto-cleared on a hard kill). A running session rewrites its rows next tick.
         db.execute(_scope_env(delete(OpenPosition), OpenPosition, env))
     return removed

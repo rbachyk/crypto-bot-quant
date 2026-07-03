@@ -663,3 +663,118 @@ def test_ml_promo_gate_cleans_up_its_shadow_log_writes(tmp_path):
         by_name["ml_shadow_log_writes_plumbing"].detail
     )
     assert _tagged_count() == before, "gate left synthetic shadow_log rows behind"
+
+
+# --------------------------------------------------------------------------- #
+# M35 — ModelCfg.enabled / min_train_samples / test_fraction enforced          #
+# --------------------------------------------------------------------------- #
+
+
+def _cfg_with(**meta_overrides):
+    """Fresh MLConfig with the meta_labeler cfg overridden."""
+    import dataclasses
+
+    from src.ml.config import load_ml_config
+
+    cfg = load_ml_config()
+    meta = dataclasses.replace(cfg.meta_labeler, **meta_overrides)
+    return dataclasses.replace(cfg, meta_labeler=meta)
+
+
+def test_disabled_model_skipped_in_train_and_run():
+    """M35: enabled=false → no training, no predictions, honest skip status."""
+    cfg = _cfg_with(enabled=False)
+    predictor = ShadowPredictor.from_config(cfg)
+    samples = _make_reference(n_good=30, n_bad=20, n_neutral=10)
+    metrics = predictor.train(samples)
+
+    assert metrics["meta_labeler"]["status"] == "skipped"
+    assert "disabled" in metrics["meta_labeler"]["reason"]
+    assert predictor._meta.is_trained is False
+    # Other (enabled) models still trained.
+    assert metrics["exec_quality"].get("status") == "trained"
+
+    from src.config import get_settings
+
+    result = predictor.run(
+        [s.candidate for s in samples[:5]], settings=get_settings(), write_to_db=False
+    )
+    assert all(b.meta_label is None for b in result.bundles)
+    assert all(b.exec_quality is not None for b in result.bundles)
+
+
+def test_min_train_samples_prevents_sklearn_crash():
+    """M35: 1-2 samples must be a clean skip, not an sklearn raise."""
+    predictor = _make_predictor()
+    samples = _make_reference(n_good=1, n_bad=1, n_neutral=0)  # 2 samples < 30
+    metrics = predictor.train(samples)  # must not raise
+    for mtype in (
+        "meta_labeler",
+        "regime_classifier",
+        "exec_quality",
+        "strategy_selector",
+        "symbol_ranker",
+    ):
+        assert metrics[mtype]["status"] == "skipped"
+        assert "insufficient samples" in metrics[mtype]["reason"]
+    assert predictor._meta.is_trained is False
+
+
+def test_configured_test_fraction_used():
+    """M35: the model's test_fraction carves a hold-out and reports OOS metrics."""
+    cfg = _cfg_with(test_fraction=0.5)
+    predictor = ShadowPredictor.from_config(cfg)
+    samples = _make_reference(n_good=30, n_bad=20, n_neutral=10)  # 60 samples
+    metrics = predictor.train(samples)
+
+    meta = metrics["meta_labeler"]
+    assert meta["test_fraction"] == 0.5
+    assert meta["test_samples"] == 30  # half held out
+    assert meta["train_samples"] == 30  # trained on the other half
+    assert 0.0 <= meta["test_accuracy"] <= 1.0
+    # Default 0.25 fraction on another model in the same run.
+    assert metrics["exec_quality"]["test_samples"] == 15
+
+
+def test_single_class_training_data_skipped():
+    """M35: a train split with one label class skips cleanly instead of raising."""
+    predictor = _make_predictor()
+    samples = _make_reference(n_good=0, n_bad=40, n_neutral=0)  # all label=0
+    metrics = predictor.train(samples)
+    assert metrics["meta_labeler"]["status"] == "skipped"
+    assert "single-class" in metrics["meta_labeler"]["reason"]
+
+
+# --------------------------------------------------------------------------- #
+# L33 — train_test_split sorts by decision_ts (temporal leakage guard)          #
+# --------------------------------------------------------------------------- #
+
+
+def test_train_test_split_sorts_by_decision_ts():
+    """L33 regression: an unsorted batch must be re-ordered chronologically so
+    the test split is strictly the most-recent samples."""
+    samples = _make_reference(n_good=20, n_bad=15, n_neutral=15)
+    shuffled = list(reversed(samples))  # deliberately break time order
+
+    train, test = train_test_split(shuffled, test_fraction=0.25, seed=42)
+    max_train_ts = max(s.candidate.decision_ts for s in train)
+    min_test_ts = min(s.candidate.decision_ts for s in test)
+    assert max_train_ts < min_test_ts, "test split must be strictly later than train"
+
+    # Same result regardless of input order (deterministic chronological split).
+    train2, test2 = train_test_split(samples, test_fraction=0.25, seed=42)
+    assert [s.candidate.decision_ts for s in train] == [
+        s.candidate.decision_ts for s in train2
+    ]
+
+
+def test_reference_dataset_timestamps_follow_shuffled_order():
+    """The synthetic reference dataset must stay class-balanced under the
+    chronological sort: timestamps are assigned AFTER the shuffle."""
+    samples = _make_reference(n_good=20, n_bad=15, n_neutral=15)
+    ts = [s.candidate.decision_ts for s in samples]
+    assert ts == sorted(ts)  # list order == chronological order
+    # Both halves contain positive and negative labels (balance preserved).
+    half = len(samples) // 2
+    assert 0 < sum(s.label for s in samples[:half]) < half
+    assert 0 < sum(s.label for s in samples[half:]) <= half

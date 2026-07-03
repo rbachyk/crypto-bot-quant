@@ -12,6 +12,10 @@
 version: 1
 
 universe:
+  # Policy metadata only: universe versions are stamped with this id. Series lookups
+  # (OHLCV/spread/funding/OI) always use the DATA config's exchange_id — the single
+  # source of truth for where the lake data lives — so this value drifting from
+  # data.yaml/data.bybit.yaml cannot silently empty every filter metric.
   exchange_id: skeleton
   # Policy version (Section 4). The Universe Manager additionally stamps each
   # build with a content-addressed snapshot id `univ_0001_<hash>` so identical
@@ -26,7 +30,11 @@ universe:
     - "ETH/USDT:USDT"
     - "SOL/USDT:USDT"
 
-  # The timeframe used to evaluate volume / history / missing-data filters.
+  # The timeframe used to evaluate volume / history / missing-data filters. It must be
+  # one of the data config's owned OHLCV timeframes; if it is not (e.g. this "1m" against
+  # the Bybit lake's 5m/1h/4h), the evaluator falls back to the data config's
+  # base_timeframe with a logged warning — evaluating on a timeframe the lake does not
+  # own would score every symbol's notional/history/age as 0.
   eval_timeframe: "1m"
 
   # Default universe filters (Section 9 "Default Universe Filters"). Thresholds

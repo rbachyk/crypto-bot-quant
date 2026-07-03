@@ -86,6 +86,13 @@ data:
     as_of: now
     duration_hours: 48000 # ~5.5 years → back to ~Jan 2021
 
+  # Snapshot retention: with `as_of: now` every hourly build mints a NEW dataset version, so
+  # rows/dirs/quality-reports grow without bound. The data-platform job keeps the newest N
+  # snapshots of this config's fingerprint (data_version + exchange_id) plus any snapshot still
+  # referenced by backtest_runs / feature builds / the model registry, and prunes the rest
+  # (lake dir + dataset_versions row + quality reports together). <= 0 disables pruning.
+  snapshot_keep_last: 10
+
   validation:
     # Tolerate scattered missing candles over the multi-year window (exchange-maintenance gaps):
     # up to this many missing per series is a non-blocking WARNING, not a FAILED snapshot. The

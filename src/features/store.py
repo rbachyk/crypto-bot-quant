@@ -69,6 +69,7 @@ class FeatureStore:
             funding_timeframe=self.data_cfg.funding_timeframe,
             start_ms=self.data_cfg.window_start_ms,
             end_ms=self.data_cfg.window_end_ms,
+            funding_lookback_ms=self.feat_cfg.funding_z_lookback_ms,
         )
 
     def compute_all(self, symbols: list[str]) -> dict[str, FeatureFrame]:

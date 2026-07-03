@@ -445,9 +445,11 @@ class LiveLoop:
         ``bar_iv`` (ms) pins the bar interval used by the time-stops; pass the configured
         timeframe so a single anomalous decision-ts gap can't latch a tiny interval."""
         # Authoritative bar interval (the configured timeframe) when given — the spacing inference
-        # below is only a fallback for callers that don't know it.
+        # below is only a fallback for callers that don't know it. Threaded into the engine too
+        # (L10) so trade exit_ts horizons are counted in THIS timeframe's bars, not 1m bars.
         if bar_iv > 0:
             self._bar_iv = bar_iv
+            self.engine.set_bar_interval(bar_iv)
         self._price_of = price_of  # fallback exit mark for exchange-closed positions (H7)
         session = self.engine.new_session(f"{self.env_label}:{session_name}")
         if on_session_start is not None:
@@ -655,11 +657,15 @@ def run_replay_session(
     tf = timeframe or _resolve_live_timeframe(
         settings, data_cfg, candidate_id, active_ids=active_ids
     )
-    # Real-money mode is bounded by the activation guard (gates + sign-off + caps).
+    # Real-money mode is bounded by the activation guard (gates + sign-off + caps). Its order
+    # budget persists across restarts (M9) via the live env's risk-state store.
     if guard is None and mode == "live":
         from src.live.guard import LiveActivationGuard
+        from src.risk.state import RiskStateStore
 
-        guard = LiveActivationGuard(settings)
+        guard = LiveActivationGuard(
+            settings, state_store=RiskStateStore(settings, env="live")
+        )
 
     from src.data.schema import timeframe_ms
 
@@ -720,6 +726,14 @@ def run_replay_session(
             mode=mode, settings=settings, guard=guard,
             data_manager=data_manager, kill_switch=kill_switch,
         )
+    # M9/M10: any real-venue session persists its breaker state (tripped manual-reset halts,
+    # calendar loss-window anchors, peak equity, loss streak) keyed by trading environment, so a
+    # restart restores the halt/windows instead of silently clearing them. Cleared only via the
+    # explicit operator reset (`qbot risk-reset --env <env>`). Offline paper stays ephemeral.
+    if mode != "paper":
+        from src.risk.state import RiskStateStore
+
+        loop.engine.attach_state_store(RiskStateStore(settings, env=loop.env_label))
     # Accrue funding on open positions in PAPER mode (parity with the backtest, which charges
     # funding every funding timestamp, and with the real exchange). A real venue debits/credits
     # funding itself — reflected in account equity — so only wire the simulated source for paper.

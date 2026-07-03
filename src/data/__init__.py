@@ -15,7 +15,12 @@ from src.data.gaps import GapReport, find_gaps
 from src.data.ingest import Ingestor
 from src.data.platform import DataPlatform, PlatformRun
 from src.data.schema import SeriesKey
-from src.data.snapshot import SnapshotResult, build_dataset_version
+from src.data.snapshot import (
+    SnapshotResult,
+    SnapshotVerification,
+    build_dataset_version,
+    verify_snapshot,
+)
 from src.data.source import DataSource, DeterministicSource, get_data_source
 from src.data.store import SeriesStore
 from src.data.validation import DataQualityReport, DataValidator
@@ -34,9 +39,11 @@ __all__ = [
     "SeriesKey",
     "SeriesStore",
     "SnapshotResult",
+    "SnapshotVerification",
     "build_dataset_version",
     "compute_coverage",
     "find_gaps",
     "get_data_source",
     "load_data_config",
+    "verify_snapshot",
 ]

@@ -83,6 +83,10 @@ class DataConfig:
     # validation/backtests load them instantly instead of rebuilding (~hours on 4h, days on 5m).
     # ``None`` ⇒ pre-build every decision timeframe; set a subset to skip the slow ones till needed.
     prebuild_input_timeframes: list[str] | None = None
+    # Snapshot retention: with ``as_of: now`` every hourly run mints a NEW dataset version, so
+    # rows/dirs/reports grow without bound. Keep the newest N per config fingerprint (plus any
+    # referenced by backtest_runs / feature builds / model registry); <= 0 disables pruning.
+    snapshot_keep_last: int = 10
 
     @property
     def prebuild_timeframes(self) -> list[str]:
@@ -184,4 +188,5 @@ def load_data_config(path: str | None = None, *, as_of_ms: int | None = None) ->
             if data.get("prebuild_input_timeframes")
             else None
         ),
+        snapshot_keep_last=int(data.get("snapshot_keep_last", 10)),
     )

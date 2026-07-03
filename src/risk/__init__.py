@@ -12,6 +12,7 @@ from src.risk.config import BreakerConfig, RiskConfig, load_risk_config
 from src.risk.envelope import HARD_CEILINGS, RiskEnvelope
 from src.risk.manager import AccountState, RiskDecision, RiskManager
 from src.risk.portfolio import PortfolioState, Position
+from src.risk.state import RiskStateStore
 
 __all__ = [
     "HARD_CEILINGS",
@@ -27,4 +28,5 @@ __all__ = [
     "AccountState",
     "RiskDecision",
     "RiskManager",
+    "RiskStateStore",
 ]

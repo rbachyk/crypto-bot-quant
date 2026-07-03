@@ -901,12 +901,18 @@ def check_backup_phase13(settings: Settings) -> list[Criterion]:
     import shutil
 
     tools = ("psql", "pg_restore", "createdb")
-    if not all(shutil.which(t) for t in tools):
+    missing_tools = [t for t in tools if not shutil.which(t)]
+    if missing_tools:
+        # A backup without a TESTED restore FAILS (gates.yaml BACKUP pass
+        # condition) — being unable to run the restore is not a pass (audit M23).
         out.append(
-            Criterion.ok(
+            Criterion.fail(
                 "restore_test_executed",
-                "postgres client tools unavailable here — restore not executed "
-                "(run `make restore-test` where psql/pg_restore exist)",
+                f"postgres client tools missing ({', '.join(missing_tools)}) — the restore "
+                "test could not run, so this backup is UNTESTED. Remediation: install the "
+                "postgres client tools (e.g. `brew install libpq` / `apt install "
+                "postgresql-client`) or run `make restore-test` on a host that has them, "
+                "then re-run gate:backup.",
             )
         )
     elif not restore_script.exists():
@@ -933,11 +939,15 @@ def check_backup_phase13(settings: Settings) -> list[Criterion]:
                     )
                 )
             elif db_down:
+                # Unreachable DB means the restore was NOT tested — fail closed
+                # (audit M23: "backup without tested restore FAILS").
                 out.append(
-                    Criterion.ok(
+                    Criterion.fail(
                         "restore_test_executed",
-                        "database unreachable here — restore not executed (start the stack to "
-                        "verify the restore)",
+                        "database unreachable — the restore test could not run, so this "
+                        "backup is UNTESTED. Remediation: start the database stack "
+                        "(`make docker-up`), then re-run gate:backup so the restore is "
+                        f"actually verified. Output: {tail[-200:]}",
                     )
                 )
             else:
@@ -1262,13 +1272,25 @@ def check_mon_phase13(settings: Settings) -> list[Criterion]:
     except Exception as exc:  # noqa: BLE001
         out.append(Criterion.fail("alert_transports_configured", f"raised: {exc}"))
 
-    # Keep the Phase 7 dashboard panel check (backward compat).
-    import contextlib
-
-    with contextlib.suppress(ImportError, Exception):
+    # Phase 7 dashboard panel coverage — this call is the ONLY wiring of
+    # src/gates/phase7.py, so it must never be silently swallowed: a MON pass
+    # with zero panel coverage is not a pass (audit M24). Any failure to run
+    # the panel check becomes an explicit FAILED criterion.
+    try:
         from src.gates.phase7 import check_mon_dashboard_panels
 
         out.extend(check_mon_dashboard_panels(settings))
+    except Exception as exc:  # noqa: BLE001
+        out.append(
+            Criterion.fail(
+                "mon_phase7_panels",
+                f"dashboard panel check could not run: {type(exc).__name__}: {exc} — "
+                "MON must not pass with zero panel coverage. Remediation: fix the "
+                "dashboard app/import error and re-run gate:mon.",
+            )
+        )
+
+    import contextlib
 
     with contextlib.suppress(Exception):
         _write_phase13_report(settings, "mon")
@@ -1429,9 +1451,10 @@ def check_live(settings: Settings) -> list[Criterion]:
     5. live_5_alerts_e2e            — alerts deliver end-to-end
     6. live_6_strategy_validated    — strategy version is frozen (non-empty)
     7. live_7_metadata_config       — exchange metadata version set
-    8. live_9_frozen_versions       — all critical versions frozen + rollback plan present
-    9. live_10_operator_signoff     — operator sign-off file exists and acknowledged
-    10. live_safety_final           — ENABLE_LIVE_TRADING=false (final safety gate)
+    8. live_8_paper_b               — latest persisted PAPER-B gate run PASSED
+    9. live_9_frozen_versions       — all critical versions frozen + rollback plan present
+    10. live_10_operator_signoff    — operator sign-off file exists and acknowledged
+    11. live_safety_final           — ENABLE_LIVE_TRADING=false (final safety gate)
     """
     out: list[Criterion] = []
 
@@ -1693,6 +1716,47 @@ def check_live(settings: Settings) -> list[Criterion]:
             "METADATA_VERSION is empty; sync and verify exchange metadata",
         )
     )
+
+    # ------------------------------------------------------------------ #
+    # LIVE-8: Paper Phase B passed (Appendix A LIVE-8)                     #
+    # ------------------------------------------------------------------ #
+    # Mechanical check against the persisted gate results: the most recent
+    # PAPER-B gate run must be PASSED. The runner's dependency chain (LIVE-0)
+    # enforces this too when the full chain runs, but the criterion is emitted
+    # explicitly so LIVE-8 is never a silent gap (audit L24).
+    try:
+        from src.db.base import session_scope
+        from src.db.models import GateResult, GateStatus
+
+        with session_scope() as session:
+            latest = (
+                session.query(GateResult)
+                .filter(GateResult.gate_id == "PAPER-B")
+                .order_by(GateResult.id.desc())
+                .first()
+            )
+            latest_status = latest.status if latest is not None else None
+            latest_at = latest.started_at.isoformat() if latest is not None else None
+        out.append(
+            Criterion.ok(
+                "live_8_paper_b",
+                f"latest PAPER-B gate run PASSED (started {latest_at})",
+            )
+            if latest_status is GateStatus.PASSED
+            else Criterion.fail(
+                "live_8_paper_b",
+                "Paper Phase B not passed: "
+                + (
+                    f"latest PAPER-B gate result is {latest_status.value!r} "
+                    f"(started {latest_at})"
+                    if latest_status is not None
+                    else "no PAPER-B gate result recorded"
+                )
+                + " — run gate:paper-b to PASS before live (see PAPER-B remediation)",
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        out.append(Criterion.fail("live_8_paper_b", f"raised: {exc}"))
 
     # ------------------------------------------------------------------ #
     # LIVE-9: Frozen versions + rollback plan                             #

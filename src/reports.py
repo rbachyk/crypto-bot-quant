@@ -29,6 +29,32 @@ REPORT_NAMES = (
     "daily_review",
 )
 
+# Rationale marker of the synthetic learner-log rows the pre-fix LEARN-PROMO-L gate fabricated
+# (see src/gates/phase13.py) — those rows are test residue, never real learner decisions, so
+# every learner report must exclude them (M26).
+_SYNTHETIC_RATIONALE_PREFIX = "approved recommendation #"
+
+
+def _online_learner_id() -> str:
+    """The online learner's id (configs/adaptation.yaml); falls back to the well-known default
+    so report generation never dies on a missing/broken adaptation config."""
+    try:
+        from src.adaptation.config import load_adaptation_config
+
+        return load_adaptation_config().learner_id
+    except Exception:  # noqa: BLE001
+        return "online_shadow_v1"
+
+
+def _rl_learner_id() -> str:
+    """The RL shadow policy's learner id (single source: src.adaptation.policies.rl_policy)."""
+    try:
+        from src.adaptation.policies.rl_policy import LEARNER_ID
+
+        return str(LEARNER_ID)
+    except Exception:  # noqa: BLE001
+        return "rl_policy_v1"
+
 
 def _write(settings: Settings, name: str, payload: dict) -> str:
     reports_dir = settings.reports_path / name
@@ -44,7 +70,10 @@ def _live_results(settings: Settings) -> dict:
 
     with session_scope() as s:
         runs = list(s.execute(select(PaperRun).order_by(desc(PaperRun.created_at))).scalars())
-        live = [r for r in runs if str(r.session_id).startswith(("live:", "testnet:"))]
+        # All real-venue environments (M27): demo is the DEFAULT real-venue env (a Bybit demo
+        # soak must show up here, not report session_count=0). Same prefix convention as
+        # src.api.stats._REAL_ENV_PREFIXES / src.live.loop.LiveLoop.env_label.
+        live = [r for r in runs if str(r.session_id).startswith(("demo:", "testnet:", "live:"))]
         return {
             "trading_mode": settings.trading_mode.value,
             "live_trading_allowed": settings.live_trading_allowed,
@@ -62,13 +91,27 @@ def _live_results(settings: Settings) -> dict:
         }
 
 
-def _learner_results(settings: Settings, *, label: str) -> dict:
+def _learner_results(settings: Settings, *, label: str, learner_ids: tuple[str, ...]) -> dict:
     from src.db.models import LearnerLog
 
     with session_scope() as s:
         rows = list(
-            s.execute(select(LearnerLog).order_by(desc(LearnerLog.ts)).limit(500)).scalars()
+            s.execute(
+                select(LearnerLog)
+                .where(LearnerLog.learner_id.in_(learner_ids))  # ONLY this layer's learner (M26)
+                .order_by(desc(LearnerLog.ts))
+                .limit(500)
+            ).scalars()
         )
+        # Drop known-synthetic rows (pre-fix LEARN-PROMO-L fabrications) so they can never
+        # inflate a shadow report's entry/applied counts.
+        rows = [
+            r
+            for r in rows
+            if not str((r.proposed_action or {}).get("rationale", "")).startswith(
+                _SYNTHETIC_RATIONALE_PREFIX
+            )
+        ]
         applied = sum(1 for r in rows if r.applied)
         rollbacks = [r.rollback_event for r in rows if r.rollback_event]
         by_mode: dict[str, int] = {}
@@ -76,6 +119,7 @@ def _learner_results(settings: Settings, *, label: str) -> dict:
             by_mode[r.mode] = by_mode.get(r.mode, 0) + 1
         return {
             "layer": label,
+            "learner_ids": list(learner_ids),
             "log_entries": len(rows),
             "applied_count": applied,  # MUST be 0 in shadow (Section 20/21)
             "by_mode": by_mode,
@@ -130,26 +174,30 @@ def generate_report(name: str, settings: Settings | None = None) -> str:
         payload = wrap_report(
             _live_results(settings),
             report_type="live",
-            methodology="Summary of live/testnet sessions (paper_runs with a live:/testnet: id) "
-            "and the live-safety configuration predicate.",
+            methodology="Summary of real-venue sessions (paper_runs with a demo:/testnet:/live: "
+            "id) and the live-safety configuration predicate.",
             limitations="Live trading is gated off by default; testnet sessions use no real funds.",
             recommendations="Progress to live only after Road to Live = 100% + operator sign-off.",
             period={"scope": "all"},
         )
     elif name == "online_learning":
         payload = wrap_report(
-            _learner_results(settings, label="online_learning"),
+            _learner_results(
+                settings, label="online_learning", learner_ids=(_online_learner_id(),)
+            ),
             report_type="online_learning",
-            methodology="Online-learner decision log; applied_count must be 0 in shadow.",
+            methodology="Online-learner decision log (this learner's rows only, synthetic gate "
+            "residue excluded); applied_count must be 0 in shadow.",
             limitations="Shadow-only — never influences live trading until promoted.",
             recommendations="Promote only via LEARN-PROMO gates + manual review.",
             period={"scope": "last 500 entries"},
         )
     elif name in ("rl_simulation", "rl_shadow"):
         payload = wrap_report(
-            _learner_results(settings, label=name),
+            _learner_results(settings, label=name, learner_ids=(_rl_learner_id(),)),
             report_type=name,
-            methodology="RL would-be decisions and bounds; shadow-only, no live influence.",
+            methodology="RL would-be decisions and bounds (the RL policy's learner rows only, "
+            "synthetic gate residue excluded); shadow-only, no live influence.",
             limitations="Shadow-only; RL is gated behind RL-SIM/RL-SHADOW.",
             recommendations="Evaluate against the RL kill-criteria before any promotion.",
             period={"scope": "last 500 entries"},
@@ -174,7 +222,11 @@ def generate_report(name: str, settings: Settings | None = None) -> str:
         )
     else:
         raise ValueError(f"unknown report name {name!r}; known: {', '.join(REPORT_NAMES)}")
-    assert not validate_report_envelope(payload)  # the envelope is always complete
+    # Real enforcement (not an assert — asserts vanish under `python -O`, L23): an incomplete
+    # envelope must never be written to reports/.
+    missing = validate_report_envelope(payload)
+    if missing:
+        raise ValueError(f"report {name!r} envelope incomplete: missing/empty {missing}")
     return _write(settings, name, payload)
 
 

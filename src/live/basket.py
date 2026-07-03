@@ -17,11 +17,15 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Iterable
 
+import structlog
+
 from src.backtest.config import BacktestConfig
 from src.backtest.engine import BacktestResult, SymbolInput, Trade
 from src.backtest.portfolio import CrossSectionalEngine
 from src.exchange.metadata import MetadataConfig
 from src.paper.session import PAPER_BASE_EQUITY, PaperSession, PaperTrade
+
+_log = structlog.get_logger("live.basket")
 
 # A snapshot: (decision_ts, {symbol: bar}, {symbol: feature_row}) for one bar across the universe.
 Snapshot = tuple[int, dict[str, dict], dict[str, dict]]
@@ -166,15 +170,48 @@ class BasketPaperLoop:
 
     def close_all(self, ts: int, bars_at: dict[str, dict], by_symbol: dict) -> None:
         """Flatten every leg at the latest bar (session end / stop). ``by_symbol`` supplies each
-        leg's SymbolInput (spread model) for the taker close, same as the rebalance path."""
+        leg's SymbolInput (spread model) for the taker close, same as the rebalance path.
+
+        M16: a leg whose symbol has NO bar this tick (halted / feed gap at session end) is
+        closed on its last KNOWN bar at-or-before ``ts`` (never a future price), with a warning
+        — and if no priceable bar exists at all it is booked at its entry price so the leg's
+        entry fee and accrued funding are still realized. Booked P&L is never silently dropped."""
         for sym, leg in list(self._holdings.items()):
             bar = bars_at.get(sym)
             sym_in = by_symbol.get(sym)
+            if bar is None and sym_in is not None:
+                bars = list(getattr(sym_in, "bars", None) or [])
+                bar = next((b for b in reversed(bars) if int(b["ts"]) <= ts), None)
+                if bar is not None:
+                    _log.warning(
+                        "basket_close_all_last_known_bar", symbol=sym,
+                        bar_ts=int(bar["ts"]), close_ts=ts,
+                    )
             if bar is not None and sym_in is not None:
                 self._equity += self.engine._close_leg(
                     leg, bar, "end_of_data", self._result, sym_in
                 )
-        self._holdings.clear()
+            else:
+                # No priceable bar at all — book the close at the entry price (gross 0) so the
+                # entry fee + accrued funding are realized instead of vaporised with the leg.
+                pnl = -leg.entry_fee - leg.funding
+                self._result.trades.append(Trade(
+                    symbol=sym, strategy=self.engine.name, side=leg.side, qty=leg.qty,
+                    entry_ts=leg.entry_ts, entry_price=leg.entry_price,
+                    exit_ts=ts, exit_price=leg.entry_price, exit_reason="close_no_price",
+                    notional=leg.notional, risk_amount=leg.risk_amount,
+                    fee=leg.entry_fee, funding=leg.funding, slippage_cost=leg.slippage_cost,
+                    pnl=pnl,
+                    pnl_r=pnl / leg.risk_amount if leg.risk_amount > 0 else 0.0,
+                    regime=leg.regime, session=leg.session,
+                    bars_held=max(0, int((ts - leg.entry_ts) // self.engine._grid_iv)),
+                ))
+                self._equity += pnl
+                _log.warning(
+                    "basket_close_all_no_price", symbol=sym, close_ts=ts,
+                    hint="no bar available — leg booked at entry price (fees+funding realized)",
+                )
+            del self._holdings[sym]
         self._flush()
         if self.on_positions is not None:
             self.on_positions([])  # session flat → clear the dashboard's open-positions panel

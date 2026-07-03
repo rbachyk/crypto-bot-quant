@@ -11,7 +11,7 @@ from src.monitoring.alerts import (
     get_alert_sink,
     reset_alert_sink,
 )
-from src.monitoring.health import ComponentHealth, HealthReport, check_health
+from src.monitoring.health import ComponentHealth, HealthReport, check_health, check_readiness
 
 __all__ = [
     "Alert",
@@ -24,6 +24,7 @@ __all__ = [
     "LogAlertSink",
     "TelegramAlertSink",
     "check_health",
+    "check_readiness",
     "get_alert_sink",
     "reset_alert_sink",
 ]

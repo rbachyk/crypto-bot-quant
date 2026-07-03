@@ -33,7 +33,10 @@ from src.adaptation.scorer import ScorerResult, ShadowDecision, score_shadow_dec
 from src.adaptation.store import (
     InMemoryLearnerStore,
     LearnerLogEntry,
+    get_db_write_failure_count,
     get_memory_sink,
+    learner_store_health,
+    reset_db_write_failure_count,
     reset_memory_sink,
     write_learner_log,
 )
@@ -81,7 +84,10 @@ __all__ = [
     # store
     "InMemoryLearnerStore",
     "LearnerLogEntry",
+    "get_db_write_failure_count",
     "get_memory_sink",
+    "learner_store_health",
+    "reset_db_write_failure_count",
     "reset_memory_sink",
     "write_learner_log",
     # versioning

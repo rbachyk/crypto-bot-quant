@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from sqlalchemy import desc, func, select
 
 from src.api.auth import require_dashboard_auth
@@ -38,46 +38,6 @@ from src.db.models import (
 )
 from src.monitoring import Alert, AlertSeverity, check_health, get_alert_sink
 from src.observability import configure_logging
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-DASHBOARD_PAGES = [
-    "Overview",
-    "Data Coverage",
-    "Universe",
-    "Jobs",
-    "Gates",
-    "Remediation Actions",
-    "Backtests",
-    "Paper Trading",
-    "Live Trading",
-    "General Statistics",
-    "Per-Symbol Statistics",
-    "Strategy Analytics",
-    "Regime Analytics",
-    "Session Analytics",
-    "Execution Quality",
-    "Risk",
-    "ML Shadow",
-    "Online Learning",
-    "RL",
-    "Reports",
-    "Approvals",
-    "System Health",
-    "Settings",
-]
-
-TIME_PERIODS = [
-    "today",
-    "yesterday",
-    "last_7d",
-    "last_30d",
-    "current_month",
-    "prev_month",
-    "custom",
-    "all",
-]
 
 _CSS = """
 <style>
@@ -736,6 +696,32 @@ def _has_active_job(job_type: str, *, strategy: str | None = None) -> bool:
     return any((j.input_params or {}).get("strategy") == strategy for j in rows)
 
 
+def _enqueue_exclusive(
+    queue: Any,
+    job_type: str,
+    params: dict,
+    *,
+    requested_by: str,
+    strategy: str | None = None,
+    conflict_detail: str,
+) -> str:
+    """Atomically check-then-enqueue a continuous-session job.
+
+    A plain ``_has_active_job`` check before ``enqueue`` is a race: two concurrent Start clicks
+    can both pass the check and double-book the same session (two loops trading the same book).
+    A short-lived Redis SETNX lock (on the queue's own client) serializes the check+enqueue
+    critical section; the loser gets the same 409 a stale-page duplicate Start would."""
+    lock_key = f"qbot:enqueue-lock:{job_type}" + (f":{strategy}" if strategy else "")
+    if not queue.redis.set(lock_key, requested_by, nx=True, ex=15):
+        raise HTTPException(status_code=409, detail=conflict_detail)
+    try:
+        if _has_active_job(job_type, strategy=strategy):
+            raise HTTPException(status_code=409, detail=conflict_detail)
+        return queue.enqueue(job_type, params, requested_by=requested_by)
+    finally:
+        queue.redis.delete(lock_key)
+
+
 def _pnl_color(v: float) -> str:
     return "#3fb950" if v >= 0 else "#f85149"
 
@@ -845,15 +831,6 @@ def _period_selector(action: str, period: str) -> str:
     return f'<div class="form-row"><label>Period</label><div class="segment">{pills}</div></div>'
 
 
-_ENV_LABELS = [
-    ("all", "All"),
-    ("paper", "Paper"),
-    ("demo", "Demo"),
-    ("testnet", "Testnet"),
-    ("live", "Live"),
-]
-
-
 def _pillset(name: str, options: list[tuple[str, str]], selected: str) -> str:
     """A radio-styled pill group inside a form (custom control; preserves state on submit)."""
     out = '<div class="pillset">'
@@ -960,30 +937,6 @@ def _kpi_row(t: Any) -> str:
     return f'<div class="kpis">{"".join(cards)}</div>'
 
 
-def _equity_svg(curve: list[float], width: int = 1120, height: int = 180) -> str:
-    """Inline SVG equity curve (no JS / external deps)."""
-    if len(curve) < 2:
-        return '<p class="meta">No trades in this period — run a paper session.</p>'
-    lo, hi = min(curve), max(curve)
-    span = (hi - lo) or 1.0
-    n = len(curve)
-    pts = " ".join(
-        f"{i / (n - 1) * (width - 8) + 4:.1f},{height - 4 - (v - lo) / span * (height - 8):.1f}"
-        for i, v in enumerate(curve)
-    )
-    base = curve[0]
-    end = curve[-1]
-    color = "#3fb950" if end >= base else "#f85149"
-    return (
-        f'<div class="chart"><svg viewBox="0 0 {width} {height}" width="100%" height="{height}" '
-        f'preserveAspectRatio="none">'
-        f'<polyline fill="none" stroke="{color}" stroke-width="1.5" points="{pts}"/>'
-        f"</svg></div>"
-        f'<p class="meta">Equity {base:,.0f} → {end:,.0f} over {n - 1} trades '
-        f"(base {base:,.0f}).</p>"
-    )
-
-
 def _breakdown_table(title: str, rows: list[dict], group_header: str) -> str:
     body = "".join(
         f"<tr><td>{_esc(r['group'])}</td><td>{r['trades']}</td>"
@@ -1037,8 +990,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.middleware("http")
     async def _csrf_guard(request: Request, call_next):  # type: ignore[no-untyped-def]
         if request.method in ("POST", "PUT", "PATCH", "DELETE"):
-            from fastapi.responses import JSONResponse
-
             sfs = request.headers.get("sec-fetch-site", "")
             if sfs in ("cross-site", "cross-origin"):
                 return JSONResponse({"detail": "cross-site request blocked (CSRF)"}, status_code=403)
@@ -1062,8 +1013,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         structlog.get_logger("api").warning(
             "route_error", path=str(request.url.path), error=str(exc)
         )
-        from fastapi.responses import JSONResponse
-
         path = request.url.path
         if path.startswith("/api") or path in ("/health", "/livez", "/readyz"):
             return JSONResponse({"detail": "internal error"}, status_code=500)
@@ -1092,6 +1041,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/livez")
     def livez() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/readyz")
+    def readyz() -> JSONResponse:
+        """Readiness: 200 only when the hard dependencies (DB + Redis) are reachable, else 503 —
+        complements /livez (process up) for orchestration traffic-gating."""
+        from src.monitoring import check_readiness
+
+        report = check_readiness(settings)
+        return JSONResponse(report.to_dict(), status_code=200 if report.healthy else 503)
 
     def _activity_strip() -> str:
         """What's running right now — explains why the numbers move (the scheduler enqueues
@@ -1145,12 +1103,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for e in get_environment_summary():
             env_name = str(e["env"])
             here = env_name == current
+            # A LIVE reset is never one-click: it raises a live_reset approval that a SECOND
+            # operator must approve, and executes as archive-then-delete (M28).
+            confirm_msg = (
+                "Request a LIVE statistics reset? Real-money history is the compliance "
+                "record: a second operator must approve, and rows are archived before deletion."
+                if env_name == "live"
+                else f"Zero all {env_name} statistics? This cannot be undone."
+            )
+            btn_label = "Request reset" if env_name == "live" else "Reset"
             reset_btn = (
                 f'<form method="post" action="/api/live/reset?env={env_name}&confirm=true" '
-                'style="display:inline" onsubmit="return confirm(\'Zero all '
-                f"{env_name} statistics? This cannot be undone.');\">"
+                f"style=\"display:inline\" onsubmit=\"return confirm('{confirm_msg}');\">"
                 '<button class="btn btn-danger" type="submit" '
-                'style="padding:2px 10px;font-size:11px">Reset</button></form>'
+                f'style="padding:2px 10px;font-size:11px">{btn_label}</button></form>'
                 if e["trades"]
                 else "—"
             )
@@ -1170,7 +1136,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             + '<p class="meta">Each environment\'s statistics are kept separate by session tag — '
             "pick one in the Environment selector above. <b>Reset</b> zeroes that environment only "
-            "(paper = everything that is not demo/testnet/live).</p></div>"
+            "(paper = everything that is not demo/testnet/live). A <b>live</b> reset requires a "
+            "second operator's approval and archives the rows before deleting.</p></div>"
         )
 
     # ----- dashboard overview (authenticated) ------------------------------ #
@@ -1742,16 +1709,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         whole per-symbol ensemble, so refuse to start a second (it would double-trade)."""
         from src.jobs import JobQueue
 
-        if _has_active_job("run_live_session"):
-            raise HTTPException(
-                status_code=409, detail="a live session is already running; stop it first"
-            )
         params = {"requested_by": user}
         if _valid_timeframe(timeframe):
             params["timeframe"] = timeframe
         if mode == "paper":  # only the offline-paper override is operator-selectable here
             params["mode"] = "paper"
-        JobQueue(settings).enqueue("run_live_session", params, requested_by=user)
+        # Atomic check+enqueue (Redis lock): two concurrent Start clicks must not double-book.
+        _enqueue_exclusive(
+            JobQueue(settings),
+            "run_live_session",
+            params,
+            requested_by=user,
+            conflict_detail="a live session is already running; stop it first",
+        )
         _audit(
             "run_live_session", target=(mode or settings.exchange_env), actor=user,
             detail={"timeframe": timeframe, "mode": mode or "env-default"},
@@ -1765,14 +1735,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         user: str = Depends(require_dashboard_auth),
     ) -> RedirectResponse:
         """Zero ONE environment's statistics (runs/trades/logs/explainability). ``env`` is one of
-        paper/demo/testnet/live; ``paper`` clears every non-(demo/testnet/live) session."""
+        paper/demo/testnet/live; ``paper`` clears every non-(demo/testnet/live) session.
+
+        ``live`` is NOT a one-click delete: real-money trade history and decision logs are the
+        compliance record, so a live reset only RAISES a pending ``live_reset`` approval here. A
+        SECOND operator must approve it (self-approval is rejected), and the approval executes as
+        archive-then-delete (rows exported under backups/env_resets first)."""
         from src.api.stats import ENVIRONMENTS
-        from src.live.admin import reset_env_stats
+        from src.live.admin import reset_env_stats, summarize_env_stats
 
         if not confirm:
             raise HTTPException(status_code=400, detail="reset requires confirm=true")
         if env not in ENVIRONMENTS:
             raise HTTPException(status_code=400, detail=f"unknown environment {env!r}")
+        if env == "live":
+            from src.approvals import request_approval
+
+            approval_id = request_approval(
+                "live_reset",
+                "live",
+                requested_by=user,
+                evidence={"rows_at_request": summarize_env_stats("live").to_dict()},
+            )
+            _audit(
+                "live_reset_requested",
+                target="live",
+                actor=user,
+                detail={"approval_id": approval_id},
+            )
+            return RedirectResponse(url="/dashboard/approvals", status_code=303)
         removed = reset_env_stats(env)
         _audit("reset_env_stats", target=env, actor=user, detail={"removed": removed.to_dict()})
         return RedirectResponse(url="/dashboard/live", status_code=303)
@@ -3134,6 +3125,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 for a in approvals
             ]
 
+    # Approval subject types where the approver MUST be a different operator than the requester
+    # (four-eyes, Section 27): activating real-money trading and destroying real-money history.
+    _FOUR_EYES_SUBJECTS = ("live_activation", "live_reset")
+
     @app.post("/api/approvals/{approval_id}/approve")
     def approve(approval_id: int, user: str = Depends(require_dashboard_auth)) -> dict:
         from datetime import UTC, datetime
@@ -3144,10 +3139,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(status_code=404, detail="approval not found")
             if approval.status is not ApprovalStatus.PENDING:
                 raise HTTPException(status_code=400, detail="approval is not pending")
+            if approval.subject_type in _FOUR_EYES_SUBJECTS and approval.requested_by == user:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"self-approval of {approval.subject_type} is not allowed: a SECOND "
+                    "operator identity must approve (four-eyes). Have another operator log in "
+                    "with their own dashboard credentials to decide this request.",
+                )
             approval.status = ApprovalStatus.APPROVED
             approval.approver = user
             approval.decided_at = datetime.now(UTC)
+            subject_type = approval.subject_type
         _audit("approval_approved", target=str(approval_id), actor=user, detail={})
+        # An approved live_reset EXECUTES here (the guarded action itself): archive the live rows
+        # (trades + decision logs — the compliance record) to backups/env_resets, then delete.
+        if subject_type == "live_reset":
+            from src.live.admin import archive_env_stats, reset_env_stats
+
+            archive_path = archive_env_stats("live", settings)
+            removed = reset_env_stats("live")
+            _audit(
+                "reset_env_stats",
+                target="live",
+                actor=user,
+                detail={
+                    "removed": removed.to_dict(),
+                    "archive": archive_path,
+                    "approval_id": approval_id,
+                },
+            )
+            return {
+                "id": approval_id,
+                "status": "approved",
+                "reset": removed.to_dict(),
+                "archive": archive_path,
+            }
         return {"id": approval_id, "status": "approved"}
 
     @app.post("/api/approvals/{approval_id}/reject")
@@ -3589,14 +3615,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         if strategy not in _cross_sectional_candidate_ids():
             raise HTTPException(status_code=400, detail=f"{strategy!r} is not a basket strategy")
-        if _has_active_job("run_basket_paper_session", strategy=strategy):
-            raise HTTPException(
-                status_code=409, detail=f"a basket session for {strategy!r} is already running"
-            )
         params: dict = {"strategy": strategy, "requested_by": user}
         if _valid_timeframe(timeframe):
             params["timeframe"] = timeframe
-        JobQueue(settings).enqueue("run_basket_paper_session", params, requested_by=user)
+        # Atomic check+enqueue (Redis lock): concurrent Starts must not double-book one strategy.
+        _enqueue_exclusive(
+            JobQueue(settings),
+            "run_basket_paper_session",
+            params,
+            requested_by=user,
+            strategy=strategy,
+            conflict_detail=f"a basket session for {strategy!r} is already running",
+        )
         _audit(
             "run_basket_paper_session", target=strategy, actor=user,
             detail={"timeframe": timeframe},

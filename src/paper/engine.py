@@ -17,6 +17,7 @@ checks; the report module formats the session for each gate's criteria.
 from __future__ import annotations
 
 import uuid
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -26,6 +27,7 @@ import structlog
 from src.config import Settings, get_settings
 from src.exchange.metadata import MetadataConfig
 from src.execution import (
+    NO_FIXED_TP_FRAC,
     ExecutionEngine,
     OwnershipPolicy,
     Reconciler,
@@ -56,6 +58,19 @@ from src.risk import (
 from src.risk.portfolio import Position
 
 _log = structlog.get_logger("paper.engine")
+
+# Abnormal-slippage breaker input (M7): observed fill slippage over a short rolling window.
+# The breaker activates when the MEAN slippage of the last _SLIP_WINDOW fills exceeds the
+# execution policy's max_slippage_frac (the same knob the per-order revalidator blocks on —
+# the breaker catches sustained observed drift the per-order estimate misses). At least
+# _SLIP_MIN_FILLS observations are required so one bad print doesn't halt the book.
+_SLIP_WINDOW = 5
+_SLIP_MIN_FILLS = 3
+
+# Breaker reasons that require a MANUAL reset (Section 2.2) — persisted via the M9 state
+# store so a restart cannot clear the halt. Cooldown-style breakers (consecutive-loss,
+# funding, abnormal-slippage) recompute from their inputs and are deliberately not latched.
+_MANUAL_RESET_BLOCKERS = ("daily_loss_limit", "max_drawdown_limit", "weekly_loss_limit")
 
 
 @dataclass(slots=True)
@@ -183,6 +198,33 @@ class PaperTradingEngine:
         self._account_equity: float | None = None
         self._session_start_equity: float | None = None
         self._peak_equity: float = 0.0
+        # Real-venue CALENDAR loss-window anchors (M10): equity at the start of the current UTC
+        # day / ISO week (Monday-anchored). bk_daily/bk_weekly = equity − anchor, so a multi-day
+        # session rolls its daily window at midnight instead of charging the whole session against
+        # today's limit, and (with the M9 store) a mid-day restart keeps the morning anchor
+        # instead of forgetting the day's losses.
+        self._rv_day_key: int | None = None
+        self._rv_week_key: int | None = None
+        self._rv_day_anchor: float | None = None
+        self._rv_week_anchor: float | None = None
+        # Consecutive realized losses (M7): incremented on every realized losing close, reset on
+        # a winner — feeds the consecutive-loss cooldown breaker, which was previously dead (its
+        # input was hardcoded 0 in every production path).
+        self._consecutive_losses: int = 0
+        # Funding actually paid (cost convention, M7): realized on closes + reset each ISO week
+        # (the funding breaker's "period"); open-position accrual is added at read time.
+        self._funding_paid_total: float = 0.0
+        self._week_start_funding: float = 0.0
+        # Observed fill slippage window (M7) → abnormal_slippage_active breaker input.
+        self._recent_slippage: deque[float] = deque(maxlen=_SLIP_WINDOW)
+        self._max_slippage_frac: float = exec_cfg.max_slippage_frac
+        # Decision-bar interval (L10): exit_ts horizons and time-stops are counted in BARS of the
+        # session's actual timeframe — set via set_bar_interval() by the live loop / lake replay;
+        # the 1m default only backs offline synthetic tests that never declare a timeframe.
+        self._bar_interval_ms: int = 60_000
+        # Optional M9 state store (attached for real-venue sessions): persists tripped halts,
+        # calendar anchors, peak equity and the loss streak across restarts.
+        self._state_store = None
 
     # ------------------------------------------------------------------ #
     # Public API                                                            #
@@ -190,6 +232,90 @@ class PaperTradingEngine:
 
     def new_session(self, session_id: str | None = None) -> PaperSession:
         return PaperSession(session_id=session_id or str(uuid.uuid4()))
+
+    def set_bar_interval(self, interval_ms: int) -> None:
+        """Pin the session's decision-bar interval (L10) so hold_bars horizons (exit_ts,
+        time-stops) are counted in THIS session's bars, not hardcoded 1-minute bars."""
+        if interval_ms > 0:
+            self._bar_interval_ms = int(interval_ms)
+
+    def attach_state_store(self, store) -> None:
+        """Attach the M9 persistent breaker-state store (real-venue sessions).
+
+        Restores the state that must survive a restart — a tripped manual-reset halt keeps
+        refusing entries (see _process_one), the calendar loss-window anchors (M10) keep the
+        day's/week's losses, peak equity keeps the drawdown high-water mark, and the loss
+        streak keeps the cooldown counter. The ONLY thing that clears a tripped halt is the
+        operator's explicit reset (``qbot risk-reset``)."""
+        self._state_store = store
+        st = store.load()
+        self._consecutive_losses = int(st.get("consecutive_losses", 0) or 0)
+        self._peak_equity = max(self._peak_equity, float(st.get("peak_equity", 0.0) or 0.0))
+        self._rv_day_key = st.get("day_key")
+        self._rv_week_key = st.get("week_key")
+        self._rv_day_anchor = st.get("day_anchor_equity")
+        self._rv_week_anchor = st.get("week_anchor_equity")
+
+    def _persist_state(self) -> None:
+        """Write the restart-critical breaker state through to the M9 store (no-op without one)."""
+        if self._state_store is None:
+            return
+        self._state_store.update(
+            consecutive_losses=self._consecutive_losses,
+            peak_equity=self._peak_equity,
+            day_key=self._rv_day_key,
+            week_key=self._rv_week_key,
+            day_anchor_equity=self._rv_day_anchor,
+            week_anchor_equity=self._rv_week_anchor,
+        )
+
+    def _register_realized(self, symbol: str, pnl: float, funding: float = 0.0) -> None:
+        """Book one realized trade result into every breaker accumulator (M7).
+
+        Single choke-point for the three close paths (simulated exit, immediate synthetic
+        exit, exchange-side exit) so the loss breakers, the per-symbol breaker, the
+        consecutive-loss cooldown and the funding breaker all see every realized result."""
+        self._realized_pnl += pnl
+        self._per_symbol_pnl[symbol] = self._per_symbol_pnl.get(symbol, 0.0) + pnl
+        self._consecutive_losses = self._consecutive_losses + 1 if pnl < 0 else 0
+        self._funding_paid_total += funding
+        self._persist_state()
+
+    def _cumulative_funding_paid(self) -> float:
+        """Funding paid THIS ISO week (realized since the week boundary + open accrual), the
+        funding breaker's input (M7 — previously never passed despite being tracked)."""
+        realized = self._funding_paid_total - self._week_start_funding
+        return realized + sum(self._position_funding.values())
+
+    def _abnormal_slippage_active(self) -> bool:
+        """M7: observed-slippage breaker input — mean fill slippage over the last
+        ``_SLIP_WINDOW`` fills exceeds the execution policy's ``max_slippage_frac``
+        (requires ``_SLIP_MIN_FILLS`` observations so one bad print can't halt the book)."""
+        if len(self._recent_slippage) < _SLIP_MIN_FILLS:
+            return False
+        return sum(self._recent_slippage) / len(self._recent_slippage) > self._max_slippage_frac
+
+    def _calendar_windows(self, ts: int, equity: float) -> tuple[float, float]:
+        """Real-venue daily/weekly loss windows anchored to CALENDAR boundaries (M10).
+
+        Returns ``(daily_pnl, weekly_pnl)`` = equity − the equity anchored at the current UTC
+        day / ISO-week (Monday 00:00 UTC) boundary. Anchors roll when the boundary passes and
+        persist via the M9 store, so a restart mid-day restores the morning anchor instead of
+        re-anchoring at post-loss equity (which would forget the day's losses)."""
+        day = ts // 86_400_000
+        week = (ts - 4 * 86_400_000) // (7 * 86_400_000)  # epoch Thu → shift 4d to Monday anchor
+        changed = False
+        if self._rv_day_key != day or self._rv_day_anchor is None:
+            self._rv_day_key = day
+            self._rv_day_anchor = equity
+            changed = True
+        if self._rv_week_key != week or self._rv_week_anchor is None:
+            self._rv_week_key = week
+            self._rv_week_anchor = equity
+            changed = True
+        if changed:
+            self._persist_state()
+        return equity - self._rv_day_anchor, equity - self._rv_week_anchor
 
     def open_positions(self, price_of) -> list[dict]:
         """Snapshot the currently-open positions marked to market — for the dashboard's live
@@ -235,6 +361,9 @@ class PaperTradingEngine:
         if self._week_key != week:
             self._week_key = week
             self._week_start_realized = self._realized_pnl
+            # The funding breaker's period is the ISO week too (M7): snapshot so
+            # cumulative_funding_paid measures THIS week's bleed, not the session lifetime.
+            self._week_start_funding = self._funding_paid_total
 
     def set_funding_source(self, source: Callable[[str], list[dict]] | None) -> None:
         """Wire the per-symbol funding-event lookup (``[{"ts", "funding_rate"}, ...]``) so open
@@ -379,8 +508,7 @@ class PaperTradingEngine:
                 has_exchange_side_stop=True, execution_route="taker", spread_bps_at_entry=0.0,
                 slippage_frac=0.0, funding=funding,
             ))
-        self._realized_pnl += pnl
-        self._per_symbol_pnl[symbol] = self._per_symbol_pnl.get(symbol, 0.0) + pnl
+        self._register_realized(symbol, pnl, funding)
 
     def book_exchange_exit(
         self,
@@ -438,9 +566,8 @@ class PaperTradingEngine:
         trade.funding = funding
         trade.pnl = pnl
         trade.pnl_r = pnl / risk_amount if risk_amount > 0 else 0.0
-        # Realized → the loss/drawdown breakers see the booked result (Section 17).
-        self._realized_pnl += pnl
-        self._per_symbol_pnl[symbol] = self._per_symbol_pnl.get(symbol, 0.0) + pnl
+        # Realized → the loss/drawdown/streak/funding breakers see the booked result (Section 17).
+        self._register_realized(symbol, pnl, funding)
         return True
 
     def process_candidates(
@@ -572,6 +699,27 @@ class PaperTradingEngine:
         candidate = inp.candidate
         ks_state = "engaged" if self._kill_switch.engaged() else "clear"
 
+        # M9: a persisted manual-reset halt (daily-loss / max-drawdown / weekly-loss tripped in
+        # THIS OR A PRIOR process) refuses every new entry until the operator explicitly resets
+        # it (`qbot risk-reset`). Checked before anything else — a restart must not trade.
+        halted = self._state_store.tripped_reason() if self._state_store is not None else None
+        if halted:
+            reject_reason = f"risk_halt_pending_manual_reset({halted})"
+            session.rejected.append(
+                RejectedPaperCandidate(
+                    symbol=candidate.symbol,
+                    strategy=candidate.strategy,
+                    side=candidate.side,
+                    regime=candidate.regime,
+                    decision_ts=candidate.decision_ts,
+                    reason=reject_reason,
+                )
+            )
+            session.decision_logs.append(
+                self._decision_log(candidate, "reject", reject_reason, False, ks_state)
+            )
+            return
+
         # Build the account state for risk from the CURRENTLY-OPEN positions in the venue
         # (not an empty tuple): this is what makes the Section-17 portfolio caps —
         # max-concurrent-per-symbol/total/regime, portfolio heat, net-beta — actually
@@ -583,13 +731,14 @@ class PaperTradingEngine:
         if self._account_equity is not None:
             bk_equity = self._account_equity
             bk_peak = max(self._peak_equity, bk_equity, inp.peak_equity)
-            start = (
-                self._session_start_equity
-                if self._session_start_equity is not None
-                else bk_equity
-            )
-            bk_daily = bk_equity - start
-            bk_weekly = bk_daily
+            self._peak_equity = bk_peak
+            # M10: daily/weekly windows anchor to CALENDAR boundaries (UTC day / ISO week), not
+            # the session start — multi-day sessions roll the daily anchor at midnight, and the
+            # M9-persisted anchors survive a mid-day restart so the day's losses aren't forgotten.
+            ts = int(getattr(candidate, "decision_ts", 0) or 0)
+            if ts <= 0:
+                ts = int(datetime.now(UTC).timestamp() * 1000)
+            bk_daily, bk_weekly = self._calendar_windows(ts, bk_equity)
         else:
             # Roll the daily/weekly windows at UTC day/week boundaries (off the decision time) so a
             # multi-day session does not charge old losses against today's limit forever (B2).
@@ -604,14 +753,18 @@ class PaperTradingEngine:
         portfolio = PortfolioState(
             equity=bk_equity, positions=tuple(self._open_positions.values())
         )
+        # M7: every breaker input is LIVE now — the loss streak comes from the engine's own
+        # realized-close tracker (callers may still inject a higher streak for tests), funding
+        # from the existing accrual tracker, and abnormal slippage from observed recent fills.
         breakers = BreakerInputs(
             equity=bk_equity,
             peak_equity=bk_peak,
             daily_pnl=bk_daily,
-            consecutive_losses=inp.consecutive_losses,
-            abnormal_slippage_active=False,
+            consecutive_losses=max(inp.consecutive_losses, self._consecutive_losses),
+            abnormal_slippage_active=self._abnormal_slippage_active(),
             reconciled=not inp.inject_foreign_order,
             weekly_pnl=bk_weekly,
+            cumulative_funding_paid=self._cumulative_funding_paid(),
             per_symbol_pnl=dict(self._per_symbol_pnl),
         )
         account = AccountState(
@@ -619,6 +772,9 @@ class PaperTradingEngine:
             breakers=breakers,
             unknown_order_present=inp.inject_foreign_order,
             free_margin=getattr(self, "_free_margin", None),
+            # liquidation_price deliberately omitted (None): no pre-trade producer exists, so
+            # the liquidation-distance check is EXPLICITLY not evaluated (M7 — see AccountState
+            # and manager step 4a for the documented choice).
         )
 
         # Setup-quality HARD BLOCKERS (Section 15): a no-trade regime, toxic spread, negative
@@ -648,6 +804,19 @@ class PaperTradingEngine:
         decision = self._risk.evaluate(candidate, account)
 
         if not decision.approved:
+            # M9: a manual-reset breaker (daily-loss / max-drawdown / weekly-loss) just tripped —
+            # latch it in the persistent store so the halt survives a restart. Cooldown breakers
+            # (consecutive-loss, funding, slippage, per-symbol) recompute and are not latched.
+            if (
+                self._state_store is not None
+                and decision.action == "block"
+                and decision.blocker
+                and decision.blocker.startswith(_MANUAL_RESET_BLOCKERS)
+            ):
+                self._state_store.trip(
+                    decision.blocker,
+                    ts_ms=int(getattr(candidate, "decision_ts", 0) or 0) or None,
+                )
             reject_reason = f"risk_{decision.action}"
             session.rejected.append(
                 RejectedPaperCandidate(
@@ -690,9 +859,20 @@ class PaperTradingEngine:
         assert fill is not None
         assert position is not None
 
+        # M7: feed the OBSERVED fill slippage into the abnormal-slippage breaker window.
+        self._recent_slippage.append(float(fill.slippage_frac))
+
         entry_price = fill.actual_price
         stop_price = entry_price * (1 - candidate.stop_frac * candidate.side)
-        tp_price = entry_price * (1 + candidate.tp_frac * candidate.side)
+        # L12: honor the live NO_FIXED_TP sentinel convention — tp_frac ≥ NO_FIXED_TP_FRAC means
+        # "no fixed take-profit" (momentum; the trail/time-stop is the exit), so paper arms NO TP
+        # level (0.0), exactly like the live order builder. Previously a SHORT with a sentinel in
+        # [0.5, 1) got a REACHABLE paper TP at entry×(1−tp_frac) that live never places.
+        tp_price = (
+            0.0
+            if candidate.tp_frac >= NO_FIXED_TP_FRAC
+            else entry_price * (1 + candidate.tp_frac * candidate.side)
+        )
         exit_move = inp.exit_move_frac
         exit_price = entry_price * (1 + exit_move)
         # Classify the exit by which bracket the forward price reached. ``exit_move`` is the RAW
@@ -704,7 +884,9 @@ class PaperTradingEngine:
         exit_reason = "open"
         if exit_move != 0:
             favorable = exit_move * candidate.side > 0
-            if favorable and (
+            # tp_price == 0.0 encodes NO fixed TP (the sentinel, L12): never classify a
+            # take-profit exit for it — the position stays open for the trail/time-stop.
+            if favorable and tp_price > 0 and (
                 (candidate.side > 0 and exit_price >= tp_price)
                 or (candidate.side < 0 and exit_price <= tp_price)
             ):
@@ -741,7 +923,9 @@ class PaperTradingEngine:
             session=candidate.session,
             decision_ts=candidate.decision_ts,
             entry_ts=now_ts,
-            exit_ts=now_ts + inp.hold_bars * 60_000,
+            # L10: the hold horizon is counted in the SESSION's decision bars (set_bar_interval),
+            # not hardcoded 1-minute bars — a 12-bar hold on 1h bars is 12 hours, not 12 minutes.
+            exit_ts=now_ts + inp.hold_bars * self._bar_interval_ms,
             exit_price=exit_price,
             exit_reason=exit_reason,
             fee=fee,
@@ -795,12 +979,9 @@ class PaperTradingEngine:
             self._trail_dist.pop(candidate.symbol, None)
             self._peak.pop(candidate.symbol, None)
             self._venue.positions.pop(candidate.symbol, None)
-            # The trade closed → its PnL is REALIZED. Accumulate it for the loss breakers so a
-            # losing session halts new entries on the next candidate (Section 17).
-            self._realized_pnl += pnl
-            self._per_symbol_pnl[candidate.symbol] = (
-                self._per_symbol_pnl.get(candidate.symbol, 0.0) + pnl
-            )
+            # The trade closed → its PnL is REALIZED. Accumulate it for the loss/streak breakers
+            # so a losing session halts new entries on the next candidate (Section 17).
+            self._register_realized(candidate.symbol, pnl)
         session.decision_logs.append(
             self._decision_log(candidate, "execute", "approved", True, ks_state)
         )
@@ -846,7 +1027,11 @@ class PaperTradingEngine:
         ks_state: str,
     ) -> PaperDecisionLog:
         entry_price = candidate.entry_price
-        fee_rate = 0.0006  # default taker estimate
+        # L14: estimate fees from the symbol's VERIFIED metadata (same source the venue charges
+        # from), falling back to a generic taker rate only when the spec carries no fee.
+        spec = self._meta.spec(candidate.symbol)
+        rate = spec.fields.get("taker_fee") if spec is not None else None
+        fee_rate = float(rate) if isinstance(rate, (int, float)) and rate > 0 else 0.0006
         fee_est = entry_price * fee_rate * 2
         slip_est = entry_price * candidate.slippage_est
         edge_est = candidate.expected_edge_frac * entry_price - fee_est - slip_est

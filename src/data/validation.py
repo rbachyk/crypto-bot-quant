@@ -14,7 +14,8 @@ Checks implemented (per Section 8/23):
 * funding timestamps on the hour grid (settlements are per-symbol-cadence events);
 * mark / index / perp timestamps aligned;
 * spreads within the abnormal-spread threshold;
-* clock within NTP tolerance.
+* clock drift vs the exchange server time (live sources only; offline sources
+  record the check as "not applicable" — no fake pass).
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from src.data.schema import (
     SeriesKey,
     ms_to_iso,
 )
+from src.data.source import DataSource
 from src.data.store import SeriesStore
 
 CRITICAL = "critical"
@@ -73,6 +75,10 @@ class DataQualityReport:
     checks_run: list[str] = field(default_factory=list)
     violations: list[Violation] = field(default_factory=list)
     series_validated: int = 0
+    # Checks that could not run in this environment (check -> reason). An offline source
+    # cannot measure clock drift against an exchange; recording it here is honest — the
+    # check is neither silently dropped nor reported as a pass.
+    not_applicable: dict[str, str] = field(default_factory=dict)
 
     @property
     def critical(self) -> list[Violation]:
@@ -88,6 +94,7 @@ class DataQualityReport:
             "window": self.window,
             "series_validated": self.series_validated,
             "checks_run": self.checks_run,
+            "not_applicable": dict(self.not_applicable),
             "passed": self.passed,
             "critical_count": len(self.critical),
             "violation_count": len(self.violations),
@@ -96,9 +103,14 @@ class DataQualityReport:
 
 
 class DataValidator:
-    def __init__(self, store: SeriesStore, cfg: DataConfig) -> None:
+    def __init__(
+        self, store: SeriesStore, cfg: DataConfig, source: DataSource | None = None
+    ) -> None:
         self.store = store
         self.cfg = cfg
+        # The data source, when provided, supplies the exchange server time for a REAL
+        # clock-drift measurement; offline/absent sources make the check "not applicable".
+        self.source = source
 
     def validate(self) -> DataQualityReport:
         start, end = self.cfg.window_start_ms, self.cfg.window_end_ms
@@ -304,23 +316,31 @@ class DataValidator:
                 )
 
     def _check_clock_drift(self, report: DataQualityReport) -> None:
-        """Verify the system clock advances consistently with the monotonic clock.
+        """Compare the local wall clock against the EXCHANGE server time (real drift check).
 
-        Offline we cannot query an NTP server; we verify the wall clock is not
-        broken (jumping/frozen) relative to the monotonic clock. Absolute NTP
-        synchronisation is enforced at deploy time by the host (chrony) and is
-        re-verified by the Phase 13 MON gate.
+        The old wall-vs-monotonic comparison over microseconds could never fail and was
+        reported as a passed NTP check — an honest check needs an external reference. A live
+        source exposes the venue's server time (``ccxt fetch_time``); |local − server| beyond
+        tolerance is CRITICAL (mistimed stamps, misjudged bar closure). Offline sources have
+        no external clock: the check is recorded as *not applicable*, never as a pass.
+        Absolute NTP discipline on the host remains a deploy-time concern (chrony / MON gate).
         """
+        server_ms = self.source.server_time_ms() if self.source is not None else None
+        if server_ms is None:
+            report.not_applicable["clock_drift"] = (
+                "no exchange server time available (offline source) — drift not measurable"
+            )
+            return
+        local_ms = time.time() * 1000.0
+        drift_s = abs(local_ms - float(server_ms)) / 1000.0
         th = self.cfg.thresholds
-        w0, m0 = time.time(), time.monotonic()
-        w1, m1 = time.time(), time.monotonic()
-        skew = abs((w1 - w0) - (m1 - m0))
-        if skew > th.clock_drift_tolerance_s:
+        if drift_s > th.clock_drift_tolerance_s:
             report.violations.append(
                 Violation(
                     "clock_drift",
                     CRITICAL,
-                    f"wall/monotonic skew {skew:.3f}s exceeds {th.clock_drift_tolerance_s}s",
+                    f"local clock differs from {self.cfg.exchange_id} server time by "
+                    f"{drift_s:.3f}s (tolerance {th.clock_drift_tolerance_s}s)",
                 )
             )
 

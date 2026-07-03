@@ -10,21 +10,31 @@ triggered.
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime
+
+import structlog
 
 from src.config import Settings, get_settings
 from src.data.config import DataConfig, load_data_config
 from src.data.coverage import CoverageReport, compute_coverage
 from src.data.ingest import Ingestor
 from src.data.schema import SeriesKey
-from src.data.snapshot import SnapshotResult, build_dataset_version
+from src.data.snapshot import (
+    SnapshotResult,
+    SnapshotVerification,
+    build_dataset_version,
+    verify_snapshot,
+)
 from src.data.source import DataSource, get_data_source
 from src.data.store import SeriesStore
 from src.data.validation import DataQualityReport, DataValidator
 from src.db.base import session_scope
 from src.db.models import DataQualityReportRow, DatasetVersion
 from src.storage import DataLake
+
+_log = structlog.get_logger("data.platform")
 
 
 @dataclass(slots=True)
@@ -83,7 +93,9 @@ class DataPlatform:
 
     # -- validation ------------------------------------------------------ #
     def validate(self) -> DataQualityReport:
-        return DataValidator(self.store, self.cfg).validate()
+        # The source is passed so clock drift can be measured against the venue's server
+        # time when a live source is available (offline sources skip the check cleanly).
+        return DataValidator(self.store, self.cfg, source=self.source).validate()
 
     # -- snapshot -------------------------------------------------------- #
     def build_snapshot(
@@ -93,11 +105,22 @@ class DataPlatform:
         result = build_dataset_version(
             self.lake, self.store, self.cfg, coverage, status, source_jobs
         )
-        self._persist_dataset_version(result, status)
+        self._persist_dataset_version(result)
         return result
 
-    def _persist_dataset_version(self, result: SnapshotResult, status: str) -> None:
+    def verify_snapshot(self, snapshot_id: str) -> SnapshotVerification:
+        """Re-verify a snapshot's recorded per-series checksums against the live store
+        (verification-on-use — see ``src.data.snapshot`` module docstring)."""
+        return verify_snapshot(self.lake, self.store, snapshot_id, self.cfg.exchange_id)
+
+    def _persist_dataset_version(self, result: SnapshotResult) -> None:
+        # The MANIFEST is the source of truth for validation_status (content-addressed lake):
+        # on an idempotent re-snapshot (created=False) the manifest keeps the ORIGINAL status
+        # and the DB row is aligned to it, never overwritten with the current run's status —
+        # identical content cannot legitimately change validity, so a differing current status
+        # indicates an environment problem, not new information about the snapshot.
         m = result.manifest
+        status = m.validation_status
         with session_scope() as session:
             row = session.get(DatasetVersion, result.snapshot_id)
             if row is None:
@@ -115,6 +138,77 @@ class DataPlatform:
             row.validation_status = status
             row.manifest_path = str(self.lake.dataset_dir(result.snapshot_id) / "manifest.json")
             row.source_jobs = m.source_jobs
+
+    # -- retention (L17) -------------------------------------------------- #
+    def prune_snapshots(self, keep_last: int | None = None) -> dict:
+        """Retention pass for dataset snapshots (bounds ``as_of: now`` growth).
+
+        With a rolling window every hourly ``run_full`` mints a NEW snapshot id (the id is
+        content-addressed over the window), so dataset_versions rows/dirs/quality-reports grow
+        without bound. Policy: keep the newest ``keep_last`` snapshots of THIS config's
+        fingerprint (``data_version`` + ``exchange_id`` — the platform never touches another
+        config's snapshots), plus ANY snapshot still referenced by ``backtest_runs`` (the
+        leaderboard reads these rows), ``feature_set_versions``, ``ml_model_registry`` or a
+        job's ``related_dataset_version``. Pruning removes the lake directory, the
+        ``dataset_versions`` row and its ``data_quality_reports`` rows together (DB rows are
+        deleted first and committed; directories are removed after, so a crash can only leave
+        an orphaned directory, never a DB row pointing at deleted files)."""
+        from sqlalchemy import select
+
+        from src.db.models import BacktestRun, FeatureSetVersion, Job, MLModelRegistry
+
+        keep = self.cfg.snapshot_keep_last if keep_last is None else keep_last
+        if keep <= 0:  # retention disabled by config
+            return {"keep_last": keep, "pruned": [], "kept_referenced": [], "disabled": True}
+
+        pruned: list[str] = []
+        kept_referenced: list[str] = []
+        with session_scope() as session:
+            rows = (
+                session.execute(
+                    select(DatasetVersion)
+                    .where(
+                        DatasetVersion.data_version == self.cfg.data_version,
+                        DatasetVersion.exchange_id == self.cfg.exchange_id,
+                    )
+                    .order_by(DatasetVersion.created_at.desc(), DatasetVersion.version.desc())
+                )
+                .scalars()
+                .all()
+            )
+            candidates = rows[keep:]
+            if candidates:
+                referenced: set[str] = set()
+                for col in (
+                    BacktestRun.dataset_version,
+                    FeatureSetVersion.dataset_version,
+                    MLModelRegistry.dataset_version,
+                    Job.related_dataset_version,
+                ):
+                    referenced.update(v for (v,) in session.execute(select(col).distinct()) if v)
+                for row in candidates:
+                    if row.version in referenced:
+                        kept_referenced.append(row.version)
+                        continue
+                    session.query(DataQualityReportRow).filter_by(
+                        dataset_version=row.version
+                    ).delete()
+                    session.delete(row)
+                    pruned.append(row.version)
+        # Files go after the DB commit (see docstring); a failure here leaves only orphan dirs.
+        for version in pruned:
+            ddir = self.lake.dataset_dir(version)
+            if ddir.exists():
+                shutil.rmtree(ddir, ignore_errors=True)
+        if pruned or kept_referenced:
+            _log.info(
+                "snapshots_pruned",
+                data_version=self.cfg.data_version,
+                keep_last=keep,
+                pruned=len(pruned),
+                kept_referenced=kept_referenced,
+            )
+        return {"keep_last": keep, "pruned": pruned, "kept_referenced": kept_referenced}
 
     # -- reporting ------------------------------------------------------- #
     def write_quality_report(

@@ -6,6 +6,25 @@ which then passes through :func:`~.action_space.validate` →
 :func:`~.envelope_guard.enforce` before reaching the Risk Layer.
 
 The learner NEVER calls exchange APIs or the execution engine directly.
+
+Outcome-projection contract (audit M31 — ONE semantic everywhere)
+-----------------------------------------------------------------
+``projected_outcome`` — wherever it appears (``learner_log.projected_outcome``,
+:class:`~src.adaptation.scorer.ShadowDecision.projected_outcome`, rollback
+windows) — is ALWAYS the policy's expected outcome in **R-units**, directly
+comparable to ``Outcome.realized_pnl_r``. Policies declare it per decision via
+``BoundedAction.projected_outcome_r`` (None when they have no R-scale estimate;
+callers then log 0.0, a neutral R expectation).
+
+Probabilities are a SEPARATE field: a policy that internally estimates
+P(positive R) — e.g. the online logistic regression — emits it as
+``BoundedAction.win_probability``. Calibration metrics (Brier) are computed
+ONLY from ``win_probability``; they are never derived by squashing an R value
+through a sigmoid. When no policy in a decision set emits ``win_probability``,
+calibration is reported as *not evaluated* — never as a fake pass.
+
+Drift and rollback-underperformance checks compare ``projected_outcome`` (R)
+to ``realized_outcome`` (R): R-to-R, same units, no transformation.
 """
 
 from __future__ import annotations

@@ -82,7 +82,7 @@ class Settings(BaseSettings):
     data_version: str = "data_0001"
     metadata_version: str = "meta_0001"
     strategy_version: str = "strat_0001"
-    feature_set_version: str = "feat_0001"
+    feature_set_version: str = "feat_0002"  # feat_0002: rolling-window funding_z (M3)
     risk_policy_version: str = "risk_0001"
     execution_policy_version: str = "exec_0001"
     online_learner_version: str = "learner_0001"
@@ -105,7 +105,6 @@ class Settings(BaseSettings):
     # head-of-line blocking each other on a single loop. Each job still claims atomically + fences,
     # so concurrency is safe (Appendix B.13). Transient-job workers can stay at 1.
     worker_concurrency: int = 1
-    object_storage_url: str = ""  # empty => use local data lake path below
     data_lake_path: Path = REPO_ROOT / "var" / "datalake"
     artifact_path: Path = REPO_ROOT / "var" / "artifacts"
     reports_path: Path = REPO_ROOT / "reports"
@@ -129,10 +128,10 @@ class Settings(BaseSettings):
     # dashboard trades (matches compose + .env.example); opt in explicitly to run research.
     enable_background_research_jobs: bool = False
     enable_ml_shadow: bool = False
-    # Reserved: the online-learner and RL shadow layers currently run via their gates (LEARN-PROMO,
-    # RL-SIM/RL-SHADOW), not scheduled jobs, so these toggles have no scheduled job to gate yet.
-    enable_online_learning_shadow: bool = False
-    enable_rl_shadow: bool = False
+    # NOTE: the online-learner and RL shadow layers run via their gates (LEARN-PROMO,
+    # RL-SIM/RL-SHADOW), not scheduled jobs — they need no toggle here. (The former
+    # ENABLE_ONLINE_LEARNING_SHADOW / ENABLE_RL_SHADOW settings had zero consumers and were
+    # removed: a setting that silently does nothing is worse than none.)
 
     # --- Scheduler (periodic recurring jobs; runs as the `scheduler` service) ---
     # Off by default so tests/host tooling never auto-enqueue; the compose scheduler service
@@ -185,6 +184,16 @@ class Settings(BaseSettings):
             errors.append(
                 "ENABLE_LIVE_TRADING=true is only allowed when APP_ENV=production "
                 f"(got APP_ENV={self.app_env.value})."
+            )
+
+        # Worker liveness: the reaper treats a beacon older than the TTL as a dead worker and
+        # re-queues its in-flight jobs — a TTL at or below the heartbeat interval would declare
+        # LIVE workers dead and duplicate running jobs (Appendix B.13).
+        if self.worker_heartbeat_ttl_sec <= self.worker_heartbeat_sec:
+            errors.append(
+                f"WORKER_HEARTBEAT_TTL_SEC={self.worker_heartbeat_ttl_sec} must exceed "
+                f"WORKER_HEARTBEAT_SEC={self.worker_heartbeat_sec} (otherwise the reaper "
+                "declares live workers dead and duplicates their in-flight jobs)."
             )
 
         # Exchange environment must be one of the three distinct Bybit envs (Section 6).

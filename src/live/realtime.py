@@ -38,7 +38,7 @@ from src.data.source import DataSource
 from src.features.pipeline import FeatureDataReader, compute_features
 from src.paper.engine import PaperCandidateInput
 from src.paper.lake import build_candidate
-from src.regime.detector import load_regime_config
+from src.regime.detector import RegimeTracker, load_regime_config
 
 _POINT_IN_TIME = (MARK, INDEX, FUNDING, OPEN_INTEREST, SPREAD)
 
@@ -154,6 +154,32 @@ class LiveCandidateFeed:
             _add(strat, bt.reference_strategy.name, bt.reference_strategy.strategy_version, False)
         self.feat_cfg = _lake_feature_config(self.timeframe)
         self._toxic_spread = load_regime_config().toxic_spread_bps  # default estimate floor
+        # Stateful per-symbol regime tracking (anti-whipsaw) — the trade-labeling convention
+        # shared with the backtest engine (M4 parity). Seeded from the backfilled window's
+        # latest row, then advanced on every newly-closed bar.
+        self._regime_trackers: dict[str, RegimeTracker] = {}
+
+    def _spread_estimate(self, sym: str) -> float:
+        """Latest decision-time spread sample from the rolling window; falls back to the
+        conservative toxic/5 floor used for candidates when the series is absent."""
+        try:
+            samples = self._reader.series(sym, SPREAD)
+            if samples:
+                return float(samples[-1].get("spread_bps", self._toxic_spread / 5.0))
+        except Exception:  # noqa: BLE001 - estimate only; never abort a tick on a bad sample
+            pass
+        return self._toxic_spread / 5.0
+
+    def _augment_and_track(self, sym: str, row: dict) -> dict:
+        """Advance the symbol's stateful RegimeTracker on this decision row and return a copy
+        carrying the execution-safety inputs (``spread_bps`` / ``data_ok`` — so the strategy-level
+        regime gate can reach R7/R8) plus the tracked label under ``regime_tracked`` (the
+        anti-whipsaw trade-labeling convention shared with the backtest engine and the lake
+        replay path)."""
+        spread_bps = self._spread_estimate(sym)
+        tracker = self._regime_trackers.setdefault(sym, RegimeTracker())
+        tracked = tracker.update(row, spread_bps=spread_bps, data_ok=True)
+        return {**row, "spread_bps": spread_bps, "data_ok": True, "regime_tracked": tracked}
 
     def seed(self, rest_source: DataSource | None = None) -> None:
         """Backfill the rolling window (OHLCV + point-in-time) via REST so features are ready."""
@@ -181,15 +207,15 @@ class LiveCandidateFeed:
         self._last_pit_refresh = int(time.time() * 1000)
         # Seed the cross-asset PEER view from the backfilled window: a portfolio strategy (lead_lag)
         # evaluates symbol vs its peers, but _latest_rows is otherwise only filled as each symbol
-        # ADVANCES — so on the first cycle (and any partial-advance cycle) peers would be missing the
-        # symbols that haven't ticked yet, and the cross-section would be evaluated against an
+        # ADVANCES — so on the first cycle (and any partial-advance cycle) peers would be missing
+        # the symbols that haven't ticked yet, and the cross-section would be evaluated against an
         # incomplete universe. Compute each symbol's latest feature row up front so peers are
         # complete from cycle 0. A per-symbol error is skipped (best-effort warm-up).
         for sym in self.symbols:
             try:
                 frame = compute_features(sym, self._reader, self.feat_cfg)
                 if frame.rows:
-                    self._latest_rows[sym] = frame.rows[-1]
+                    self._latest_rows[sym] = self._augment_and_track(sym, frame.rows[-1])
             except Exception:  # noqa: BLE001 - one bad symbol must not abort the seed
                 _log.warning("live_feed_seed_features_error", symbol=sym, exc_info=True)
         # A seed that returns NO OHLCV means the feed can never advance → the session sits at tick 0
@@ -262,8 +288,10 @@ class LiveCandidateFeed:
                 return
             cand = build_candidate(
                 sym, row, sig, strat_id=sid, strat_ver=ver,
-                entry_price=float(bar["close"]), spread_bps=self._toxic_spread / 5.0,
+                entry_price=float(bar["close"]),
+                spread_bps=float(row.get("spread_bps", self._toxic_spread / 5.0)),
                 promoted=promoted, data_ok=True, risk_scale=risk_scale,
+                regime=row.get("regime_tracked"),
             )
             # Real exits are exchange-side (bracket SL/TP/trailing) → no forward move in live mode.
             out.append(PaperCandidateInput(candidate=cand, equity=self.equity, exit_move_frac=0.0))
@@ -298,7 +326,7 @@ class LiveCandidateFeed:
         frame = compute_features(sym, self._reader, self.feat_cfg)
         if not frame.rows:
             return None
-        row = frame.rows[-1]
+        row = self._augment_and_track(sym, frame.rows[-1])
         self._latest_rows[sym] = row
         return (sym, bar, row)
 

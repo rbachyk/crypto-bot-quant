@@ -62,8 +62,8 @@ def test_selftest_session_excluded_from_paper_stats() -> None:
 
 
 def test_open_position_rows_excluded_from_trading_stats() -> None:
-    """REGRESSION (R1): a per-symbol live entry is persisted as an exit_reason='open' PaperTradeRecord
-    (pnl=-entry_fee) until it closes. It must NOT count as a (losing) trade in the realized stats,
+    """REGRESSION (R1): a per-symbol live entry is persisted as an exit_reason='open'
+    PaperTradeRecord (pnl=-entry_fee) until it closes. It must NOT count as a losing trade,
     nor double-count its live OpenPosition row — otherwise every held position corrupts win-rate /
     P&L on the dashboard (continuously, once the live session flushes incrementally)."""
     strat = f"open_excl_{uuid.uuid4().hex[:6]}"

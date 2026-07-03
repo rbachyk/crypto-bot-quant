@@ -271,29 +271,26 @@ def check_ml_phase10(settings: Settings) -> list[Criterion]:
             model_version=ml_cfg.model_version,
             config_version=settings.config_version,
         )
+        # Snapshot (deep-copy) every candidate BEFORE the filter runs, so a
+        # filter that mutated a candidate in place cannot hide the mutation by
+        # being compared with itself (audit L21).
+        pre_filter_snapshots = _snapshot_candidates(candidates)
         filter_result = ml_filter.apply(candidates, shadow_result.bundles, write_to_db=False)
 
-        identical = all(
-            c is orig
-            for c, orig in zip(filter_result.passed, candidates, strict=False)
-            if c in candidates
-        )
-        # Also check stop_frac (risk proxy) is unchanged.
-        risk_unchanged = all(
-            c.stop_frac == orig.stop_frac
-            for c in filter_result.passed
-            for orig in candidates
-            if c is orig
-        )
+        # Pair each passed candidate with ITS pre-filter snapshot by candidate
+        # identity (symbol + strategy + decision_ts) — never by list position,
+        # which misaligns as soon as the filter blocks anything (audit L21).
+        unknown, mutated = _risk_mutation_findings(pre_filter_snapshots, filter_result.passed)
         out.append(
             Criterion.ok(
                 "filter_no_risk_increase",
-                "passed candidates are identical Python objects — no field mutation",
+                f"{len(filter_result.passed)} passed candidates match their pre-filter "
+                "snapshots — no risk-field mutation",
             )
-            if identical and risk_unchanged
+            if not unknown and not mutated
             else Criterion.fail(
                 "filter_no_risk_increase",
-                "filter returned a modified candidate (stop_frac changed)",
+                f"unknown candidates: {len(unknown)}; mutated: {mutated[:3]}",
             )
         )
 
@@ -364,6 +361,50 @@ def check_ml_phase10(settings: Settings) -> list[Criterion]:
 # --------------------------------------------------------------------------- #
 # Helpers                                                                      #
 # --------------------------------------------------------------------------- #
+
+
+def _candidate_key(c: Candidate) -> tuple[str, str, int]:
+    """Candidate identity for pre/post-filter pairing (audit L21)."""
+    return (c.symbol, c.strategy, c.decision_ts)
+
+
+def _snapshot_candidates(candidates: list[Candidate]) -> dict[tuple[str, str, int], Candidate]:
+    """Deep-copied pre-filter snapshots keyed by candidate identity."""
+    import copy
+
+    return {_candidate_key(c): copy.deepcopy(c) for c in candidates}
+
+
+def _risk_mutation_findings(
+    pre_filter: dict[tuple[str, str, int], Candidate],
+    passed: list[Candidate],
+) -> tuple[list[Candidate], list[str]]:
+    """Compare each passed candidate against ITS pre-filter snapshot.
+
+    Pairs by candidate identity (symbol + strategy + decision_ts) — never by
+    list position, which misaligns as soon as the filter blocks anything
+    (audit L21). Returns ``(unknown, mutated)``: candidates with no pre-filter
+    snapshot, and human-readable descriptions of any risk-field mutation.
+    """
+    unknown = [c for c in passed if _candidate_key(c) not in pre_filter]
+    mutated: list[str] = []
+    for c in passed:
+        orig = pre_filter.get(_candidate_key(c))
+        if orig is None:
+            continue
+        if (
+            c.stop_frac != orig.stop_frac
+            or c.tp_frac != orig.tp_frac
+            or c.entry_price != orig.entry_price
+            or c.side != orig.side
+            or c != orig
+        ):
+            mutated.append(
+                f"{c.symbol}@{c.decision_ts}: "
+                f"stop_frac {orig.stop_frac}->{c.stop_frac}, "
+                f"tp_frac {orig.tp_frac}->{c.tp_frac}"
+            )
+    return unknown, mutated
 
 
 def _make_disabled_candidate() -> Candidate:

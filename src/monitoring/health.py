@@ -53,7 +53,11 @@ def _check_database() -> ComponentHealth:
 
 def _check_redis(settings: Settings) -> ComponentHealth:
     try:
-        client = redis.Redis.from_url(settings.redis_url, socket_connect_timeout=1)
+        # Both timeouts matter: connect_timeout bounds a dead host, socket_timeout bounds a
+        # hung-but-accepting Redis (without it PING can block forever and hang the probe).
+        client = redis.Redis.from_url(
+            settings.redis_url, socket_connect_timeout=1, socket_timeout=1
+        )
         client.ping()
         return ComponentHealth("redis", True, "reachable")
     except Exception as exc:  # noqa: BLE001
@@ -93,3 +97,17 @@ def check_health(
         components.append(_check_killswitch(settings))
     healthy = all(c.healthy for c in components)
     return HealthReport(service=service, healthy=healthy, components=components)
+
+
+def check_readiness(settings: Settings | None = None) -> HealthReport:
+    """Readiness probe (``/readyz``): the two hard runtime dependencies only (DB + Redis).
+
+    Complements ``/livez`` (process up): a service is *ready* to take traffic when it can reach
+    its database and queue — storage/kill-switch state is reported by the full health check."""
+    settings = settings or get_settings()
+    components = [_check_database(), _check_redis(settings)]
+    return HealthReport(
+        service=settings.service_name,
+        healthy=all(c.healthy for c in components),
+        components=components,
+    )

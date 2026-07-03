@@ -88,12 +88,18 @@ def _lake_inputs_cache_key(
     funding_timeframe: str,
     oi_timeframe: str,
     start_ms: int,
+    end_ms: int,
     feat_cfg: FeatureConfig,
 ) -> str | None:
     """Content key for the built inputs. Includes a DATA FINGERPRINT (parquet file stats) so the
-    cache invalidates exactly when the lake data changes — and deliberately OMITS the requested
-    ``end_ms`` (the ``as_of: now`` window end ticks every run, but the output is bounded by the
-    data, which the fingerprint already captures). Returns None on any error → caller rebuilds."""
+    cache invalidates exactly when the lake data changes, plus the EFFECTIVE window end
+    ``min(end_ms, newest stored ts + 1)`` — the bound that actually limits what the build reads.
+    With ``as_of: now`` the requested ``end_ms`` ticks every run while the data does not; any
+    ``end_ms`` beyond the newest stored row selects the identical row set, so clamping to the
+    data keeps those runs cache HITs. An ``end_ms`` at or below the newest stored row is used
+    VERBATIM, so a deliberately shortened window (a held-back recent period for validation)
+    always changes the key and can never be served the full-window inputs — two different
+    effective windows never alias (M1). Returns None on any error → caller rebuilds."""
     try:
         syms = sorted(symbols)
         # Every series the build reads (data_type, timeframe). If any of these parquet files
@@ -102,17 +108,28 @@ def _lake_inputs_cache_key(
             (OHLCV, timeframe), (MARK, base_timeframe), (INDEX, base_timeframe),
             (FUNDING, funding_timeframe), (OPEN_INTEREST, oi_timeframe), (SPREAD, base_timeframe),
         )
-        fp = {
-            sym: [store.fingerprint(SeriesKey(exchange_id, dt, sym, tf)) for dt, tf in series]
-            for sym in syms
-        }
+        fp: dict[str, list] = {}
+        data_max: int | None = None  # newest stored ts across EVERY series the build reads
+        for sym in syms:
+            entries = []
+            for dt, tf in series:
+                key = SeriesKey(exchange_id, dt, sym, tf)
+                entries.append(store.fingerprint(key))
+                latest = store.latest_ts(key)
+                if latest is not None and (data_max is None or latest > data_max):
+                    data_max = latest
+            fp[sym] = entries
+        # +1 because reads are [start, end) (point-in-time series to end_ms + 1): any requested
+        # end past the newest stored row selects exactly the rows data_max + 1 selects.
+        end_eff = end_ms if data_max is None else min(end_ms, data_max + 1)
         sig = {
             "v": _INPUT_CACHE_VERSION,
             "ex": exchange_id, "syms": syms, "tf": timeframe, "base": base_timeframe,
-            "fund": funding_timeframe, "oi": oi_timeframe, "start": start_ms,
+            "fund": funding_timeframe, "oi": oi_timeframe, "start": start_ms, "end_eff": end_eff,
             "feat": [
                 feat_cfg.timeframe, feat_cfg.feature_set_version,
                 feat_cfg.windows.short, feat_cfg.windows.long, feat_cfg.windows.rank,
+                feat_cfg.funding_z_lookback_days, feat_cfg.funding_z_min_samples,
             ],
             "fp": fp,
         }
@@ -266,7 +283,7 @@ def build_lake_inputs(
         _lake_inputs_cache_key(
             store, exchange_id=exchange_id, symbols=symbols, timeframe=timeframe,
             base_timeframe=base_timeframe, funding_timeframe=funding_timeframe,
-            oi_timeframe=oi_tf, start_ms=start_ms, feat_cfg=feat_cfg,
+            oi_timeframe=oi_tf, start_ms=start_ms, end_ms=end_ms, feat_cfg=feat_cfg,
         )
         if _input_cache_enabled()
         else None
@@ -288,6 +305,9 @@ def build_lake_inputs(
             start_ms,
             end_ms,
             oi_timeframe=oi_tf,
+            # Pre-read funding_z's rolling lookback BEFORE the window start, so the feature is
+            # warm from the first row and its value at a ts never depends on the window depth.
+            funding_lookback_ms=feat_cfg.funding_z_lookback_ms,
         )
         bars = reader.ohlcv(symbol)
         if bars:  # no history in window ⇒ excluded from the run (but still advances progress)
@@ -384,6 +404,29 @@ def lake_candidate_strategy(
     return strategy, cand.id, scfg.strategy_version
 
 
+def _verify_dataset_snapshot(
+    settings: Settings, store: SeriesStore, data_cfg: DataConfig, dataset_version: str
+) -> None:
+    """Fail LOUDLY if a consumed snapshot's recorded series checksums no longer match the
+    live store (M19: snapshots pin metadata, not bytes — a ``delete_range`` + re-download
+    can change rows inside a snapshotted window; validating against silently-different data
+    is worse than an error). No-ops for ids that are not lake snapshots (e.g. the bare
+    ``data_version`` policy label) and warns for legacy snapshots without checksum sidecars."""
+    from src.data.snapshot import verify_snapshot
+    from src.storage import DataLake
+
+    lake = DataLake(settings.data_lake_path, settings.artifact_path)
+    if not (lake.dataset_dir(dataset_version) / "manifest.json").exists():
+        return  # a policy-level DATA_VERSION label, not a concrete lake snapshot
+    verification = verify_snapshot(lake, store, dataset_version, data_cfg.exchange_id)
+    if not verification.verifiable:
+        _log.warning("snapshot_unverifiable", detail=verification.summary())
+        return
+    if verification.mismatches:
+        raise RuntimeError(f"dataset snapshot verification FAILED — {verification.summary()}")
+    _log.info("snapshot_verified", detail=verification.summary())
+
+
 def run_lake_backtest(
     data_cfg: DataConfig | None = None,
     cfg: BacktestConfig | None = None,
@@ -394,6 +437,7 @@ def run_lake_backtest(
     symbols: list[str] | None = None,
     strategy: Strategy | PortfolioStrategy | None = None,
     label: str = "lake",
+    dataset_version: str | None = None,
 ) -> BacktestRunResult:
     """Run the event-based engine over real lake data for a ``DATA_VERSION`` snapshot.
 
@@ -403,6 +447,11 @@ def run_lake_backtest(
     (see :func:`lake_candidate_strategy`) to research an actual edge. Fees fall back to
     the backtest-config defaults for symbols without verified exchange metadata
     (research-grade; verified metadata is a live/META concern).
+
+    ``dataset_version``: when it names a concrete lake snapshot, its recorded series
+    checksums are re-verified against the live store BEFORE building inputs and a
+    mismatch raises (verification-on-use — the run must not silently read data that
+    differs from what was snapshotted).
     """
     settings = settings or get_settings()
     data_cfg = data_cfg or load_data_config()
@@ -411,6 +460,8 @@ def run_lake_backtest(
     tf = timeframe or data_cfg.base_timeframe
     syms = symbols or data_cfg.active_symbols()
     store = SeriesStore(settings.data_lake_path)
+    if dataset_version:
+        _verify_dataset_snapshot(settings, store, data_cfg, dataset_version)
     inputs = build_lake_inputs(
         store,
         exchange_id=data_cfg.exchange_id,
@@ -471,6 +522,7 @@ def run_and_persist_lake_backtest(
         symbols=syms,
         strategy=strategy,
         label=label,
+        dataset_version=dataset_version,
     )
     report_path = write_report(settings, out.report.payload, kind=kind)
     rid = persist_backtest_run(

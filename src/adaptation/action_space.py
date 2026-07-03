@@ -54,6 +54,17 @@ class BoundedAction:
     mode: str = "SHADOW"  # Literal["SHADOW", "RECOMMEND", "LIVE_BOUNDED"]
     rationale: str = ""
 
+    # Policy self-assessment (single-semantic contract, see policy_base module
+    # docstring; audit M31). Both are optional and advisory only — they carry
+    # no execution influence and are logged for scoring/calibration:
+    # - ``projected_outcome_r``: the policy's expected outcome of this decision
+    #   in R-units (same scale as realized_pnl_r). None when the policy has no
+    #   R-scale estimate.
+    # - ``win_probability``: calibrated probability of a positive-R outcome.
+    #   None when the policy has no genuine probability (never fabricate one).
+    projected_outcome_r: float | None = None
+    win_probability: float | None = None
+
 
 @dataclass
 class ActionBounds:

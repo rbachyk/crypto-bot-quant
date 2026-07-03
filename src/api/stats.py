@@ -327,6 +327,9 @@ def compute_trading_stats(
     st.realized_pnl = round(sum(t.pnl for t in rows), 2)
     st.total_fees_paid = round(sum(t.fee for t in rows), 2)
     st.total_slippage = round(sum(t.slippage_cost for t in rows), 2)
+    # Funding is stored COST-convention on each trade (>0 = paid by the leg, <0 = carry earned;
+    # see src.paper.engine — pnl already nets it, this is the cost breakdown like fees/slippage).
+    st.total_funding_paid = round(sum(t.funding for t in rows), 2)
     st.gross_win = round(sum(t.pnl for t in wins), 2)
     st.gross_loss = round(sum(t.pnl for t in losses), 2)  # negative
     st.profit_factor = round(st.gross_win / abs(st.gross_loss), 4) if st.gross_loss else 0.0
