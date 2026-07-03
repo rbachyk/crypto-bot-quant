@@ -228,6 +228,16 @@ def _asof_history(samples: list[dict], field_name: str, decision_ts: int) -> lis
     return [float(r[field_name]) for r in samples if r["ts"] <= decision_ts]
 
 
+def _asof_row(samples: list[dict], decision_ts: int) -> dict | None:
+    """The last full sample row with ts <= decision_ts (``None`` before the first sample)."""
+    cur: dict | None = None
+    for row in samples:  # samples are sorted by ts
+        if row["ts"] > decision_ts:
+            break
+        cur = row
+    return cur
+
+
 # --------------------------------------------------------------------------- #
 # Feature computation (single code path)                                       #
 # --------------------------------------------------------------------------- #
@@ -301,8 +311,8 @@ def compute_features(symbol: str, reader: FeatureDataReader, cfg: FeatureConfig)
             premium = (mark_now - index_now) / index_now
         else:
             premium = 0.0
-        fund_now, _ = _asof(funding, "funding_rate", decision_ts)
-        funding_rate = fund_now if fund_now is not None else 0.0
+        fund_row = _asof_row(funding, decision_ts)
+        funding_rate = float(fund_row["funding_rate"]) if fund_row is not None else 0.0
         fund_hist = _asof_history(funding, "funding_rate", decision_ts)
         if len(fund_hist) >= 3:
             f_std = _std(fund_hist)
@@ -321,7 +331,12 @@ def compute_features(symbol: str, reader: FeatureDataReader, cfg: FeatureConfig)
         hour_utc = float(dt.hour)
         is_weekend = 1.0 if dt.weekday() >= 5 else 0.0
         session_code = float(_session_code(dt.hour))
-        funding_iv_ms = 8 * 3_600_000  # perpetual funding interval (Section 8)
+        # Perpetual funding interval: per-symbol and exchange-adjusted (8h base; 4h/2h/1h on
+        # volatile contracts), stamped on each funding row from observed settlement spacing —
+        # read it as-of so the pre-funding flag fires before EVERY settlement, not just 8h ones.
+        # Settlements land on multiples of their interval, so the modulo below stays valid.
+        f_hours = int(fund_row.get("funding_interval_hours") or 8) if fund_row is not None else 8
+        funding_iv_ms = f_hours * 3_600_000
         ms_into = decision_ts % funding_iv_ms
         pre_funding = 1.0 if (funding_iv_ms - ms_into) <= iv else 0.0
 

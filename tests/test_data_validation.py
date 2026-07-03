@@ -126,9 +126,24 @@ def test_funding_misalignment_is_critical(tmp_path) -> None:
     store = fresh_store(tmp_path)
     populate(store, cfg)
     key = SeriesKey(cfg.exchange_id, FUNDING, cfg.symbols[0], cfg.funding_timeframe)
-    off_grid = cfg.window_start_ms + 60_000  # 1 minute past the funding boundary
+    off_grid = cfg.window_start_ms + 60_000  # 1 minute past an hour boundary — corrupt
     store.write(key, [{"ts": off_grid, "funding_rate": 0.0001, "funding_interval_hours": 8}])
     assert "funding_alignment" in _critical_checks(store, cfg)
+
+
+def test_denser_funding_settlements_are_events_not_violations(tmp_path) -> None:
+    """A symbol whose funding interval tightened (Bybit: 8h → 4h/2h/1h on volatile contracts)
+    settles OFF the nominal 8h grid but ON whole hours — those are settlement EVENTS, not data
+    defects: no alignment/ordering/duplicate/missing criticals (H10 regression)."""
+    cfg = small_cfg()
+    store = fresh_store(tmp_path)
+    populate(store, cfg)
+    key = SeriesKey(cfg.exchange_id, FUNDING, cfg.symbols[0], cfg.funding_timeframe)
+    denser = cfg.window_start_ms + 4 * 3_600_000  # 4h after the 8h settlement, hour-aligned
+    store.write(key, [{"ts": denser, "funding_rate": 0.0002, "funding_interval_hours": 4}])
+    report = DataValidator(store, cfg).validate()
+    assert report.passed
+    assert "funding_alignment" not in {v.check for v in report.violations}
 
 
 def test_markindex_misalignment_is_critical(tmp_path) -> None:

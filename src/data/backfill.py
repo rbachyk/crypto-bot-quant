@@ -4,6 +4,8 @@ remediation step 2: ``scripts/backfill --symbol <s> --series <x> --from <t>``).
 Idempotent: fetches only missing grid timestamps from the data source and
 writes them into the Parquet store (append-only dedup). With no ``--symbol`` it
 repairs the whole required universe over the configured coverage window.
+``--config`` targets an alternate data config (e.g. ``configs/data.bybit.yaml``
+for the real lake); the default stays ``configs/data.yaml``.
 """
 
 from __future__ import annotations
@@ -35,9 +37,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--series", help="data_type to repair, e.g. ohlcv (default: all required)")
     parser.add_argument("--from", dest="from_ts", help="ISO-8601 UTC start (default: window start)")
     parser.add_argument("--snapshot", action="store_true", help="re-snapshot the dataset when done")
+    parser.add_argument(
+        "--config",
+        help="data config YAML to repair against, e.g. configs/data.bybit.yaml "
+        "(default: configs/data.yaml)",
+    )
     args = parser.parse_args(argv)
 
-    cfg = load_data_config()
+    cfg = load_data_config(args.config)
     platform = DataPlatform(cfg=cfg)
     start = parse_utc_ms(args.from_ts) if args.from_ts else cfg.window_start_ms
 

@@ -118,6 +118,40 @@ class SeriesStore:
             out.append([str(p.relative_to(sdir)), st.st_size, st.st_mtime_ns])
         return out
 
+    # -- listing watermark ------------------------------------------------ #
+    # A tiny sidecar (``listing.json`` next to the series' partition files) recording the
+    # EARLIEST timestamp the exchange had available when the series was downloaded from the
+    # window start (the first row a from-the-start fetch returns IS the listing edge). Gap
+    # detection uses it to tell genuine pre-listing absence from head-of-series data loss:
+    # stored data beginning ABOVE the watermark is a leading gap, not "pre-listing".
+    def _listing_path(self, key: SeriesKey) -> Path:
+        return self._series_dir(key) / "listing.json"
+
+    def listing_ts(self, key: SeriesKey) -> int | None:
+        """The persisted listing watermark for ``key`` (``None`` for legacy series downloaded
+        before watermarks existed — gap detection then falls back to trusting the first stored
+        timestamp and warns once)."""
+        path = self._listing_path(key)
+        if not path.exists():
+            return None
+        try:
+            return int(json.loads(path.read_text(encoding="utf-8"))["listing_ts"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def record_listing_ts(self, key: SeriesKey, ts: int) -> None:
+        """Persist the listing watermark (monotone-min). A wider window can only move it
+        EARLIER; it never moves up, and ``delete_range`` never touches it — so deleting
+        head-of-series data leaves the watermark behind and the loss stays detectable."""
+        existing = self.listing_ts(key)
+        if existing is not None and existing <= int(ts):
+            return
+        path = self._listing_path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"listing_ts": int(ts)}), encoding="utf-8")
+        tmp.replace(path)
+
     # -- write ----------------------------------------------------------- #
     def write(self, key: SeriesKey, rows: list[dict]) -> int:
         """Merge ``rows`` into the store (append-only, dedup by ts). Returns the
@@ -163,7 +197,8 @@ class SeriesStore:
 
     def delete_range(self, key: SeriesKey, start_ms: int, end_ms: int) -> int:
         """Remove rows in ``[start_ms, end_ms)``. Used to re-download a bad range
-        or to simulate a gap. Returns rows removed."""
+        or to simulate a gap. Returns rows removed. The listing watermark is deliberately
+        NOT moved: a head deletion must remain detectable as a leading gap."""
         sdir = self._series_dir(key)
         if not sdir.exists():
             return 0

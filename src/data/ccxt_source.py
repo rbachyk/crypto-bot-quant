@@ -17,6 +17,10 @@ long windows. Two series are constrained:
   recent ~200 records, so lookback is **bounded by the sampling interval**: ~16h at ``5m``,
   ~8d at ``1h``, ~33d at ``4h``, ~199d at ``1d``. Historical windows older than that simply have
   no OI; the validator (correctly) flags it. Sample OI coarsely, or treat it as best-effort.
+* ``funding`` — an **event series**, not a grid series: Bybit adjusts the settlement interval
+  per symbol (8h base; 4h/2h/1h on volatile contracts), so every settlement returned is kept
+  and ``funding_interval_hours`` is stamped from the observed settlement spacing, never from
+  config (see :meth:`CcxtDataSource._funding_rows`).
 
 Kline timing rules (safety-critical for the append-only store):
 
@@ -181,12 +185,17 @@ class CcxtDataSource(DataSource):
             rows = self._spread_rows(key.symbol, key.timeframe, start_ms, end_ms)
         else:  # pragma: no cover - guarded by schema
             raise ValueError(f"unsupported data_type: {key.data_type}")
-        # Keep only canonical, grid-aligned rows in range; dedup keeping first.
+        # Keep only canonical rows in range; dedup keeping first. Grid alignment is enforced
+        # for every series EXCEPT funding: funding is an EVENT series — Bybit adjusts the
+        # settlement interval per symbol (8h base; 4h/2h/1h on volatile contracts), so
+        # settlements legitimately land off the nominal ``key.timeframe`` grid and every one
+        # must be kept (dropping them silently understates funding P&L with clean coverage).
+        grid_aligned = key.data_type != FUNDING
         seen: set[int] = set()
         out: list[dict] = []
         for r in sorted(rows, key=lambda x: x["ts"]):
             ts = r["ts"]
-            if ts < start_ms or ts >= end_ms or ts % iv != 0 or ts in seen:
+            if ts < start_ms or ts >= end_ms or ts in seen or (grid_aligned and ts % iv != 0):
                 continue
             seen.add(ts)
             out.append(r)
@@ -256,11 +265,19 @@ class CcxtDataSource(DataSource):
         return rows
 
     def _funding_rows(self, key: SeriesKey, start_ms: int, end_ms: int) -> list[dict]:
-        interval_hours = key.interval_ms // 3_600_000
-        rows: list[dict] = []
-        # Bybit returns settlements strictly AFTER ``since``, so query one interval
-        # early to include the settlement that lands exactly on the window start;
-        # the caller's range filter drops anything before ``start_ms``.
+        """Funding settlements as EVENTS — every settlement the exchange returns is kept.
+
+        Bybit adjusts the funding interval per symbol dynamically (8h base; 4h/2h/1h on
+        volatile contracts), so settlements are NOT restricted to the nominal ``key.timeframe``
+        grid. ``funding_interval_hours`` is stamped per row from the OBSERVED spacing between
+        consecutive settlements (Bybit's funding history carries no interval field); a lone
+        settlement falls back to the market's current ``fundingInterval`` metadata, then to the
+        configured label — gap detection treats the stamped interval as the local cadence."""
+        by_ts: dict[int, float] = {}
+        # Bybit returns settlements strictly AFTER ``since``, so query one nominal interval
+        # early: that includes the settlement landing exactly on the window start AND gives
+        # the first in-window row a predecessor for spacing inference; the caller's range
+        # filter drops anything before ``start_ms``.
         since = max(0, start_ms - key.interval_ms)
         last_seen = -1
         while since < end_ms:
@@ -269,25 +286,50 @@ class CcxtDataSource(DataSource):
             )
             if not batch:
                 break
+            done = False
             for f in batch:
                 ts = int(f["timestamp"])
                 if ts >= end_ms:
+                    done = True
                     break
                 rate = f.get("fundingRate")
                 if rate is not None:
-                    rows.append(
-                        {
-                            "ts": ts,
-                            "funding_rate": float(rate),
-                            "funding_interval_hours": interval_hours,
-                        }
-                    )
+                    by_ts.setdefault(ts, float(rate))
             new_since = int(batch[-1]["timestamp"])
-            if new_since <= last_seen:
+            if done or new_since <= last_seen:
                 break
             last_seen = new_since
-            since = new_since + key.interval_ms
+            # Advance by 1ms, NOT one nominal interval: a denser-than-nominal settlement
+            # schedule (4h/2h/1h) must never be paginated over.
+            since = new_since + 1
+        events = sorted(by_ts.items())
+        rows: list[dict] = []
+        for i, (ts, rate) in enumerate(events):
+            if i > 0:
+                spacing = ts - events[i - 1][0]
+            elif len(events) > 1:
+                spacing = events[1][0] - ts
+            else:
+                spacing = 0
+            hours = round(spacing / 3_600_000) if spacing > 0 else 0
+            if hours <= 0:
+                hours = (
+                    self._market_funding_interval_hours(key.symbol)
+                    or key.interval_ms // 3_600_000
+                )
+            rows.append(
+                {"ts": ts, "funding_rate": rate, "funding_interval_hours": int(hours)}
+            )
         return rows
+
+    def _market_funding_interval_hours(self, symbol: str) -> int | None:
+        """The symbol's CURRENT funding interval from market metadata (Bybit serves
+        ``fundingInterval`` in minutes). Best-effort — observed spacing is preferred."""
+        try:
+            minutes = self._markets_loaded().get(symbol, {}).get("info", {}).get("fundingInterval")
+            return max(1, int(minutes) // 60) if minutes else None
+        except Exception:  # noqa: BLE001 - metadata is best-effort; spacing/config cover it
+            return None
 
     def _open_interest_rows(self, symbol: str, timeframe: str, start_ms: int, end_ms: int):
         # NB: Bybit ignores ``since`` here and serves only the most recent block (see module

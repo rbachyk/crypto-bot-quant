@@ -272,6 +272,94 @@ def test_forming_kline_guard_applies_to_kline_derived_point_series() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Funding is an EVENT series: Bybit adjusts the settlement interval per symbol  #
+# (8h base; 4h/2h/1h on volatile contracts). Every settlement must be kept and  #
+# funding_interval_hours stamped from OBSERVED spacing, not config — dropping   #
+# off-8h-grid settlements silently understated funding P&L (H10 regression).    #
+# --------------------------------------------------------------------------- #
+class _IntervalSwitchClient:
+    """Serves settlements every 8h until ``switch_ts``, then every 4h (Bybit behaviour when a
+    contract turns volatile). Returns settlements strictly AFTER ``since`` (Bybit semantics)."""
+
+    def __init__(self, base_ts: int, switch_ts: int, end_ts: int) -> None:
+        h4, h8 = TIMEFRAME_MS["4h"], TIMEFRAME_MS["8h"]
+        self.settlements: list[int] = []
+        ts = base_ts
+        while ts < switch_ts:
+            self.settlements.append(ts)
+            ts += h8
+        while ts < end_ts:
+            self.settlements.append(ts)
+            ts += h4
+
+    def load_markets(self) -> dict:
+        return {"BTC/USDT:USDT": {"info": {"fundingInterval": 240}}}  # minutes -> 4h (current)
+
+    def fetch_funding_rate_history(self, symbol, since=0, limit=200):
+        out = [{"timestamp": ts, "fundingRate": 0.0001} for ts in self.settlements if ts > since]
+        return out[:limit]
+
+
+def _interval_switch_setup() -> tuple[CcxtDataSource, SeriesKey, int, int, int]:
+    h4, h8 = TIMEFRAME_MS["4h"], TIMEFRAME_MS["8h"]
+    base = 100 * h8  # 8h-aligned, away from the epoch edge
+    switch = base + 3 * h8
+    end = switch + 4 * h4
+    src = CcxtDataSource("bybit", client=_IntervalSwitchClient(base, switch, end))
+    key = SeriesKey("bybit", FUNDING, "BTC/USDT:USDT", "8h")
+    return src, key, base, switch, end
+
+
+def test_funding_interval_switch_keeps_every_settlement() -> None:
+    src, key, base, switch, end = _interval_switch_setup()
+    h4, h8 = TIMEFRAME_MS["4h"], TIMEFRAME_MS["8h"]
+    rows = src.fetch(key, base, end)
+    # EVERY settlement comes through — including the 4h ones off the nominal 8h grid.
+    expected_ts = [base, base + h8, base + 2 * h8, switch, switch + h4, switch + 2 * h4,
+                   switch + 3 * h4]
+    assert [r["ts"] for r in rows] == expected_ts
+    assert any(r["ts"] % h8 != 0 for r in rows)  # off-grid settlements present, not dropped
+    # Interval stamped from OBSERVED spacing: 8h rows stamped 8, post-switch rows stamped 4.
+    assert [r["funding_interval_hours"] for r in rows] == [8, 8, 8, 8, 4, 4, 4]
+
+
+def test_funding_interval_switch_stores_cleanly_with_no_gaps_or_duplicates(tmp_path) -> None:
+    """End-to-end (H10 acceptance): 8h→4h switch mid-window ⇒ all settlements stored, coverage
+    clean, re-download adds no duplicates, and a dropped 4h settlement IS detected + repaired."""
+    from src.data.gaps import find_gaps
+    from src.data.ingest import Ingestor
+    from src.data.store import SeriesStore
+
+    src, key, base, switch, end = _interval_switch_setup()
+    h4 = TIMEFRAME_MS["4h"]
+    store = SeriesStore(tmp_path / "lake")
+    ing = Ingestor(src, store)
+    written = ing.download(key, base, end)
+    assert written == 7
+    assert find_gaps(store, key, base, end).covered  # denser cadence is NOT flagged
+    assert ing.download(key, base, end) == 0  # idempotent: no duplicates on re-download
+    assert store.count(key) == 7
+
+    victim = switch + h4  # a 4h settlement OFF the nominal 8h grid
+    store.delete_range(key, victim, victim + 1)
+    report = find_gaps(store, key, base, end)
+    assert report.missing_ts == [victim]  # the old 8h grid could never see this loss
+    assert ing.repair(key, base, end).repaired
+    assert store.count(key) == 7
+
+
+def test_lone_funding_settlement_falls_back_to_market_interval() -> None:
+    """With a single settlement there is no spacing to observe: the stamp falls back to the
+    market's CURRENT fundingInterval metadata (240 min -> 4h), never the config label (8h)."""
+    h8 = TIMEFRAME_MS["8h"]
+    base = 100 * h8
+    src = CcxtDataSource("bybit", client=_IntervalSwitchClient(base, base + h8, base + h8))
+    rows = src.fetch(SeriesKey("bybit", FUNDING, "BTC/USDT:USDT", "8h"), base, base + h8)
+    assert [r["ts"] for r in rows] == [base]
+    assert rows[0]["funding_interval_hours"] == 4
+
+
+# --------------------------------------------------------------------------- #
 # CcxtExchangeAdapter                                                          #
 # --------------------------------------------------------------------------- #
 @pytest.fixture

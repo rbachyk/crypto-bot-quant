@@ -11,7 +11,7 @@ Checks implemented (per Section 8/23):
 * no future timestamps;
 * no impossible prices (non-positive, OHLC inconsistency, above ceiling);
 * no extreme unexplained price gaps;
-* funding timestamps aligned to the funding grid;
+* funding timestamps on the hour grid (settlements are per-symbol-cadence events);
 * mark / index / perp timestamps aligned;
 * spreads within the abnormal-spread threshold;
 * clock within NTP tolerance.
@@ -37,6 +37,8 @@ from src.data.store import SeriesStore
 
 CRITICAL = "critical"
 WARNING = "warning"
+
+_HOUR_MS = 3_600_000
 
 # A close-to-close move larger than this fraction is an "extreme price move". In a multi-year,
 # multi-symbol crypto universe these are almost always REAL flash crashes / liquidation cascades
@@ -165,7 +167,10 @@ class DataValidator:
             report.violations.append(
                 Violation("ordering", CRITICAL, "timestamps out of order", label)
             )
-        if not all(ts % key.interval_ms == 0 for ts in ts_list):
+        # Funding is an EVENT series (per-symbol settlement cadence the exchange adjusts), so
+        # its timestamps are legitimately off the nominal grid; its own alignment check below
+        # enforces the hour grid instead.
+        if key.data_type != FUNDING and not all(ts % key.interval_ms == 0 for ts in ts_list):
             report.violations.append(
                 Violation("ordering", CRITICAL, "timestamp off the expected grid", label)
             )
@@ -238,16 +243,18 @@ class DataValidator:
     def _check_funding_alignment(
         self, key: SeriesKey, ts_list: list[int], report: DataQualityReport
     ) -> None:
+        """Funding settlements are EVENTS on a per-symbol cadence the exchange adjusts (8h base;
+        4h/2h/1h on volatile contracts), so the nominal funding grid must NOT be enforced — but
+        every real settlement lands on a whole hour; anything finer is a corrupt timestamp."""
         if key.data_type != FUNDING:
             return
-        funding_ms = self.cfg.funding_interval_hours * 3_600_000
-        misaligned = [ts for ts in ts_list if ts % funding_ms != 0]
+        misaligned = [ts for ts in ts_list if ts % _HOUR_MS != 0]
         if misaligned:
             report.violations.append(
                 Violation(
                     "funding_alignment",
                     CRITICAL,
-                    f"{len(misaligned)} funding timestamps off the {key.timeframe} grid",
+                    f"{len(misaligned)} funding timestamps off the hour grid",
                     key.label(),
                 )
             )

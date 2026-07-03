@@ -33,20 +33,31 @@ class Ingestor:
         self.source = source
         self.store = store
 
-    def download(self, key: SeriesKey, start_ms: int, end_ms: int) -> int:
-        """Full download of ``[start_ms, end_ms)`` for one series (idempotent)."""
+    def download(
+        self, key: SeriesKey, start_ms: int, end_ms: int, *, record_listing: bool = True
+    ) -> int:
+        """Full download of ``[start_ms, end_ms)`` for one series (idempotent).
+
+        A fetch that starts at the window start doubles as the listing probe: the first row the
+        exchange returns IS the series' listing edge (the earliest available candle at/after
+        ``start_ms``), persisted as the listing watermark so gap detection can tell genuine
+        pre-listing absence from head-of-series data loss. ``record_listing=False`` skips that
+        for fetches that do NOT begin at the window start (the incremental tail resume)."""
         rows = self.source.fetch(key, start_ms, end_ms)
+        if rows and record_listing:
+            self.store.record_listing_ts(key, rows[0]["ts"])
         return self.store.write(key, rows)
 
     def update_incremental(self, key: SeriesKey, start_ms: int, end_ms: int) -> int:
         """Fetch only the data that appeared since the last download — the tail past the last
         stored timestamp (an empty store fetches the whole window). Resumes from the newest
-        stored ts without reading the whole multi-year series."""
+        stored ts without reading the whole multi-year series. Only a from-the-start fetch may
+        record the listing watermark — a tail resume starts mid-series by construction."""
         last = self.store.latest_ts(key)
         resume = (last + key.interval_ms) if (last is not None and last >= start_ms) else start_ms
         if resume >= end_ms:
             return 0
-        return self.download(key, resume, end_ms)
+        return self.download(key, resume, end_ms, record_listing=(resume == start_ms))
 
     def repair(self, key: SeriesKey, start_ms: int, end_ms: int) -> IngestResult:
         """Detect gaps and fetch only the missing ranges (safe gap repair)."""
