@@ -37,7 +37,7 @@ host-side steps below (they connect to `127.0.0.1:5432` / `6379`).
 
 ```bash
 uv sync                      # or: make setup
-cp .env.example .env         # edit DASHBOARD_PASSWORD (DB/Redis URLs default to localhost)
+cp .env.example .env         # set DASHBOARD_PASSWORD — required, no default (DB/Redis URLs default to localhost)
 make docker-up               # OPTIONAL: postgres + redis (+ stack) if not running locally
 make migrate                 # apply Alembic migrations (idempotent; targets head)
 make health                  # probe db / redis / storage / kill switch  → status: healthy

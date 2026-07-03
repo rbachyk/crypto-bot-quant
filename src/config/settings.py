@@ -115,6 +115,11 @@ class Settings(BaseSettings):
     dashboard_auth_mode: DashboardAuthMode = DashboardAuthMode.BASIC
     dashboard_username: str = "admin"
     dashboard_password: str = "change-me-in-env"
+    # Placeholder/default dashboard credentials are refused in EVERY environment (the
+    # dashboard controls the kill switch, job queue and env resets). This explicit
+    # opt-out exists for local development ergonomics ONLY and never takes effect in
+    # production (enforced in _enforce_safety below).
+    allow_default_dashboard_credentials: bool = False
 
     # --- Feature toggles (safe defaults; Appendix B.3) ---------------------
     enable_live_trading: bool = False
@@ -203,13 +208,27 @@ class Settings(BaseSettings):
                 "dashboard authentication is mandatory outside local."
             )
 
-        # A live-capable deployment must not ship the placeholder password.
+        # No deployment may ship the placeholder password: a staging/paper VPS stack
+        # publishes the dashboard (kill switch, job queue, env resets, demo/testnet
+        # order sessions) behind Caddy on 443, so publicly-known defaults are as
+        # dangerous there as in production. Local development may opt out explicitly
+        # via ALLOW_DEFAULT_DASHBOARD_CREDENTIALS=true — but that escape hatch is
+        # itself refused in production.
         if (
-            self.app_env is AppEnv.PRODUCTION
-            and self.dashboard_auth_mode is DashboardAuthMode.BASIC
+            self.dashboard_auth_mode is DashboardAuthMode.BASIC
             and self.dashboard_password in ("", "change-me-in-env")
+            and (self.app_env is AppEnv.PRODUCTION or not self.allow_default_dashboard_credentials)
         ):
-            errors.append("DASHBOARD_PASSWORD must be set to a real secret in production.")
+            errors.append(
+                "DASHBOARD_PASSWORD must be set to a real secret "
+                f"(placeholder/default credentials refused in APP_ENV={self.app_env.value}; "
+                "set ALLOW_DEFAULT_DASHBOARD_CREDENTIALS=true only for local development)."
+            )
+        if self.allow_default_dashboard_credentials and self.app_env is AppEnv.PRODUCTION:
+            errors.append(
+                "ALLOW_DEFAULT_DASHBOARD_CREDENTIALS=true is not allowed when "
+                "APP_ENV=production (default credentials are never acceptable in production)."
+            )
 
         if errors:
             raise ValueError("Unsafe / inconsistent configuration:\n  - " + "\n  - ".join(errors))

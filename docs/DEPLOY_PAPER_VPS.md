@@ -33,7 +33,7 @@ no-op) — so **promotions must exist** before paper-live does anything (step 4)
 ```
 cp .env.example .env
 # edit .env:
-#   DASHBOARD_PASSWORD=<a real password>        # mandatory outside local
+#   DASHBOARD_PASSWORD=<a real password>        # REQUIRED: compose refuses to start without it
 #   EXCHANGE_ID=bybit
 #   EXCHANGE_ENV=live                           # public mainnet DATA only; paper places no orders
 #   PAPER_TIMEFRAME=4h                          # the timeframe whose promoted strategies to run

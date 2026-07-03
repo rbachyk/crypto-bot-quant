@@ -39,7 +39,10 @@ x-app-env: &app-env
   ENABLE_BACKGROUND_RESEARCH_JOBS: ${ENABLE_BACKGROUND_RESEARCH_JOBS:-false}
   DASHBOARD_AUTH_MODE: ${DASHBOARD_AUTH_MODE:-basic}
   DASHBOARD_USERNAME: ${DASHBOARD_USERNAME:-admin}
-  DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-change-me-in-env}
+  # NO insecure fallback: compose fails loudly when DASHBOARD_PASSWORD is unset/empty
+  # (publicly-known default credentials must never boot a stack whose Caddy publishes 443;
+  # Settings additionally refuses the placeholder value in every environment).
+  DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:?set DASHBOARD_PASSWORD in .env (see .env.example)}
 
 # Cap every container's stdout/stderr log so a crash/retry loop can NEVER fill the host disk
 # (Docker's default json-file driver is UNBOUNDED). 10MB × 3 files = ≤30MB per container.

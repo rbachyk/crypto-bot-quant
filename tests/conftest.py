@@ -23,6 +23,13 @@ os.environ["REDIS_URL"] = (os.environ.get("REDIS_URL") or "redis://localhost:637
     "/", 1
 )[0] + "/15"
 
+# The placeholder-credential guard (Settings._enforce_safety) applies in EVERY environment;
+# the suite must still run on a bare checkout whose env/.env carries no real
+# DASHBOARD_PASSWORD, so opt out explicitly here. The opt-out is itself refused when
+# APP_ENV=production, and tests asserting the guard pass
+# allow_default_dashboard_credentials=False explicitly (init kwargs beat env vars).
+os.environ.setdefault("ALLOW_DEFAULT_DASHBOARD_CREDENTIALS", "true")
+
 # Isolate the test DATABASE so the suite never writes into the dashboard's data (the host
 # postgres is shared with `make docker-up`). Mirror the redis-db-15 isolation: swap the database
 # name to `<name>_test` and create it on first use. Best-effort — if the server is unreachable or

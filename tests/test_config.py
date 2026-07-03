@@ -44,6 +44,9 @@ def test_fully_live_config_is_allowed_and_flagged() -> None:
         app_env=AppEnv.PRODUCTION,
         enable_live_trading=True,
         dashboard_password="a-real-secret",
+        # conftest exports ALLOW_DEFAULT_DASHBOARD_CREDENTIALS=true for the suite;
+        # production refuses that override, so disable it explicitly here.
+        allow_default_dashboard_credentials=False,
     )
     assert s.live_trading_allowed is True
 
@@ -61,6 +64,46 @@ def test_dashboard_auth_required_outside_local() -> None:
 def test_production_rejects_placeholder_password() -> None:
     with pytest.raises(ValueError, match="DASHBOARD_PASSWORD"):
         _s(app_env=AppEnv.PRODUCTION, dashboard_password="change-me-in-env")
+
+
+def test_placeholder_password_rejected_in_every_environment() -> None:
+    # Default credentials must not survive ANY deployment (a staging/paper VPS publishes
+    # the dashboard behind Caddy on 443), not just production.
+    for env in (AppEnv.LOCAL, AppEnv.RESEARCH, AppEnv.PAPER, AppEnv.STAGING):
+        with pytest.raises(ValueError, match="DASHBOARD_PASSWORD"):
+            _s(
+                app_env=env,
+                dashboard_password="change-me-in-env",
+                allow_default_dashboard_credentials=False,
+            )
+        with pytest.raises(ValueError, match="DASHBOARD_PASSWORD"):
+            _s(app_env=env, dashboard_password="", allow_default_dashboard_credentials=False)
+
+
+def test_placeholder_password_opt_out_allowed_outside_production() -> None:
+    # Local-development ergonomics: the explicit opt-out permits the placeholder.
+    s = _s(
+        app_env=AppEnv.LOCAL,
+        dashboard_password="change-me-in-env",
+        allow_default_dashboard_credentials=True,
+    )
+    assert s.allow_default_dashboard_credentials is True
+
+
+def test_placeholder_password_opt_out_refused_in_production() -> None:
+    # The escape hatch itself must never take effect in production.
+    with pytest.raises(ValueError, match="ALLOW_DEFAULT_DASHBOARD_CREDENTIALS"):
+        _s(
+            app_env=AppEnv.PRODUCTION,
+            dashboard_password="change-me-in-env",
+            allow_default_dashboard_credentials=True,
+        )
+    with pytest.raises(ValueError, match="ALLOW_DEFAULT_DASHBOARD_CREDENTIALS"):
+        _s(
+            app_env=AppEnv.PRODUCTION,
+            dashboard_password="a-real-secret",
+            allow_default_dashboard_credentials=True,
+        )
 
 
 def test_sync_database_url_uses_psycopg_driver() -> None:
