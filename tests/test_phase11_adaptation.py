@@ -648,6 +648,21 @@ class TestVersioning:
         with tempfile.TemporaryDirectory() as tmpdir, pytest.raises(FileNotFoundError):
             load_frozen_fallback(Path(tmpdir))
 
+    def test_corrupt_index_is_preserved_not_overwritten(self):
+        """A torn/corrupt index.json must be set aside (not silently overwritten) when the next
+        save_snapshot starts a fresh index, so prior metadata is recoverable (L-versioning)."""
+        from src.adaptation.versioning import INDEX_FILENAME, list_snapshots, save_snapshot
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            d = Path(tmpdir)
+            (d / INDEX_FILENAME).write_text("{ this is not valid json", encoding="utf-8")
+            save_snapshot(b"blob", "snap", "v1", "SHADOW", d)
+            # The fresh index has exactly the new entry, and the corrupt bytes were backed up.
+            assert len(list_snapshots(d)) == 1
+            backups = list(d.glob(f"{INDEX_FILENAME}.corrupt.*"))
+            assert backups, "corrupt index must be preserved for recovery"
+            assert backups[0].read_text(encoding="utf-8") == "{ this is not valid json"
+
 
 # ======================================================================== #
 # Store (in-memory)                                                         #

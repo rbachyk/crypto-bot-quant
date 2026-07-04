@@ -53,6 +53,15 @@ def _append_index(snapshot_dir: Path, meta: SnapshotMeta) -> None:
     with lock.open("w") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         try:
+            # If the index exists but is UNPARSEABLE, list_snapshots() returns [] — overwriting it
+            # here would silently destroy the (possibly recoverable) prior metadata. Set it aside
+            # first so an operator can salvage it, then start a fresh index (L-versioning).
+            if path.exists():
+                try:
+                    json.loads(path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    stamp = f"{os.getpid()}.{uuid.uuid4().hex[:8]}"
+                    path.replace(path.with_name(f"{path.name}.corrupt.{stamp}"))
             entries = [e for e in list_snapshots(snapshot_dir) if e.snapshot_id != meta.snapshot_id]
             entries.append(meta)
             tmp = path.parent / f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
