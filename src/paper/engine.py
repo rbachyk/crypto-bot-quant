@@ -343,13 +343,25 @@ class PaperTradingEngine:
             })
         return out
 
-    def _exit_fee(self, symbol: str, notional: float) -> float:
-        """Taker fee for a simulated reduce-only market close (mirrors SimulatedVenue._fee)."""
+    def _exit_fee(self, symbol: str, notional: float, *, maker: bool = False) -> float:
+        """Fee for a simulated close (mirrors SimulatedVenue._fee). A maker take-profit rests at its
+        limit and pays the maker fee; every other exit crosses the spread and pays the taker fee."""
         spec = self._meta.spec(symbol)
         if spec is None:
             return 0.0
-        rate = spec.fields.get("taker_fee", 0.0)
+        rate = spec.fields.get("maker_fee" if maker else "taker_fee", 0.0)
         return abs(notional) * float(rate if isinstance(rate, (int, float)) else 0.0)
+
+    @staticmethod
+    def _exit_slip_frac(spread_bps: float, *, maker: bool) -> float:
+        """Adverse EXIT slippage as a fraction of price. Mirrors the paper ENTRY's half-spread model
+        (``slippage_est = max(0.0002, ½·spread)``) so a round-trip is symmetric and a stop/trailing
+        exit no longer fills exactly at the bracket level (~half a spread too favorable vs the
+        backtest before). A MAKER take-profit rests at its limit → no slippage. The impact term is
+        omitted, matching the entry estimate (immaterial at the default impact coefficient)."""
+        if maker:
+            return 0.0
+        return max(0.0002, 0.5 * float(spread_bps) / 10_000.0)
 
     def _roll_loss_windows(self, ts: int) -> None:
         """Snapshot the lifetime realized total at each UTC day / week boundary so the daily/weekly
@@ -495,21 +507,31 @@ class PaperTradingEngine:
         self._trail_dist.pop(symbol, None)
         self._peak.pop(symbol, None)
         self._venue.close_position(symbol)  # drop mirror + cancel the resting bracket legs
-        exit_fee = self._exit_fee(symbol, exit_price * pos.qty)
-        raw_pnl = (exit_price - pos.entry_price) * pos.side * pos.qty
         trade = next(
             (t for t in reversed(session.trades)
              if t.symbol == symbol and t.exit_reason == "open"),
             None,
         )
+        # Fill the close with adverse slippage (parity with the backtest close / the paper entry):
+        # a maker take-profit rests at its limit; every other exit crosses the spread as a taker.
+        maker_exit = (
+            exit_reason == "take_profit" and trade is not None and trade.execution_route == "maker"
+        )
+        spread_bps = trade.spread_bps_at_entry if trade is not None else 0.0
+        slip = self._exit_slip_frac(spread_bps, maker=maker_exit) if trade is not None else 0.0
+        fill_price = exit_price * (1.0 - pos.side * slip)  # long sells lower, short buys higher
+        exit_slip_cost = abs(fill_price - exit_price) * pos.qty
+        exit_fee = self._exit_fee(symbol, fill_price * pos.qty, maker=maker_exit)
+        raw_pnl = (fill_price - pos.entry_price) * pos.side * pos.qty
         if trade is not None:
             total_fee = trade.fee + exit_fee  # entry fee (already on the record) + exit fee
             pnl = raw_pnl - total_fee - funding
-            trade.exit_price = exit_price
+            trade.exit_price = fill_price
             trade.exit_reason = exit_reason
             trade.exit_ts = now_ts
             trade.fee = total_fee
             trade.funding = funding
+            trade.slippage_cost += exit_slip_cost
             trade.pnl = pnl
             trade.pnl_r = pnl / pos.risk_amount if pos.risk_amount > 0 else 0.0
         else:  # no open record (shouldn't happen in the live path) — book a standalone close
@@ -921,24 +943,31 @@ class PaperTradingEngine:
                 ):
                     exit_reason = "stop"
 
-        raw_pnl = (exit_price - entry_price) * candidate.side * fill.qty
-        # Charge the EXIT-side fee whenever an exit actually occurred (M-F). ``fill.fee`` is the
-        # ENTRY fee only; the backtest and the live held-close both add an exit fee, and the replay
-        # path (which now always resolves a concrete exit) previously booked round-trips minus just
-        # ONE fee — inflating every replay net_pnl / expectancy the PAPER-B/promotion gates read. A
-        # maker take-profit on a maker entry exits maker (mirrors the backtest); every other exit is
-        # taker. A still-"open" position (live path) books no exit fee here — it closes later.
+        # Charge the EXIT-side fee AND adverse exit slippage whenever an exit actually occurred (M-F
+        # + exit-slippage parity). ``fill.fee`` is the ENTRY fee only; the backtest and the live
+        # held-close both add an exit fee, and the replay path previously booked round-trips minus
+        # just one fee and filled EXACTLY at the bracket level (~half a spread too favorable) —
+        # inflating every replay net_pnl / expectancy the PAPER-B/promotion gates read. A maker
+        # take-profit on a maker entry exits maker (no slippage, maker fee), mirroring the backtest;
+        # every other exit crosses the spread as a taker. A still-"open" position (live path) books
+        # no exit fee/slippage here — it closes later via _book_paper_exit.
         exit_fee = 0.0
+        exit_slip_cost = 0.0
         if exit_reason != "open":
+            maker_exit = bool(candidate.maker) and exit_reason == "take_profit"
+            slip = self._exit_slip_frac(candidate.spread_bps, maker=maker_exit)
+            resolved_price = exit_price
+            exit_price = resolved_price * (1.0 - candidate.side * slip)  # adverse fill
+            exit_slip_cost = abs(exit_price - resolved_price) * fill.qty
             spec = self._meta.spec(candidate.symbol)
             fields = spec.fields if spec is not None else {}
-            maker_exit = bool(candidate.maker) and exit_reason == "take_profit"
             rate = (
                 float(fields.get("maker_fee", 0.0002) or 0.0002)
                 if maker_exit
                 else float(fields.get("taker_fee", 0.0006) or 0.0006)
             )
             exit_fee = rate * fill.qty * exit_price
+        raw_pnl = (exit_price - entry_price) * candidate.side * fill.qty
         fee = fill.fee + exit_fee
         pnl = raw_pnl - fee - funding_amount
         risk_amount = (
@@ -971,7 +1000,7 @@ class PaperTradingEngine:
             exit_reason=exit_reason,
             fee=fee,
             funding=funding_amount,  # replay-path accrued funding (H9); 0.0 for live/realtime
-            slippage_cost=fill.slippage_cost,
+            slippage_cost=fill.slippage_cost + exit_slip_cost,  # entry + adverse exit slippage
             pnl=pnl,
             pnl_r=pnl_r,
             has_exchange_side_stop=position.has_exchange_side_stop(),

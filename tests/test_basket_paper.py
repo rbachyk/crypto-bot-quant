@@ -258,7 +258,9 @@ def test_intrabar_stop_via_hl_of_fills_at_level_not_the_close() -> None:
     )
     assert closed == 1
     t = sess.trades[0]
-    assert t.exit_reason == "stop" and t.exit_price == 95.0
+    # Filled at the 95 stop level with adverse exit slippage (0bps entry spread → 0.0002 floor):
+    # a long sells slightly below the level, never at/above it.
+    assert t.exit_reason == "stop" and t.exit_price == 95.0 * (1.0 - 0.0002)
 
 
 def test_rebalance_closes_ghost_leg_with_no_current_bar() -> None:
@@ -538,7 +540,8 @@ def test_paper_engine_trailing_stop_locks_in_profit() -> None:
     assert eng.simulate_paper_exits(lambda _s: 104.0, 4_000, sess) == 1  # 104 ≤ 105 → trail out
     t = sess.trades[0]
     assert t.exit_reason == "trailing_stop"      # distinct reason, not "stop"
-    assert t.exit_price == 104.0 and t.pnl > 0   # locked in profit (+1×(104−100)×2 − fees)
+    # Trail level 104 filled with adverse exit slippage (0bps → 0.0002 floor): long sells lower.
+    assert t.exit_price == 104.0 * (1.0 - 0.0002) and t.pnl > 0  # still locked in profit
 
     # --- SHORT (the lead_lag case): falls to 95, bounces; trail exits at 99 for a small profit
     #     instead of riding up to the 105 fixed stop (a loss).
@@ -550,7 +553,8 @@ def test_paper_engine_trailing_stop_locks_in_profit() -> None:
     assert eng.simulate_paper_exits(lambda _s: 99.0, 4_000, sess) == 1  # 99 ≥ 98 → trail out
     t = sess.trades[0]
     assert t.exit_reason == "trailing_stop"
-    assert t.exit_price == 99.0 and t.pnl > 0    # +1×(100−99)×2 − fees
+    # Short trail level 99 filled with adverse slippage (0.0002 floor): a short BUYS a bit higher.
+    assert t.exit_price == 99.0 * (1.0 + 0.0002) and t.pnl > 0
 
     # --- guardrail: a fresh peak on THIS tick must not close it (no look-ahead) ---
     eng = PaperTradingEngine()

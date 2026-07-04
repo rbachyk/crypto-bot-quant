@@ -121,7 +121,11 @@ class TestPaperExitIntrabarVsCloseOnly:
         assert sym not in eng._open_positions
         trade = session.trades[-1]
         assert trade.exit_reason == "stop"
-        assert trade.exit_price == 90.0  # filled at the bracket level, not the close
+        # Filled at the bracket level (90) with adverse exit slippage, not the close (101). The 2bps
+        # entry spread gives ½·spread = 0.0001, floored at 0.0002 -> a long sells slightly LOWER.
+        assert trade.exit_price == 90.0 * (1.0 - 0.0002)
+        assert trade.exit_price < 90.0  # adverse: never a favorable fill
+        assert trade.slippage_cost > 0.0
 
     def test_close_only_holds_through_the_same_wick(self) -> None:
         # Same bar, but WITHOUT hl_of: the close (101, above the stop) is used -> position survives.
@@ -130,3 +134,14 @@ class TestPaperExitIntrabarVsCloseOnly:
         assert closed == 0
         assert sym in eng._open_positions
         assert session.trades[-1].exit_reason == "open"
+
+    def test_exit_slippage_scales_with_the_entry_spread(self) -> None:
+        # A wide entry spread (40bps -> ½·spread = 0.0020) drives a larger adverse exit fill than
+        # the 2bps floor case above — proving the exit mirrors the half-spread entry model.
+        eng, session, sym = self._engine_with_open_long(entry=100.0, stop=90.0)
+        session.trades[-1].spread_bps_at_entry = 40.0
+        eng.simulate_paper_exits(
+            lambda _s: 101.0, now_ts=1000, session=session, hl_of=lambda _s: (101.0, 89.0)
+        )
+        trade = session.trades[-1]
+        assert trade.exit_price == 90.0 * (1.0 - 0.5 * 40.0 / 10_000.0)  # 90 * (1 - 0.0020)
