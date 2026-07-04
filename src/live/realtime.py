@@ -343,8 +343,14 @@ class LiveCandidateFeed:
         iv = timeframe_ms(self.timeframe)
         if self.data_manager is not None and 0 <= last_ts[sym] < ts - iv:
             try:
+                # Pass WALL-CLOCK as now_ms (not the bar ts): the data manager stamps the symbol's
+                # freshness watermark (last_update_ms) with it, and poll() compares that against
+                # wall-clock for staleness — feeding a bar-close ts made the staleness math use a
+                # past bar time as if it were wall-clock (L-M). The reader watermark (since_ms)
+                # still bounds the backfill window; recovered bars >= ts are dropped by the filter
+                # below, so the current bar is never double-appended.
                 recovered = self.data_manager.backfill_after_reconnect(
-                    sym, ts, since_ms=last_ts[sym] + iv
+                    sym, int(time.time() * 1000), since_ms=last_ts[sym] + iv
                 )
             except Exception:  # noqa: BLE001 - a backfill blip must not kill the stream
                 recovered = []

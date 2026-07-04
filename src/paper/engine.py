@@ -1070,8 +1070,16 @@ class PaperTradingEngine:
         fee_est = entry_price * fee_rate * 2
         slip_est = entry_price * candidate.slippage_est
         edge_est = candidate.expected_edge_frac * entry_price - fee_est - slip_est
+        # Stamp the decision's MARKET time (candidate.decision_ts), not the processing wall-clock
+        # (L-K): decision_logs.ts and paper_trades.created_at must sit on the same clock — otherwise
+        # a replay over historical decision_ts writes the two Section-24 tables with mismatched
+        # times. Falls back to now() when a candidate carries no decision_ts.
+        dts = int(getattr(candidate, "decision_ts", 0) or 0)
+        decision_time = (
+            datetime.fromtimestamp(dts / 1000, tz=UTC) if dts > 0 else datetime.now(UTC)
+        )
         return PaperDecisionLog(
-            entry_ts=datetime.now(UTC),
+            entry_ts=decision_time,
             symbol=candidate.symbol,
             strategy=candidate.strategy,
             regime=candidate.regime,
