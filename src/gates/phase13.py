@@ -1469,12 +1469,18 @@ def check_live(settings: Settings) -> list[Criterion]:
         health = check_health(settings=settings)
         ks = KillSwitch(settings)
 
-        soak_ready = len(health.components) >= 3 and ks is not None
+        # Require the components to actually be HEALTHY, not merely PRESENT: check_health always
+        # returns >= 3 components (probe failures become unhealthy components, not fewer of them)
+        # and KillSwitch(settings) is never None, so the old `len(components) >= 3 and ks is not
+        # None` PASSED even with the DB/Redis/storage down — a live-blocking criterion that asserted
+        # nothing (audit M-L). `health.healthy` is `all(c.healthy for c in components)`.
+        unhealthy = [c.name for c in health.components if not c.healthy]
+        soak_ready = health.healthy and len(health.components) >= 3 and ks is not None
 
         out.append(
             Criterion.ok(
                 "live_1_soak_framework",
-                f"soak infrastructure ready: health={len(health.components)} components; "
+                f"soak infrastructure ready: {len(health.components)} components all healthy; "
                 "kill switch importable; paper engine and monitoring are operational. "
                 "NOTE: an actual 72h continuous testnet/demo soak run (no unhandled crash) "
                 "is required before the operator clicks 'Go Live'.",
@@ -1482,7 +1488,8 @@ def check_live(settings: Settings) -> list[Criterion]:
             if soak_ready
             else Criterion.fail(
                 "live_1_soak_framework",
-                f"soak infrastructure incomplete: {health.components}",
+                f"soak infrastructure not ready: unhealthy components={unhealthy or '(none)'}, "
+                f"total={len(health.components)}",
             )
         )
     except Exception as exc:  # noqa: BLE001
