@@ -1117,6 +1117,8 @@ class PaperTradingEngine:
             strategy_version=candidate.strategy_version,
             kill_switch_state=ks_state,
             # Persist the canonical ML feature row so the real label pipeline (H18) can rebuild a
-            # training feature vector for this decision and join it to the realized outcome.
-            features=candidate_to_row(candidate),
+            # training feature vector for this decision and join it to the realized outcome. Also
+            # carry stop_frac — it is NOT an ML feature but the real exec_quality target needs it to
+            # express the execution cost in R units (else the target degenerates to take/skip; H-C).
+            features={**candidate_to_row(candidate), "stop_frac": float(candidate.stop_frac)},
         )

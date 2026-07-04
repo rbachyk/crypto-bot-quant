@@ -271,15 +271,16 @@ def build_labels_from_paper_outcomes(*, lookback_days: int = 120) -> list[Labele
         outcomes = tkey_out.get(key, [])
         # Positional lockstep is only sound when the executed decisions and closed trades for this
         # (session,symbol,strategy,side) are 1:1 — true when every execute-decision produced exactly
-        # one trade in the same order (a paper session holds ≤1 position per symbol). If the counts
-        # DISAGREE (an execute-decision that never filled / was rejected post-execute, a still-open
-        # position, a non-FIFO close), the pairing would mislabel feature-vector↔realized-R, so
-        # skip the whole key rather than emit corrupt labels. paper_trades carries no decision link
-        # (trade_id) to join on precisely, so conservative skipping is the safe choice.
-        if len(drows) != len(outcomes):
+        # one trade in the same order (a paper session holds ≤1 position per symbol). The COMMON
+        # end-state has one MORE decision than trade — the most-recent position is still open — so
+        # tolerate exactly one trailing extra decision (pair the first ``len(outcomes)`` in order,
+        # drop the open one). Any LARGER/other mismatch (a post-execute reject, a non-FIFO close)
+        # can't be aligned safely, so skip the whole key rather than mislabel — paper_trades carries
+        # no decision link to join on precisely.
+        if len(drows) - len(outcomes) not in (0, 1):
             skipped_keys += 1
             continue
-        for drow, (pnl_r, regime) in zip(drows, outcomes, strict=True):
+        for drow, (pnl_r, regime) in zip(drows, outcomes, strict=False):
             samples.append(_labeled_sample_from_real({**drow, "regime": regime}, pnl_r))
     if skipped_keys:
         _log.warning(
@@ -305,7 +306,9 @@ def _labeled_sample_from_real(drow: dict, pnl_r: float) -> LabeledSample:
         strategy_version=drow["strategy_version"],
         side=drow["side"],
         entry_price=0.0,
-        stop_frac=0.0,
+        # Reconstruct the persisted stop_frac (H-C): the exec_quality target expresses execution
+        # cost in R via cost/stop_frac; with stop_frac=0 it collapsed to the take/skip label.
+        stop_frac=float(feats.get("stop_frac", 0.0)),
         tp_frac=0.0,
         regime=drow.get("regime") or "",
         session=0,

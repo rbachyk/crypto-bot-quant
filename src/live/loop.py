@@ -394,15 +394,29 @@ class LiveLoop:
     # ML-PROMO join links a shadow row to the first paper_trade in the 48h AFTER it (audit M-A).
     _SHADOW_FRESHNESS_MS = 3_600_000  # 1h
 
-    def _maybe_shadow_log(self, group: list[PaperCandidateInput], decision_ts: int) -> None:
-        """H-C Stage 2b: write the ML models' shadow predictions for REAL live candidates to
-        shadow_logs (applied=False, untagged), the producer of the real evidence ML-PROMO scores.
+    def _maybe_shadow_log(
+        self, group: list[PaperCandidateInput], decision_ts: int, executed_trades: list
+    ) -> None:
+        """H-C Stage 2b: write the ML models' shadow predictions for the REAL candidates that were
+        EXECUTED this bar (applied=False, untagged) — the producer of the real evidence ML-PROMO
+        scores. Only executed candidates are logged so each shadow row links to exactly the paper
+        trade it opened (a skip/rejected candidate has no outcome; logging it would mis-join).
         Best-effort: any failure is logged and never disturbs the trading loop."""
-        if self._shadow_disabled or self.mode != "paper" or not group:
+        if self._shadow_disabled or self.mode != "paper" or not executed_trades:
             return
         now_ms = int(time.time() * 1000)
         if now_ms - int(decision_ts) > self._SHADOW_FRESHNESS_MS:
             return  # replay/historical candidate — never now-stamp it (would mis-join, M-A)
+        # Keep only the candidates that actually became a trade this bar.
+        executed = {(t.symbol, t.strategy, int(t.decision_ts)) for t in executed_trades}
+        cands = [
+            pin.candidate
+            for pin in group
+            if (pin.candidate.symbol, pin.candidate.strategy, int(pin.candidate.decision_ts))
+            in executed
+        ]
+        if not cands:
+            return
         try:
             if self._shadow_predictor is None:
                 from src.ml.config import load_ml_config
@@ -420,10 +434,10 @@ class LiveLoop:
                 self._ml_cfg = ml_cfg
                 _log.info("shadow_producer_ready", data_source=source, n_train=len(samples))
             result = self._shadow_predictor.run(
-                [pin.candidate for pin in group],
+                cands,
                 settings=self.settings,
                 write_to_db=True,
-                synthetic_source=False,  # REAL live candidates → count toward ML-PROMO evidence
+                synthetic_source=False,  # REAL executed candidates → count toward ML-PROMO evidence
             )
             # H-C Stage 3: surface recommendations (Section 20) on the SAME real bundles — log-only,
             # applied=False, for the dashboard/reports. Never influences the decision.
@@ -565,12 +579,15 @@ class LiveLoop:
                 )
             before_exec = session.executed_count
             before_rej = session.rejected_count
-            # H-C Stage 2b: shadow-log the ML models' predictions on these REAL candidates BEFORE
-            # the deterministic pipeline runs (predictions never influence the decision — applied=
-            # False). Only in realtime paper on FRESH candidates, so the ML-PROMO forward join is
-            # sound (never now-stamps a historical/replay decision).
-            self._maybe_shadow_log(group, decision_ts)
+            before_trades = len(session.trades)
             self.engine.process_candidates(group, session)
+            # H-C Stage 2b: shadow-log the ML models' predictions — but ONLY for the candidates that
+            # were actually EXECUTED this bar (each such shadow row links to exactly the paper trade
+            # it opened). Logging skip/rejected candidates too would pair them, and multiple same-
+            # symbol candidates, with an unrelated future trade in ML-PROMO's join. Runs AFTER
+            # process_candidates so the executed set is known; predictions never influence the
+            # decision (applied=False). Realtime paper + fresh candidates only.
+            self._maybe_shadow_log(group, decision_ts, session.trades[before_trades:])
             self._record_open_ages(decision_ts, group)
             # Reconcile every tick (Section 7); a foreign order/position halts the loop. A real
             # venue (testnet/demo/live) re-pulls the ACTUAL exchange book (detecting foreign items

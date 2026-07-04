@@ -350,54 +350,65 @@ def test_continuous_feed_stops_on_should_stop() -> None:
     assert calls["n"] > 5  # the stop predicate was polled and eventually halted the stream
 
 
-def test_shadow_producer_logs_fresh_paper_candidates_only() -> None:
-    """H-C Stage 2b: in realtime PAPER mode the loop shadow-logs the ML models' predictions for
-    FRESH real candidates (applied=False, untagged real evidence), but NEVER for stale/replay
-    candidates (a now-stamped write would mis-join in ML-PROMO) or in a real-venue mode."""
+def test_shadow_producer_logs_fresh_executed_paper_candidates_only() -> None:
+    """H-C Stage 2b: in realtime PAPER mode the loop shadow-logs the ML predictions ONLY for the
+    candidates that were EXECUTED this bar (each row links to exactly its trade), and only for FRESH
+    candidates — never a skip/rejected candidate, a stale/replay decision, or a real-venue mode."""
     import time
     from types import SimpleNamespace
 
     from src.paper.engine import PaperCandidateInput
     from src.ranking.candidate import Candidate
 
+    SYM, STRAT = "BTC/USDT:USDT", "lead_lag_xasset"
+
     def _pin(dts: int) -> PaperCandidateInput:
         cand = Candidate(
-            symbol="BTC/USDT:USDT", strategy="lead_lag_xasset", strategy_version="v1", side=1,
+            symbol=SYM, strategy=STRAT, strategy_version="v1", side=1,
             entry_price=100.0, stop_frac=0.01, tp_frac=0.02, regime="R1", session=0,
             decision_ts=dts,
         )
         return PaperCandidateInput(candidate=cand, equity=10_000.0, exit_move_frac=0.0)
 
+    def _trade(dts: int):
+        return SimpleNamespace(symbol=SYM, strategy=STRAT, decision_ts=dts)
+
     class _Spy:
         def __init__(self) -> None:
-            self.calls: list[dict] = []
+            self.calls: list[int] = []
 
         def run(self, candidates, *, settings=None, write_to_db=True, synthetic_source=False):
-            self.calls.append(
-                {"n": len(candidates), "write": write_to_db, "synthetic": synthetic_source}
-            )
+            assert write_to_db and not synthetic_source
+            self.calls.append(len(candidates))
             return SimpleNamespace(bundles=[])  # no bundles → Stage-3 rec branch is a clean no-op
 
     now = int(time.time() * 1000)
 
-    # Paper + fresh → logged, untagged, written.
+    # Paper + fresh + EXECUTED → logged (only the executed candidate).
     loop = LiveLoop(mode="paper")
     spy = _Spy()
     loop._shadow_predictor = spy  # bypass training/DB
-    loop._maybe_shadow_log([_pin(now)], now)
-    assert spy.calls == [{"n": 1, "write": True, "synthetic": False}]
+    loop._maybe_shadow_log([_pin(now)], now, [_trade(now)])
+    assert spy.calls == [1]
+
+    # Paper + fresh but NOT executed (no trade this bar) → NOT logged.
+    loop_ne = LiveLoop(mode="paper")
+    spy_ne = _Spy()
+    loop_ne._shadow_predictor = spy_ne
+    loop_ne._maybe_shadow_log([_pin(now)], now, [])
+    assert spy_ne.calls == []
 
     # Paper + STALE (historical/replay) → NOT logged (freshness gate).
     loop2 = LiveLoop(mode="paper")
     spy2 = _Spy()
     loop2._shadow_predictor = spy2
     stale = now - 10 * loop2._SHADOW_FRESHNESS_MS
-    loop2._maybe_shadow_log([_pin(stale)], stale)
+    loop2._maybe_shadow_log([_pin(stale)], stale, [_trade(stale)])
     assert spy2.calls == []
 
     # Real-venue mode → NOT logged (paper env first).
     loop3 = LiveLoop(mode="testnet")
     spy3 = _Spy()
     loop3._shadow_predictor = spy3
-    loop3._maybe_shadow_log([_pin(now)], now)
+    loop3._maybe_shadow_log([_pin(now)], now, [_trade(now)])
     assert spy3.calls == []

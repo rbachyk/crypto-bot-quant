@@ -42,6 +42,9 @@ class ShadowModel(Protocol):
     model_version: str
     model_type: str
     is_trained: bool
+    # True for models whose predict_proba returns the MAX-class probability (not a calibrated
+    # P(class=1)); OOS scoring must then use macro precision/recall and skip binary brier.
+    is_multiclass: bool
 
     def train(
         self,
@@ -91,6 +94,7 @@ class _SklearnModelMixin:
     _metrics: dict = {}
     _feature_names: list[str] = []
     is_trained: bool = False
+    is_multiclass: bool = False  # binary by default; RegimeClassifier overrides to True
 
     def snapshot(self) -> bytes:
         return _pickle_snapshot({"clf": self._clf, "features": self._feature_names})

@@ -266,21 +266,27 @@ class ShadowPredictor:
             )
 
             m["test_accuracy"] = round(float(accuracy_score(y_test, y_pred)), 4)
-            # A multi-class model (the regime classifier) would raise from the default
-            # average="binary"; use macro averaging when >2 classes are present (L-G).
-            classes = set(y_test) | set(y_pred)
-            avg = "binary" if len(classes) <= 2 else "macro"
+            # Average by the model's DECLARED arity, not the classes seen in this split (H-C M1):
+            # a multi-class model (the regime classifier) that happens to emit only 2 classes on a
+            # small hold-out must still use macro averaging, else its precision/recall silently
+            # switch semantics; average="binary" also raises when a 3rd class appears (L-G).
+            avg = "macro" if getattr(model, "is_multiclass", False) else "binary"
             m["test_precision"] = round(
                 float(precision_score(y_test, y_pred, average=avg, zero_division=0.0)), 4
             )
             m["test_recall"] = round(
                 float(recall_score(y_test, y_pred, average=avg, zero_division=0.0)), 4
             )
-            # Brier only for BINARY models: predict_proba here returns P(class=1) for a binary
-            # model but the max-class probability for the multi-class regime model, which is NOT a
-            # calibrated P(class=1), so a brier over it would be meaningless (L-G).
+            # Brier only for BINARY models: predict_proba returns P(class=1) for a binary model but
+            # the max-class probability for the multi-class regime model, which is NOT a calibrated
+            # P(class=1), so a brier over it would be meaningless. Gate on the declared arity, not
+            # the observed class count, for the same reason as the averaging above (H-C M1 / L-G).
             probas = model.predict_proba(X_test) if hasattr(model, "predict_proba") else None
-            if probas is not None and len(classes) == 2 and len(set(y_test)) > 1:
+            if (
+                probas is not None
+                and not getattr(model, "is_multiclass", False)
+                and len(set(y_test)) > 1
+            ):
                 m["test_brier_score"] = round(float(brier_score_loss(y_test, probas)), 4)
         else:
             m["test_samples"] = 0

@@ -25,6 +25,7 @@ class RegimeClassifier(_SklearnModelMixin):
     """Multi-class regime classifier (shadow mode only)."""
 
     model_type: str = "regime_classifier"
+    is_multiclass: bool = True
 
     def __init__(self, model_id: str, model_version: str) -> None:
         self.model_id = model_id
