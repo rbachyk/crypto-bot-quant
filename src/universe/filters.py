@@ -161,8 +161,12 @@ class UniverseFilterEvaluator:
         expected = 0
         missing = 0
         for key in self.data_cfg.required_keys(symbol):
+            # Clamp the window end to each series' own grid (series_end_ms), as coverage/validation
+            # do — otherwise the still-forming last slot of a timeframe coarser than the 1h backoff
+            # (4h/12h/1d) is counted missing, inflating missing_pct and spuriously quarantining a
+            # clean symbol (L-P).
             gap = find_gaps(
-                self.store, key, self.data_cfg.window_start_ms, self.data_cfg.window_end_ms
+                self.store, key, self.data_cfg.window_start_ms, self.data_cfg.series_end_ms(key)
             )
             expected += gap.expected
             missing += len(gap.missing_ts)
@@ -177,8 +181,9 @@ class UniverseFilterEvaluator:
 
     def _all_required_series_present(self, symbol: str) -> bool:
         for key in self.data_cfg.required_keys(symbol):
+            # series_end_ms per key (L-P) — see _missing_pct.
             gap = find_gaps(
-                self.store, key, self.data_cfg.window_start_ms, self.data_cfg.window_end_ms
+                self.store, key, self.data_cfg.window_start_ms, self.data_cfg.series_end_ms(key)
             )
             if not gap.covered:
                 return False

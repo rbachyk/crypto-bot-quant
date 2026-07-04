@@ -114,6 +114,11 @@ class UniverseManager:
             {
                 "policy": self.uni_cfg.universe_version,
                 "metadata_version": self.meta_cfg.metadata_version,
+                # Include data_version (L-S): a rebuild on a NEWER dataset that yields identical
+                # membership was otherwise treated as idempotent, so the stored
+                # criteria.data_version permanently reflected the FIRST build's dataset —
+                # mislabeling which data the universe was validated against.
+                "data_version": self.data_cfg.data_version,
                 "filters": _filters_dict(self.uni_cfg),
                 "members": members,
             },
