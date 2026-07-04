@@ -105,10 +105,20 @@ class Scheduler:
         try:
             queue = JobQueue(self.settings, redis_client=self._redis)
             for job in self.due(now):
-                queue.enqueue(job.job_type, dict(job.params), requested_by="scheduler")
-                self._redis.set(_LAST_KEY.format(job=job.job_type), str(now))
-                enqueued.append(job.job_type)
-                _log.info("scheduled_job_enqueued", job_type=job.job_type)
+                # Guard EACH enqueue: a transient failure on one job (a Redis blip, a bad param)
+                # must not abort the tick — the other due jobs still enqueue, and the whole
+                # scheduler loop survives (the failure previously propagated out of tick through
+                # run()'s unguarded loop and killed the service). Only advance the last-run
+                # watermark on success so a failed job re-fires next tick.
+                try:
+                    queue.enqueue(job.job_type, dict(job.params), requested_by="scheduler")
+                    self._redis.set(_LAST_KEY.format(job=job.job_type), str(now))
+                    enqueued.append(job.job_type)
+                    _log.info("scheduled_job_enqueued", job_type=job.job_type)
+                except Exception:  # noqa: BLE001 - one bad job must not stop the scheduler
+                    _log.warning(
+                        "scheduled_job_enqueue_failed", job_type=job.job_type, exc_info=True
+                    )
         finally:
             self._redis.delete(_LOCK_KEY)
         return enqueued
@@ -123,7 +133,10 @@ class Scheduler:
             if max_ticks is not None and ticks >= max_ticks:
                 break
             if self.settings.scheduler_enabled:
-                self.tick(time.time())
+                try:
+                    self.tick(time.time())
+                except Exception:  # noqa: BLE001 - a tick failure must never kill the loop
+                    _log.warning("scheduler_tick_failed", exc_info=True)
             ticks += 1
             time.sleep(self.settings.scheduler_tick_sec)
         return ticks
