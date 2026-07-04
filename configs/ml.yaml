@@ -1,10 +1,18 @@
 # ML Configuration — Phase 10 (AGENTS.md Section 20).
-# ML Stage 4: Constrained Live Filter. Shadow gate passed in Phase 9.
-# Stage 3 (recommendation) and Stage 4 (filter) enabled; no risk increases;
-# no new candidates; no hard-blocker overrides (Section 20 ML Stage 3-4).
+#
+# DEPLOYED STATE (audit H-C): the five models TRAIN and SHADOW-LOG only. Neither the Stage-3
+# recommendation nor the Stage-4 constrained filter is wired into the paper/live decision path yet —
+# MLFilter / ShadowPredictor have ZERO callers in src/live, src/paper, src/execution, and
+# `shadow.applied_to_live` is false. So NO ML output influences a real trade today.
+#
+# ``ml_stage`` and the ``recommendation``/``filter`` ``enabled`` flags below are the REQUIRED TARGET
+# stage, not a claim of deployment: they are consumed ONLY by the gate-criticality resolver
+# (src/gates/catalog.py `if_ml_enabled` → ml_stage>=3 or recommendation/filter enabled), which keeps
+# the ML gates (ML-PROMO etc.) LIVE-CRITICAL so live-readiness stays FAIL-CLOSED until the real
+# pipeline exists (H15/H16/H18). Do NOT read them as "the filter is running."
 version: 2
 model_version: "ml_shadow_0001"
-ml_stage: 4  # CONSTRAINED_FILTER (Section 20 ML Stage 4)
+ml_stage: 4  # TARGET: CONSTRAINED_FILTER (Section 20 ML Stage 4) — gates fail-closed until wired
 
 # --- meta-labeler (primary model) ------------------------------------------
 # Best first use per AGENTS.md Section 20: ML estimates whether to take or skip
@@ -85,14 +93,16 @@ kill_criteria:
   max_best_trades_removed_pct: 0.2    # at most 20% of best trades may be filtered
 
 # --- Stage 3: Recommendation Mode (Section 20 ML Stage 3) ------------------
-# Recommendations are shown in dashboard / reports. Never auto-applied.
+# TARGET (not yet wired into the live path — see header, H-C). Recommendations are meant to be
+# shown in dashboard / reports; never auto-applied. `enabled` here only keeps the gate live-critical.
 recommendation:
   enabled: true
   log_to_db: true
 
 # --- Stage 4: Constrained Live Filter (Section 20 ML Stage 4) --------------
-# May BLOCK deterministic candidates. Cannot create, increase risk, or
-# override hard blockers (data_fresh=False, strategy_enabled=False, etc.).
+# TARGET (not yet wired into the live path — see header, H-C). When wired it may BLOCK deterministic
+# candidates but cannot create, increase risk, or override hard blockers (data_fresh=False,
+# strategy_enabled=False, etc.). `enabled` here only keeps the gate live-critical (fail-closed).
 filter:
   enabled: true
   min_confidence_to_take: 0.40  # block candidate if meta_labeler p_take < this
