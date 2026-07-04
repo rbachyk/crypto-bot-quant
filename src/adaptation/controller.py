@@ -100,12 +100,19 @@ class LearnerController:
         ctx: Context,
         *,
         active_strategies: set[str] | None = None,
+        hard_blocked: bool = False,
     ) -> ControllerDecision:
         """Run one decision cycle.
 
         The action produced is validated and guard-enforced in every mode.
         ``applied=True`` only in LIVE_BOUNDED; the Risk Layer independently
         approves before any order is placed (not modelled here).
+
+        ``hard_blocked``: the caller's verdict that the deterministic system hard-blocked this
+        candidate (setup-quality blocker / toxic spread / stale data). The immutable invariant is
+        that a learner ``take=True`` can NEVER resurrect a hard-blocked candidate (Section 21.6);
+        the envelope guard documents it but cannot see the candidate, so it is enforced HERE (M36).
+        A no-trade regime on the context is treated as a hard block too, as a safety net.
 
         When frozen: with a fallback policy loaded, the fallback decides in
         SHADOW mode (never applied); with no fallback the learner is disabled
@@ -156,6 +163,22 @@ class LearnerController:
                 clamped_fields=guard.clamped_fields,
                 rejected=True,
                 rejection_reason=guard.rejection_reason,
+                mode=self.mode.value,
+            )
+
+        # Immutable invariant (Section 21.6, M36): a learner take=True cannot RESURRECT a candidate
+        # the deterministic system hard-blocked. Enforced here because only the controller sees the
+        # candidate's block status; a no-trade regime on the context is a hard block too.
+        if guard.action.take and (hard_blocked or self._is_no_trade_regime(ctx)):
+            return ControllerDecision(
+                action=None,
+                applied=False,
+                clamped_fields=guard.clamped_fields,
+                rejected=True,
+                rejection_reason=(
+                    "take=True cannot resurrect a hard-blocked candidate "
+                    f"(regime={ctx.regime!r}, hard_blocked={hard_blocked})"
+                ),
                 mode=self.mode.value,
             )
 
@@ -247,6 +270,22 @@ class LearnerController:
             logger.error("frozen-fallback snapshot at %s failed to load: %s", path, exc)
             return None
         return fallback
+
+    @staticmethod
+    def _is_no_trade_regime(ctx: Context) -> bool:
+        """Whether the context's regime is a Section-11 no-trade regime (a hard block). Accepts
+        both the R-code label and the lowercase name form."""
+        regime = ctx.regime
+        if not regime:
+            return False
+        from src.regime.detector import NO_TRADE_REGIMES
+
+        r = str(regime)
+        if r in NO_TRADE_REGIMES:
+            return True
+        # Tolerate lowercase name forms (e.g. "high_vol_chop" ↔ R4_HIGH_VOL_CHOP).
+        ru = r.upper()
+        return any(ru in code or code.split("_", 1)[-1] == ru for code in NO_TRADE_REGIMES)
 
     def _effective_policy(self) -> Policy:
         if self._frozen and self.frozen_policy is not None:

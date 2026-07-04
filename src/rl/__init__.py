@@ -5,7 +5,9 @@ Phase 12 delivers the RL research scaffold (research/shadow only):
   * ``src/rl/environment.py``  — TradingEnv (gymnasium.Env); risk-adj cost-net reward
   * ``src/rl/reward.py``       — RiskAdjustedReward calculation
   * ``src/rl/trainer.py``      — simulation training + stress tests; LinearRLTrainer
-  * ``src/rl/registry.py``     — versioned RL policy artifact store
+
+The trained linear policy is serialized to a numpy ``.npy`` snapshot blob by the trainer
+itself (see :meth:`LinearRLTrainer.snapshot`); there is no separate registry module.
 
 The RL policy is ALWAYS shadow-only until the RL-SIM + RL-SHADOW gates pass AND
 manual promotion is approved (Section 21.3). See src/adaptation/policies/rl_policy.py

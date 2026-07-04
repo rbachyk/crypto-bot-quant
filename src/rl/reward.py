@@ -15,7 +15,7 @@ Hard invariants:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,15 @@ class RewardConfig:
     tail_loss_penalty: float = 2.0  # extra penalty when loss exceeds 3x expected
     envelope_proximity_penalty: float = 1.0  # penalty as heat approaches cap
     max_reward: float = 10.0  # clip bound (prevent gradient explosion)
+    # Fraction of portfolio heat released each step (prior positions closing / ageing out over the
+    # horizon). Without this, heat only ever climbs to the cap and the proximity penalty becomes a
+    # fixed toll rather than a real risk signal (L29).
+    heat_release_per_step: float = 0.05
+    # Spread model (H19). A taker crosses ~half the spread; passive_then_taker crosses it only when
+    # the passive leg misses (≈ half as often); a pure maker pays no spread but risks NOT filling —
+    # the wider the spread the lower the fill probability, so it forgoes a growing share of edge.
+    # At ``maker_nonfill_spread_bps`` the modelled maker fill probability reaches ~0.
+    maker_nonfill_spread_bps: float = 40.0
 
 
 @dataclass
@@ -42,16 +51,17 @@ class RewardState:
     current_drawdown: float = 0.0
     current_heat: float = 0.0  # current portfolio heat fraction [0, 1]
     n_steps: int = 0
-    _daily_pnl: float = field(default=0.0, repr=False)
 
-    def update(self, step_pnl: float, heat_delta: float = 0.0) -> None:
+    def update(self, step_pnl: float, heat_delta: float = 0.0, heat_release: float = 0.0) -> None:
         self.cumulative_pnl += step_pnl
-        self._daily_pnl += step_pnl
         self.n_steps += 1
         if self.cumulative_pnl > self.peak_pnl:
             self.peak_pnl = self.cumulative_pnl
         self.current_drawdown = max(0.0, self.peak_pnl - self.cumulative_pnl)
-        self.current_heat = max(0.0, min(1.0, self.current_heat + heat_delta))
+        # Release a fraction of standing heat (positions ageing out) BEFORE adding this step's new
+        # heat, so heat mean-reverts instead of only ratcheting up to the cap (L29).
+        released = self.current_heat * max(0.0, min(1.0, heat_release))
+        self.current_heat = max(0.0, min(1.0, self.current_heat - released + heat_delta))
 
 
 class RiskAdjustedReward:
@@ -129,17 +139,40 @@ class RiskAdjustedReward:
         # --- slippage cost ------------------------------------------------ #
         slippage_cost = slippage_est * size_bucket * cfg.slippage_scale
 
+        # --- spread cost (H19) -------------------------------------------- #
+        # The old reward ignored spread_bps entirely, so always-maker trivially dominated and the
+        # "toxic" 20bps-spread stress had zero effect. Model it by execution style:
+        #   taker              → crosses ~half the spread on every fill;
+        #   passive_then_taker → crosses it only when the passive leg misses (≈ half as often);
+        #   maker              → pays no spread but risks NOT filling — the wider the spread, the
+        #                        lower the fill probability, so it forgoes a growing share of edge.
+        half_spread_frac = 0.5 * max(0.0, spread_bps) / 10_000.0
+        spread_cost = 0.0
+        maker_nonfill_cost = 0.0
+        if exec_style == "taker":
+            spread_cost = half_spread_frac * size_bucket
+        elif exec_style == "passive_then_taker":
+            spread_cost = 0.5 * half_spread_frac * size_bucket
+        else:  # maker
+            # Quadratic in spread: fill risk is negligible at tight spreads (a resting quote fills
+            # readily) and rises steeply as the spread widens toward toxic, so a pure maker keeps
+            # its edge in normal books but no longer trivially dominates a taker in a 20bps spread.
+            nonfill_prob = min(1.0, (max(0.0, spread_bps) / cfg.maker_nonfill_spread_bps) ** 2)
+            maker_nonfill_cost = nonfill_prob * max(0.0, raw_edge)
+
         # --- funding impact ----------------------------------------------- #
         # Positive funding_z means longs pay shorts; negative = shorts pay longs.
         # Small impact proportional to z-score and position size.
         funding_impact = 0.0001 * funding_z * size_bucket * cfg.funding_scale
 
         # --- step PnL ----------------------------------------------------- #
-        step_pnl = raw_edge - fee_cost - slippage_cost - funding_impact
+        step_pnl = (
+            raw_edge - fee_cost - slippage_cost - spread_cost - maker_nonfill_cost - funding_impact
+        )
 
         # --- update state ------------------------------------------------- #
         heat_delta = size_bucket * 0.01  # 1% heat per full-size trade
-        state.update(step_pnl, heat_delta)
+        state.update(step_pnl, heat_delta, heat_release=cfg.heat_release_per_step)
 
         # --- drawdown penalty --------------------------------------------- #
         drawdown_penalty = 0.0

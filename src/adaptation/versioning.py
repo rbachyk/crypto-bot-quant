@@ -9,9 +9,12 @@ round-trip.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+import json
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+
+INDEX_FILENAME = "index.json"
 
 
 @dataclass
@@ -29,6 +32,49 @@ class SnapshotMeta:
 
 def _checksum(blob: bytes) -> str:
     return hashlib.sha256(blob).hexdigest()[:16]
+
+
+def _index_path(snapshot_dir: Path) -> Path:
+    return snapshot_dir / INDEX_FILENAME
+
+
+def _append_index(snapshot_dir: Path, meta: SnapshotMeta) -> None:
+    """Record ``meta`` in the snapshot directory's index (idempotent by snapshot_id), so saved
+    versions are DISCOVERABLE without externally remembering the exact pickle filename (L34)."""
+    entries = [e for e in list_snapshots(snapshot_dir) if e.snapshot_id != meta.snapshot_id]
+    entries.append(meta)
+    _index_path(snapshot_dir).write_text(
+        json.dumps([asdict(e) for e in entries], indent=2), encoding="utf-8"
+    )
+
+
+def list_snapshots(snapshot_dir: Path) -> list[SnapshotMeta]:
+    """All snapshots recorded in the index, oldest first. Empty if no index exists yet (L34)."""
+    path = _index_path(snapshot_dir)
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    out: list[SnapshotMeta] = []
+    for e in raw:
+        try:
+            out.append(SnapshotMeta(**e))
+        except TypeError:
+            continue  # skip a malformed row rather than fail the whole listing
+    out.sort(key=lambda m: m.created_at)
+    return out
+
+
+def latest_snapshot(snapshot_dir: Path, *, learner_id: str | None = None) -> SnapshotMeta | None:
+    """The most recently saved snapshot (optionally for one ``learner_id``), or None (L34).
+
+    Lets an operator restore "the latest version" without knowing its checksum-stamped filename."""
+    entries = list_snapshots(snapshot_dir)
+    if learner_id is not None:
+        entries = [e for e in entries if e.learner_id == learner_id]
+    return entries[-1] if entries else None
 
 
 def save_snapshot(
@@ -51,7 +97,7 @@ def save_snapshot(
         path.write_bytes(policy_blob)
 
     stamp = datetime.now(UTC).isoformat()
-    return SnapshotMeta(
+    meta = SnapshotMeta(
         snapshot_id=filename,
         learner_id=learner_id,
         learner_version=learner_version,
@@ -60,6 +106,8 @@ def save_snapshot(
         size_bytes=len(policy_blob),
         checksum=cksum,
     )
+    _append_index(snapshot_dir, meta)  # keep the version discoverable (L34)
+    return meta
 
 
 def load_snapshot(snapshot_id: str, snapshot_dir: Path) -> bytes:

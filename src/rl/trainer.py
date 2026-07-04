@@ -15,7 +15,8 @@ Training algorithm (Cross-Entropy Method):
      c. Update mean/std of W distribution from elite individuals.
   3. After convergence, the mean W is the trained policy.
 
-The trained policy is persisted as a numpy .npz file via :class:`~src.rl.registry.RLPolicyRegistry`.
+The trained policy is serialized to a numpy ``.npy`` snapshot blob by
+:meth:`LinearRLTrainer.snapshot` (there is no separate registry module).
 
 This is a prototyping-grade implementation (Appendix C) suitable for shadow
 evaluation. A SB3/PyTorch-based trainer can replace it later once the shadow
@@ -44,6 +45,7 @@ class TrainingConfig:
     noise_std_min: float = 0.01  # minimum noise std (convergence)
     noise_decay: float = 0.9  # noise std decay per generation
     episode_length: int = 128  # steps per evaluation episode
+    n_eval_episodes: int = 3  # episodes averaged per individual (variance reduction under CRN)
     rng_seed: int = 42
 
 
@@ -103,7 +105,6 @@ class LinearRLTrainer:
         noise_std = cfg.noise_std_init
 
         gen_means: list[float] = []
-        best_W = w_mean.copy()
         best_return = float("-inf")
 
         for _gen in range(cfg.n_generations):
@@ -113,8 +114,12 @@ class LinearRLTrainer:
                 for _ in range(cfg.population_size)
             ]
 
-            # Evaluate each individual.
-            returns = [self._rollout(W) for W in population]
+            # Common Random Numbers (M38): evaluate EVERY individual this generation on the SAME
+            # set of episode seeds, and average across them. Ranking then reflects the WEIGHTS, not
+            # which individual happened to draw an easier random episode — without CRN the argsort
+            # is dominated by evaluation noise and CEM barely learns.
+            eval_seeds = [int(self._rng.integers(0, 2**31)) for _ in range(cfg.n_eval_episodes)]
+            returns = [self._evaluate(W, eval_seeds) for W in population]
             returns_arr = np.array(returns, dtype=np.float64)
 
             # Rank and select elite.
@@ -129,12 +134,14 @@ class LinearRLTrainer:
             gen_mean = float(elite_returns.mean())
             gen_means.append(gen_mean)
 
-            if elite_returns.max() > best_return:
-                best_return = float(elite_returns.max())
-                best_W = elite_W[int(np.argmax(elite_returns))].copy()
+            best_return = max(best_return, float(elite_returns.max()))
 
-        self.weights = best_W
-        final_returns = np.array([self._rollout(best_W) for _ in range(10)])
+        # The trained policy is the final elite-distribution MEAN — the actual CEM estimator — not
+        # the single luckiest sample ever drawn, whose return was one noisy episode and does not
+        # generalize (M38). best_return is retained only for reporting.
+        self.weights = w_mean
+        final_seeds = [int(self._rng.integers(0, 2**31)) for _ in range(10)]
+        final_returns = np.array([self._rollout(w_mean, seed=s) for s in final_seeds])
         converged = float(final_returns.std()) < 1.0
 
         return TrainingResult(
@@ -145,9 +152,13 @@ class LinearRLTrainer:
             final_std_return=float(final_returns.std()),
             best_return=best_return,
             converged=converged,
-            weights=best_W,
+            weights=w_mean,
             generation_means=gen_means,
         )
+
+    def _evaluate(self, W: np.ndarray, seeds: list[int]) -> float:
+        """Mean total reward of policy ``W`` over the given episode ``seeds`` (CRN average)."""
+        return float(np.mean([self._rollout(W, seed=s) for s in seeds]))
 
     # ------------------------------------------------------------------ #
     # Stress tests                                                         #
@@ -230,16 +241,21 @@ class LinearRLTrainer:
     # Internal                                                            #
     # ------------------------------------------------------------------ #
 
-    def _rollout(self, W: np.ndarray) -> float:
-        """Roll out one episode with weight matrix W; return total reward."""
+    def _rollout(self, W: np.ndarray, *, seed: int | None = None) -> float:
+        """Roll out one episode with weight matrix W; return total reward.
+
+        ``seed`` fixes the episode so the same policy scores identically and different policies
+        are compared on the SAME episode (common random numbers — M38). ``None`` draws a fresh
+        seed from the trainer RNG."""
+        ep_seed = int(self._rng.integers(0, 2**31)) if seed is None else int(seed)
         env = TradingEnv(
             config=EnvConfig(
                 episode_length=self.cfg.episode_length,
-                rng_seed=int(self._rng.integers(0, 2**31)),
+                rng_seed=ep_seed,
             ),
             reward_config=self.reward_cfg,
         )
-        obs, _ = env.reset()
+        obs, _ = env.reset(seed=ep_seed)
         total = 0.0
         done = False
         while not done:
