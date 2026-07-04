@@ -184,6 +184,10 @@ class _Open:
     # worst adverse price seen (min low for longs, max high for shorts). Seeded to entry_price.
     fav_price: float = 0.0
     adv_price: float = 0.0
+    # Last observed mark (bar close). Used to mark the position to market on GAP bars (no bar for
+    # this symbol at ts) so its unrealized P&L carries forward instead of dropping to 0 and creating
+    # a spurious equity spike + phantom drawdown (L5). Seeded to entry_price.
+    last_mark: float = 0.0
 
 
 def _regime_of(row: dict, spread_bps: float = 0.0) -> str:
@@ -229,6 +233,8 @@ class BacktestEngine:
         # up "this symbol's row at the bar being managed" (and peers, for cross-asset). Built only
         # when a strategy exposes manage()/manage_portfolio() (see run()).
         self._rows_by_ts: dict[str, dict[int, dict]] = {}
+        # Per-symbol inputs, for exit fills to price the closing spread (M2). Built per run().
+        self._inputs_by_symbol: dict[str, SymbolInput] = {}
         # Stateful regime labels per symbol/decision_ts (RegimeTracker, anti-whipsaw) used for
         # trade labeling — parity with the live tracker convention. Built per run().
         self._regime_by_ts: dict[str, dict[int, str]] = {}
@@ -272,6 +278,9 @@ class BacktestEngine:
         else:
             signals_by_ts = {s.symbol: self._signals(s) for s in inputs}
         inputs_by_symbol = {s.symbol: s for s in inputs}
+        # Kept on the engine so exit fills can price the closing spread per-symbol (M2), mirroring
+        # the entry side, instead of a hardcoded 2bps floor.
+        self._inputs_by_symbol = inputs_by_symbol
 
         equity = self.cfg.account.initial_equity
         open_positions: list[_Open] = []
@@ -564,6 +573,7 @@ class BacktestEngine:
             maker=sig.maker,
             fav_price=entry_price,
             adv_price=entry_price,
+            last_mark=entry_price,
         )
 
     # -- exit ------------------------------------------------------------ #
@@ -679,7 +689,12 @@ class BacktestEngine:
         else:
             # Closing is taker on the opposite side (adverse slippage).
             exit_side = SELL if pos.side > 0 else BUY
-            spread_bps = 2.0  # modelled exit spread floor; refined via min_half_spread_frac
+            # Per-symbol modelled spread AT THE EXIT bar (M2) — mirrors the entry side, which prices
+            # spread_bps_at(decision_ts). A hardcoded 2bps understated round-trip cost ~40% on thin
+            # alts (whose entry spread is many multiples of 2bps). spread_bps_at floors at 2.0 when
+            # the symbol has no spread samples, so liquid/no-data behaviour is unchanged.
+            sym_in_exit = self._inputs_by_symbol.get(pos.symbol)
+            spread_bps = sym_in_exit.spread_bps_at(exit_ts) if sym_in_exit is not None else 2.0
             # Use the REAL exit-bar notional for the impact term (mirrors the entry side). A
             # hardcoded bar_notional=1.0 made the impact term ~`notional`× too large on exits, so
             # any non-zero impact_coeff would blow up exit fills and corrupt every expectancy.
@@ -783,9 +798,12 @@ class BacktestEngine:
         total = 0.0
         for pos in open_positions:
             bar = self._bars_by_ts[pos.symbol].get(ts)
-            if bar is None:
-                continue
-            mark = float(bar["close"])
+            if bar is not None:
+                pos.last_mark = float(bar["close"])
+            # On a gap bar (no bar for this symbol at ts) keep the last observed mark instead of
+            # contributing 0 unrealized — a 0 would erase the open position's unrealized loss for
+            # this bar and re-introduce it on the next real bar, spiking equity and drawdown (L5).
+            mark = pos.last_mark
             total += pos.side * (mark - pos.entry_price) * pos.qty - pos.entry_fee - pos.funding
         return total
 

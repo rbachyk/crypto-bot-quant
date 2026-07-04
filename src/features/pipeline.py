@@ -18,6 +18,7 @@ is byte-reproducible from a dataset snapshot.
 from __future__ import annotations
 
 import abc
+import bisect
 import hashlib
 import json
 import math
@@ -219,17 +220,20 @@ def _ols_slope(values: list[float]) -> float:
     return num / denom
 
 
+def _ts_key(row: dict) -> int:
+    return row["ts"]
+
+
 def _asof(
     samples: list[dict], field_name: str, decision_ts: int
 ) -> tuple[float | None, float | None]:
-    """Return (current, previous) values of the last two samples with ts <= decision_ts."""
-    cur: float | None = None
-    prev: float | None = None
-    for row in samples:  # samples are sorted by ts
-        if row["ts"] > decision_ts:
-            break
-        prev = cur
-        cur = float(row[field_name])
+    """Return (current, previous) values of the last two samples with ts <= decision_ts.
+
+    Binary search on the ts-sorted samples (O(log n)) rather than a full linear rescan every bar —
+    the per-bar rescans made feature builds O(n²) over a run (L9)."""
+    hi = bisect.bisect_right(samples, decision_ts, key=_ts_key)  # first index with ts > decision_ts
+    cur = float(samples[hi - 1][field_name]) if hi >= 1 else None
+    prev = float(samples[hi - 2][field_name]) if hi >= 2 else None
     return cur, prev
 
 
@@ -239,19 +243,21 @@ def _asof_window_history(
     """Values of samples inside the FIXED trailing window ``(decision_ts - window_ms,
     decision_ts]``. Deliberately not an expanding history anchored at the run's window
     start: the result depends only on absolute time, so a statistic over it scores the same
-    symbol/ts identically regardless of the run window's depth (reproducibility + parity)."""
+    symbol/ts identically regardless of the run window's depth (reproducibility + parity).
+
+    Binary-searches both window edges on the ts-sorted samples (L9)."""
     lo = decision_ts - window_ms
-    return [float(r[field_name]) for r in samples if lo < r["ts"] <= decision_ts]
+    lo_i = bisect.bisect_right(samples, lo, key=_ts_key)  # first index with ts > lo
+    hi_i = bisect.bisect_right(samples, decision_ts, key=_ts_key)  # first index with ts > dts
+    return [float(r[field_name]) for r in samples[lo_i:hi_i]]
 
 
 def _asof_row(samples: list[dict], decision_ts: int) -> dict | None:
-    """The last full sample row with ts <= decision_ts (``None`` before the first sample)."""
-    cur: dict | None = None
-    for row in samples:  # samples are sorted by ts
-        if row["ts"] > decision_ts:
-            break
-        cur = row
-    return cur
+    """The last full sample row with ts <= decision_ts (``None`` before the first sample).
+
+    Binary search on the ts-sorted samples (L9)."""
+    hi = bisect.bisect_right(samples, decision_ts, key=_ts_key)  # first index with ts > decision_ts
+    return samples[hi - 1] if hi >= 1 else None
 
 
 # --------------------------------------------------------------------------- #

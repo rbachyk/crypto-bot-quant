@@ -91,7 +91,6 @@ class KillCriteria:
 @dataclass(frozen=True, slots=True)
 class WalkForwardConfig:
     folds: int = 5
-    train_frac: float = 0.5
     holdout_frac: float = 0.2
     kill_criteria: KillCriteria = field(default_factory=KillCriteria)
     # How a FOLD is judged. The walk-forward asks two DIFFERENT questions: per-fold = is the edge
@@ -216,7 +215,6 @@ def load_backtest_config(path: str | None = None) -> BacktestConfig:
         ),
         walk_forward=WalkForwardConfig(
             folds=int(wf.get("folds", 5)),
-            train_frac=float(wf.get("train_frac", 0.5)),
             holdout_frac=float(wf.get("holdout_frac", 0.2)),
             fold_criterion=str(wf.get("fold_criterion", "directional")),
             kill_criteria=KillCriteria(

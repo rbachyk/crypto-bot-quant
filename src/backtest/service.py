@@ -557,10 +557,18 @@ def rebase_window(inputs: list[SymbolInput], lo_ts: int, hi_ts: int) -> list[Sym
     out: list[SymbolInput] = []
     for s in inputs:
         bars = [_shift_ts(b, lo_ts) for b in s.bars if lo_ts <= b["ts"] < hi_ts]
+        # Keep every row whose ENTRY (``decision_ts``) lands in ``[lo, hi)`` — a signal is tradable
+        # iff its entry bar is in the fold. The old extra ``r["ts"] >= lo_ts`` clause additionally
+        # required the row's SOURCE bar (decision_ts − one interval) to be inside the fold, which
+        # silently dropped the first tradable signal of every fold whose entry sits on the boundary
+        # (its source bar is one bar before ``lo``). Features are computed on the full contiguous
+        # series, so using that prior bar is causal warmup, not future leakage (L2). The single
+        # boundary row's shifted source ``ts`` may be slightly negative; the engine keys fills off
+        # ``decision_ts`` and bar ts only, never the feature row's ``ts``, so this is harmless.
         rows = [
             _shift_row(r, lo_ts)
             for r in s.frame.rows
-            if lo_ts <= r["decision_ts"] < hi_ts and r["ts"] >= lo_ts
+            if lo_ts <= r["decision_ts"] < hi_ts
         ]
         frame = FeatureFrame(
             symbol=s.frame.symbol,

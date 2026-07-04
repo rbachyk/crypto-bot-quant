@@ -95,21 +95,28 @@ def _downsample(ts: list[int], vals: list[float], n: int = 500) -> list[list[flo
     return out
 
 
-def _drawdown_series(equity: list[float]) -> list[float]:
-    """Per-point drawdown as a positive fraction of the running peak."""
+def _drawdown_series(equity: list[float], initial: float = 0.0) -> list[float]:
+    """Per-point drawdown as a positive fraction of the running peak.
+
+    Peak is seeded at ``initial`` (the account's starting equity) rather than the first recorded
+    point, so a losing first trade counts as drawdown from capital, not from a post-first-trade
+    high (L4). ``initial<=0`` falls back to the first point for capital-agnostic callers."""
     out: list[float] = []
-    peak = equity[0] if equity else 0.0
+    peak = initial if initial > 0 else (equity[0] if equity else 0.0)
     for v in equity:
         peak = max(peak, v)
         out.append((peak - v) / peak if peak > 0 else 0.0)
     return out
 
 
-def max_drawdown(equity_curve: list[float]) -> float:
-    """Maximum peak-to-trough drawdown as a positive fraction of the peak."""
+def max_drawdown(equity_curve: list[float], initial: float = 0.0) -> float:
+    """Maximum peak-to-trough drawdown as a positive fraction of the peak.
+
+    Peak is seeded at ``initial`` (starting capital) so the first trade's loss is measured from
+    capital, not from the post-first-trade equity (L4). ``initial<=0`` seeds at the first point."""
     if not equity_curve:
         return 0.0
-    peak = equity_curve[0]
+    peak = initial if initial > 0 else equity_curve[0]
     worst = 0.0
     for v in equity_curve:
         peak = max(peak, v)
@@ -151,13 +158,17 @@ def _stability(trades: list[Trade], segments: int = 5) -> dict:
         return {"segments": 0, "positive_segments": 0, "segment_expectancy_r": [], "pnl_std": 0.0}
     ordered = sorted(trades, key=lambda t: t.exit_ts)
     n = len(ordered)
-    seg = max(1, n // segments)
+    # Exactly ``min(segments, n)`` contiguous chunks with the remainder spread across the earliest
+    # chunks (boundaries at ⌊k·n/segs⌋). The old ``range(0, n, n//segments)`` produced segments+1
+    # chunks whenever n wasn't a multiple of segments — a tiny tail chunk counted as a full,
+    # equally-weighted segment and skewed positive_segments (L3).
+    segs = min(segments, n)
+    bounds = [(k * n) // segs for k in range(segs + 1)]
     seg_exp: list[float] = []
     positive = 0
-    for i in range(0, n, seg):
-        chunk = ordered[i : i + seg]
-        e = _expectancy_r(chunk)
-        seg_exp.append(round(e, 6))
+    for a, b in zip(bounds, bounds[1:], strict=False):
+        chunk = ordered[a:b]
+        seg_exp.append(round(_expectancy_r(chunk), 6))
         if sum(t.pnl for t in chunk) > 0:
             positive += 1
     pnls = [t.pnl for t in ordered]
@@ -230,12 +241,14 @@ def build_report(result: BacktestResult, *, label: str = "") -> BacktestReport:
         "planned_rr": _median_planned_rr(trades),  # target:stop at entry (median)
         "realized_rr": realized_rr,  # avg_win_r / |avg_loss_r| — what was actually achieved
         "profit_factor": round(_pf(trades), 6),
-        "max_drawdown": round(max_drawdown(result.equity_curve), 6),
+        "max_drawdown": round(max_drawdown(result.equity_curve, initial), 6),
         "trade_count": len(trades),
         "win_rate": round(sum(1 for t in trades if t.pnl > 0) / len(trades), 6) if trades else 0.0,
         # Downsampled time series (chartable; capped so a multi-year 5m run stays small).
         "equity_curve": _downsample(result.equity_ts, result.equity_curve),
-        "drawdown_curve": _downsample(result.equity_ts, _drawdown_series(result.equity_curve)),
+        "drawdown_curve": _downsample(
+            result.equity_ts, _drawdown_series(result.equity_curve, initial)
+        ),
         "symbols": list(result.symbols),
         # Required breakdowns (Section 19).
         "symbol_breakdown": _breakdown(trades, lambda t: t.symbol),

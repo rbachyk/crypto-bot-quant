@@ -120,6 +120,11 @@ def detect_regime(
     vol_z = float(row.get("vol_z", 0.0))
     ret_1 = abs(float(row.get("ret_1", 0.0)))
     high_vol = atr_rank >= cfg.high_vol_rank
+    # R5 is a MARKET-WIDE impulse: consult a cross-sectional breadth signal (``market_vol_z`` — the
+    # universe-aggregated vol_z) when the caller provides one, so a single symbol's spike no longer
+    # masquerades as a market-wide event (L8). Falls back to this symbol's vol_z when no market
+    # aggregate is plumbed, so behaviour is unchanged for callers that don't supply it.
+    market_vol_z = float(row.get("market_vol_z", vol_z))
 
     matches: set[str] = {R1_LOW_VOL_RANGE}  # the always-available default
     if not data_ok:
@@ -132,7 +137,7 @@ def detect_regime(
         matches.add(R3_HIGH_VOL_EXPANSION)
     if high_vol and dir_eff <= cfg.chop_dir_efficiency:
         matches.add(R4_HIGH_VOL_CHOP)
-    if vol_z >= cfg.impulse_vol_z:
+    if market_vol_z >= cfg.impulse_vol_z:
         matches.add(R5_MARKET_WIDE_IMPULSE)
     if trend >= cfg.trend_slope_min and dir_eff >= cfg.chop_dir_efficiency:
         matches.add(R2_TREND)

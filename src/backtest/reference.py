@@ -143,14 +143,5 @@ class ReferenceReader(FeatureDataReader):
         }.get(data_type, [])
 
     # -- helpers for the engine ------------------------------------------ #
-    def spread_bps_at(self, decision_ts: int) -> float:
-        """Last spread sample with ts <= decision_ts (modelled spread at decision)."""
-        bps = 2.0
-        for row in self._spread:
-            if row["ts"] > decision_ts:
-                break
-            bps = float(row["spread_bps"])
-        return bps
-
     def funding_events(self) -> list[dict]:
         return list(self._funding)

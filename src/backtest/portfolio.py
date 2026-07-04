@@ -53,6 +53,9 @@ class _Leg:
     # every tick and the point-in-time window slides, so a saved index would point at the wrong
     # event after a refresh (skipping or double-charging carry — funding_carry's entire edge).
     last_funding_ts: int
+    # Last observed mark (bar close), carried forward on gap bars so the leg's unrealized P&L
+    # doesn't drop to 0 (and spike equity/drawdown) when its symbol has no bar at ts (L5).
+    last_mark: float = 0.0
 
 
 class CrossSectionalEngine:
@@ -217,20 +220,52 @@ class CrossSectionalEngine:
                 equity += self._close_leg(leg, prior, "gap_close", result, sym_in)
                 del holdings[sym]
         # Open new legs (stable same-side members are kept — no churn). Per-symbol target notionals
-        # are dollar- or beta-neutral depending on config.
+        # are dollar- or beta-neutral depending on config. Openability (priceable bar+row, non-toxic
+        # spread) is resolved BEFORE sizing so a skipped leg doesn't silently leave the basket net-
+        # directional: the target notional is balanced across the names that can ACTUALLY open on
+        # each side (L7). When both sides open fully this is identical to the old equal weighting.
         gross = equity * self.portfolio_gross * self.risk_scale
-        notionals = self._target_notionals(longs, shorts, ts, gross)
-        for sym, side in target.items():
-            if sym in holdings:
-                continue
-            bar = bars_by_ts[sym].get(ts)
-            row = rows_by_ts[sym].get(ts)
-            if bar is None or row is None:
-                continue
-            leg = self._open_leg(sym, side, notionals.get(sym, 0.0), bar, row, ts, by_symbol[sym])
+        # Book-level leverage cap: gross exposure / equity may not exceed the account leverage
+        # ceiling — the per-trade engine enforces this via RiskSimulator; the basket had none (M5).
+        gross = min(gross, equity * float(self.cfg.account.max_leverage))
+
+        def _new_openable(sym: str) -> bool:
+            return sym not in holdings and self._openable(
+                sym, bars_by_ts, rows_by_ts, by_symbol, ts
+            )
+
+        open_longs = {s for s in longs if _new_openable(s)}
+        open_shorts = {s for s in shorts if _new_openable(s)}
+        notionals = self._target_notionals(open_longs, open_shorts, ts, gross)
+        for sym in (*open_longs, *open_shorts):
+            side = target[sym]
+            leg = self._open_leg(
+                sym, side, notionals.get(sym, 0.0),
+                bars_by_ts[sym][ts], rows_by_ts[sym][ts], ts, by_symbol[sym],
+            )
             if leg is not None:
                 holdings[sym] = leg
+        # Track (rather than silently accept) any residual directional tilt across the whole book —
+        # kept legs, an empty side, or a leg that still failed to fill after the openability check.
+        net = sum(leg.side * leg.notional for leg in holdings.values())
+        gross_now = sum(leg.notional for leg in holdings.values())
+        if gross_now > 0 and abs(net) > 0.05 * gross_now:
+            _log.warning(
+                "basket_net_directional",
+                rebalance_ts=ts, net_notional=round(net, 2),
+                gross_notional=round(gross_now, 2), tilt_frac=round(net / gross_now, 4),
+            )
         return equity
+
+    def _openable(self, sym, bars_by_ts, rows_by_ts, by_symbol, ts) -> bool:
+        """Whether a NEW leg for ``sym`` can actually fill this rebalance: a priceable bar and
+        feature row at ts, positive open, and a non-toxic modelled spread. Resolved before sizing
+        so per-side notionals balance over tradeable names only (L7)."""
+        bar = bars_by_ts[sym].get(ts)
+        row = rows_by_ts[sym].get(ts)
+        if bar is None or row is None or float(bar["open"]) <= 0:
+            return False
+        return float(by_symbol[sym].spread_bps_at(ts)) <= self.cfg.execution.max_spread_bps
 
     def _target_notionals(self, longs, shorts, ts, gross) -> dict[str, float]:
         """Per-leg notional. Dollar-neutral = equal weight. Beta-neutral scales the two legs so the
@@ -255,7 +290,19 @@ class CrossSectionalEngine:
         spread_bps = float(sym_in.spread_bps_at(ts))
         if spread_bps > self.cfg.execution.max_spread_bps:
             return None  # toxic spread — skip this leg
+        # Metadata gates (M5): round qty DOWN to the exchange lot step and reject legs below the
+        # min order size / min notional, so a basket is validated on EXECUTABLE orders — the
+        # per-trade engine already does this via RiskSimulator; the basket bypassed it entirely.
+        spec = self.meta.spec(sym)
+        fields = spec.fields if spec is not None else {}
+        qty_step = float(fields.get("qty_step", fields.get("lot_size", 0.0)) or 0.0)
+        min_order_size = float(fields.get("min_order_size", 0.0) or 0.0)
+        min_notional = float(fields.get("min_notional", 0.0) or 0.0)
         qty = notional / ref_price
+        if qty_step > 0:
+            qty = int(qty / qty_step) * qty_step
+        if qty <= 0 or qty < min_order_size or qty * ref_price < min_notional:
+            return None  # unexecutable leg — don't book a fill the venue would reject
         filled_maker = False
         if self.maker:
             # Passive limit posted inside the rebalance bar's open; fills ONLY if the bar trades
@@ -303,6 +350,7 @@ class CrossSectionalEngine:
             regime=_regime_of(row, spread_bps),
             session=int(row.get("session_code", 0)),
             last_funding_ts=ts,  # settle only funding posted strictly after entry
+            last_mark=entry_price,
         )
 
     def _close_leg(
@@ -407,9 +455,12 @@ class CrossSectionalEngine:
         total = 0.0
         for leg in holdings.values():
             bar = bars_by_ts[leg.symbol].get(ts)
-            if bar is None:
-                continue
-            mark = float(bar["close"])
+            if bar is not None:
+                leg.last_mark = float(bar["close"])
+            # Gap bar (no bar for this symbol at ts): carry the last observed mark rather than
+            # contribute 0, which would erase this leg's unrealized P&L for the bar and re-add it
+            # next real bar — a spurious equity spike + phantom drawdown (L5).
+            mark = leg.last_mark or leg.entry_price
             total += leg.side * (mark - leg.entry_price) * leg.qty - leg.entry_fee - leg.funding
         return total
 

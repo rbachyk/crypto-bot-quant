@@ -75,7 +75,13 @@ class RankingResult:
             "selected": [r.to_dict() for r in self.selected],
             "winner": self.winner.to_dict() if self.winner else None,
             "rejected_alternatives": [r.to_dict() for r in self.rejected],
-            "evaluated": len(self.selected) + len(self.rejected),
+            # Distinct candidates evaluated this cycle. ``rejected`` re-lists ranks 2..n of
+            # ``selected`` as "outranked" alternatives (by design — the decision log wants them),
+            # so those must NOT be added again or ``evaluated`` double-counts every survivor below
+            # rank 1 (L6). Count survivors once, plus only the genuinely filtered-out (hard-blocked
+            # / below-threshold) rejects.
+            "evaluated": len(self.selected)
+            + sum(1 for r in self.rejected if not r.reason.startswith("outranked")),
         }
 
 
