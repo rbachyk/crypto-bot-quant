@@ -217,6 +217,50 @@ def test_engine_simulates_paper_bracket_and_time_stop_exits() -> None:
     assert sess.trades[0].exit_reason == "time_stop"
 
 
+def test_intrabar_stop_via_hl_of_fills_at_level_not_the_close() -> None:
+    """M-G: with hl_of the bracket is checked against the bar's WICK and filled at the exact level —
+    an intrabar stop that the close recovers from still books a `stop` (the H9 case), whereas the
+    close-only path (no hl_of) would hold. Realtime (no hl_of) behaviour is unchanged."""
+    from src.paper.engine import PaperTradingEngine
+    from src.paper.session import PaperSession, PaperTrade
+    from src.risk.portfolio import Position
+
+    sym = "ETH/USDT:USDT"
+
+    def _seed(eng: PaperTradingEngine, sess: PaperSession) -> None:
+        eng._open_positions[sym] = Position(
+            symbol=sym, side=1, qty=2.0, entry_price=100.0, risk_amount=10.0,
+            beta_to_btc=1.0, regime="R1",
+        )
+        eng._position_meta[sym] = ("lead_lag_xasset", 1_000)
+        eng._exit_levels[sym] = (95.0, 130.0, 0, 1_000)  # stop 95, unreachable tp
+        sess.trades.append(PaperTrade(
+            trade_id="ETH", symbol=sym, strategy="lead_lag_xasset", side=1, qty=2.0,
+            entry_price=100.0, stop_price=95.0, tp_price=130.0, regime="R1", session=0,
+            decision_ts=1_000, entry_ts=1_000, exit_ts=1_000, exit_price=100.0, exit_reason="open",
+            fee=0.2, slippage_cost=0.0, pnl=-0.2, pnl_r=0.0, has_exchange_side_stop=True,
+            execution_route="maker", spread_bps_at_entry=0.0, slippage_frac=0.0,
+        ))
+
+    # Close-only: the bar closes at 100 (above the 95 stop) → position HELD.
+    eng = PaperTradingEngine()
+    sess = PaperSession(session_id="t")
+    _seed(eng, sess)
+    assert eng.simulate_paper_exits(lambda _s: 100.0, 2_000, sess) == 0
+    assert sym in eng._open_positions
+
+    # Intrabar: same close (100) but the bar's LOW wicked to 94 → stop breached, filled AT 95.
+    eng = PaperTradingEngine()
+    sess = PaperSession(session_id="t")
+    _seed(eng, sess)
+    closed = eng.simulate_paper_exits(
+        lambda _s: 100.0, 2_000, sess, hl_of=lambda _s: (101.0, 94.0)
+    )
+    assert closed == 1
+    t = sess.trades[0]
+    assert t.exit_reason == "stop" and t.exit_price == 95.0
+
+
 def test_rebalance_closes_ghost_leg_with_no_current_bar() -> None:
     """REGRESSION (C2): a held leg whose symbol has NO bar at a rebalance (halted/delisted/feed gap
     over a multi-day run) must still be flattened on its last known close — not left as a ghost leg

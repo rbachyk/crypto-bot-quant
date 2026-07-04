@@ -404,7 +404,7 @@ class PaperTradingEngine:
             self._funding_watermark[sym] = last
 
     def simulate_paper_exits(
-        self, price_of, now_ts: int, session: PaperSession, *, bar_iv: int = 0
+        self, price_of, now_ts: int, session: PaperSession, *, bar_iv: int = 0, hl_of=None
     ) -> int:
         """Close held PAPER positions whose bracket (stop / trailing-stop / take-profit) or
         time-stop is breached by the latest bar — the exchange-side exit a real venue would fill but
@@ -414,9 +414,12 @@ class PaperTradingEngine:
         (parity with the backtest / a live exchange-native trailing order), and exits carry a
         distinct ``trailing_stop`` reason so trail-outs are visible vs hard stops.
 
-        ``price_of(symbol)`` returns the latest close; a close-based check is conservative (it can
-        miss an intrabar wick) but never invents a fill. Returns the number of positions closed.
-        Real venues manage exits themselves, so the loop only calls this in paper mode."""
+        ``price_of(symbol)`` returns the latest CLOSE. ``hl_of(symbol)`` (optional) returns this
+        bar's ``(high, low)``: when given, the bracket is checked INTRABAR against the wick and
+        filled at the exact bracket level (stop before take-profit, no intrabar look-ahead — parity
+        with the per-trade backtest engine, M-G); when absent (realtime, close-only) it falls back
+        to the close exactly as before. Returns the count of positions closed. Real venues manage
+        their own exits, so the loop only calls this in paper mode."""
         # Roll the daily/weekly loss windows for THIS bar before booking any exit, so a loss closed
         # on the first bar of a new day counts toward the new day's daily-loss breaker (B2/R3).
         self._roll_loss_windows(now_ts)
@@ -436,31 +439,45 @@ class PaperTradingEngine:
             # fresh favorable close can't tighten the very stop it's then tested against — mirrors
             # the backtest's no-look-ahead ordering (src/backtest/engine.py).
             peak = self._peak.get(sym, pos.entry_price)
+            # Intrabar wick when hl_of is supplied (replay); otherwise high=low=close so the breach
+            # checks reduce EXACTLY to the prior close-based behaviour (realtime). Intrabar fills at
+            # the bracket level; close-only fills at the close (unchanged realtime semantics).
+            hl = hl_of(sym) if hl_of is not None else None
+            intrabar = hl is not None
+            high, low = (float(hl[0]), float(hl[1])) if intrabar else (price, price)
             reason: str | None = None
+            exit_price = price
             if pos.side > 0:
                 # Effective stop = fixed stop ratcheted UP by the trailing stop (peak − trail_dist).
                 eff_stop = max(stop, peak - trail_dist) if (trail_dist > 0 and stop > 0) else stop
-                if eff_stop > 0 and price <= eff_stop:
+                if eff_stop > 0 and low <= eff_stop:
                     reason = "trailing_stop" if eff_stop > stop else "stop"
-                elif tp > 0 and price >= tp:
+                    exit_price = eff_stop if intrabar else price
+                elif tp > 0 and high >= tp:
                     reason = "take_profit"
+                    exit_price = tp if intrabar else price
             else:  # short: stop is ABOVE entry, take-profit BELOW; the trail ratchets it DOWN
                 eff_stop = min(stop, peak + trail_dist) if (trail_dist > 0 and stop > 0) else stop
-                if eff_stop > 0 and price >= eff_stop:
+                if eff_stop > 0 and high >= eff_stop:
                     reason = "trailing_stop" if eff_stop < stop else "stop"
-                elif tp > 0 and price <= tp:
+                    exit_price = eff_stop if intrabar else price
+                elif tp > 0 and low <= tp:
                     reason = "take_profit"
+                    exit_price = tp if intrabar else price
             if (
                 reason is None and bar_iv > 0 and hold_bars > 0 and entry_ts > 0
                 and now_ts - entry_ts >= hold_bars * bar_iv
             ):
                 reason = "time_stop"
+                exit_price = price  # time-stop fills at the close
             if reason is None:
-                # No exit → ratchet the peak with this close for the NEXT tick's trailing stop.
+                # No exit → ratchet the peak with this bar's FAVORABLE extreme (high for longs, low
+                # for shorts) for the NEXT tick's trailing stop; = the close when hl_of is absent.
                 if trail_dist > 0:
-                    self._peak[sym] = max(peak, price) if pos.side > 0 else min(peak, price)
+                    fav = high if pos.side > 0 else low
+                    self._peak[sym] = max(peak, fav) if pos.side > 0 else min(peak, fav)
                 continue
-            self._book_paper_exit(sym, price, reason, now_ts, session)
+            self._book_paper_exit(sym, exit_price, reason, now_ts, session)
             closed += 1
         return closed
 
