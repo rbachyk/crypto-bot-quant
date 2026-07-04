@@ -36,6 +36,7 @@ from src.backtest.strategy import (
     Signal,
     Strategy,
 )
+from src.brackets import resolve_bracket_exit
 from src.exchange.metadata import MetadataConfig
 from src.features.pipeline import FeatureFrame
 
@@ -599,28 +600,19 @@ class BacktestEngine:
             pos.adv_price = max(pos.adv_price, high)
         # Effective stop: the initial stop, ratcheted by a trailing stop set from the best
         # favorable excursion BEFORE this bar (so a fresh high on this bar can't raise the stop
-        # that this same bar's low then hits — conservative, no intrabar look-ahead). When
-        # trail_dist is 0 the effective stop is just the fixed initial stop.
-        if pos.side > 0:
-            stop_level = pos.stop_price
-            if pos.trail_dist > 0:
-                stop_level = max(stop_level, pos.peak - pos.trail_dist)
-            if low <= stop_level:
-                reason = "trailing_stop" if stop_level > pos.stop_price else "stop"
-                return self._close(pos, bar, reason, price=stop_level)
-            if high >= pos.tp_price:
-                # A take-profit is a resting limit: for a maker position it fills as a maker
-                # (no slippage, maker fee); risk exits below stay taker (you cross to get out).
-                return self._close(pos, bar, "take_profit", price=pos.tp_price, maker=pos.maker)
-        else:
-            stop_level = pos.stop_price
-            if pos.trail_dist > 0:
-                stop_level = min(stop_level, pos.peak + pos.trail_dist)
-            if high >= stop_level:
-                reason = "trailing_stop" if stop_level < pos.stop_price else "stop"
-                return self._close(pos, bar, reason, price=stop_level)
-            if low <= pos.tp_price:
-                return self._close(pos, bar, "take_profit", price=pos.tp_price, maker=pos.maker)
+        # that this same bar's low then hits — conservative, no intrabar look-ahead). The
+        # stop-before-take-profit geometry is the SHARED bracket decision (src/brackets.py),
+        # identical across backtest / lake-replay / paper; only the FILL differs (below).
+        reason, level = resolve_bracket_exit(
+            pos.side, high, low,
+            stop=pos.stop_price, tp=pos.tp_price, peak=pos.peak, trail_dist=pos.trail_dist,
+        )
+        if reason == "take_profit":
+            # A take-profit is a resting limit: for a maker position it fills as a maker (no
+            # slippage, maker fee); risk exits stay taker (you cross the spread to get out).
+            return self._close(pos, bar, "take_profit", price=level, maker=pos.maker)
+        if reason is not None:
+            return self._close(pos, bar, reason, price=level)
         # Early thesis-driven exit (manage hook) — consulted AFTER stop/take-profit (so a
         # protective stop always wins) and BEFORE the time-stop backstop (so a position whose
         # edge has played out exits on its own signal, with its own reason, rather than bleeding

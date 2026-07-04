@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 
 import structlog
 
+from src.brackets import resolve_bracket_exit
 from src.config import Settings, get_settings
 from src.exchange.metadata import MetadataConfig
 from src.execution import (
@@ -450,25 +451,13 @@ class PaperTradingEngine:
             hl = hl_of(sym) if hl_of is not None else None
             intrabar = hl is not None
             high, low = (float(hl[0]), float(hl[1])) if intrabar else (price, price)
-            reason: str | None = None
-            exit_price = price
-            if pos.side > 0:
-                # Effective stop = fixed stop ratcheted UP by the trailing stop (peak − trail_dist).
-                eff_stop = max(stop, peak - trail_dist) if (trail_dist > 0 and stop > 0) else stop
-                if eff_stop > 0 and low <= eff_stop:
-                    reason = "trailing_stop" if eff_stop > stop else "stop"
-                    exit_price = eff_stop if intrabar else price
-                elif tp > 0 and high >= tp:
-                    reason = "take_profit"
-                    exit_price = tp if intrabar else price
-            else:  # short: stop is ABOVE entry, take-profit BELOW; the trail ratchets it DOWN
-                eff_stop = min(stop, peak + trail_dist) if (trail_dist > 0 and stop > 0) else stop
-                if eff_stop > 0 and high >= eff_stop:
-                    reason = "trailing_stop" if eff_stop < stop else "stop"
-                    exit_price = eff_stop if intrabar else price
-                elif tp > 0 and low <= tp:
-                    reason = "take_profit"
-                    exit_price = tp if intrabar else price
+            # Stop-before-take-profit bracket geometry — the SHARED decision (brackets.py), same as
+            # the backtest / lake-replay. Intrabar fills at the exact bracket level; close-only
+            # (high==low==close, realtime before the bar completes) fills at the close.
+            reason, level = resolve_bracket_exit(
+                pos.side, high, low, stop=stop, tp=tp, peak=peak, trail_dist=trail_dist,
+            )
+            exit_price = (level if intrabar else price) if reason is not None else price
             if (
                 reason is None and bar_iv > 0 and hold_bars > 0 and entry_ts > 0
                 and now_ts - entry_ts >= hold_bars * bar_iv

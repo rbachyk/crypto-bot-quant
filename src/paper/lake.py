@@ -17,6 +17,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 
 from src.backtest.service import build_lake_inputs, lake_candidate_strategy, make_strategy
+from src.brackets import resolve_bracket_exit
 from src.config import Settings, get_settings
 from src.data.config import DataConfig, load_data_config
 from src.data.store import SeriesStore
@@ -297,26 +298,15 @@ def _simulate_replay_exit(si, entry_bar: int, entry_price: float, sig, hold_bars
     for j in range(entry_bar, last_bar + 1):
         bar = si.bars[j]
         high, low = float(bar["high"]), float(bar["low"])
-        if side > 0:
-            eff_stop = max(stop_price, peak - trail_dist) if trail_dist > 0 else stop_price
-            if low <= eff_stop:
-                exit_bar, exit_price = j, eff_stop
-                exit_reason = "trailing_stop" if eff_stop > stop_price else "stop"
-                break
-            if tp_price > 0 and high >= tp_price:
-                exit_bar, exit_price, exit_reason = j, tp_price, "take_profit"
-                break
-            peak = max(peak, high)
-        else:
-            eff_stop = min(stop_price, peak + trail_dist) if trail_dist > 0 else stop_price
-            if high >= eff_stop:
-                exit_bar, exit_price = j, eff_stop
-                exit_reason = "trailing_stop" if eff_stop < stop_price else "stop"
-                break
-            if tp_price > 0 and low <= tp_price:
-                exit_bar, exit_price, exit_reason = j, tp_price, "take_profit"
-                break
-            peak = min(peak, low)
+        # SHARED bracket geometry (src/brackets.py) — identical decision to the backtest / paper
+        # exit; the replay walk fills at the exact bracket level (full historical bars).
+        reason, level = resolve_bracket_exit(
+            side, high, low, stop=stop_price, tp=tp_price, peak=peak, trail_dist=trail_dist,
+        )
+        if reason is not None:
+            exit_bar, exit_price, exit_reason = j, level, reason
+            break
+        peak = max(peak, high) if side > 0 else min(peak, low)
     exit_ts = int(si.bars[exit_bar]["ts"])
     # Funding accrued over (entry_ts, exit_ts] — cost convention (>0 = paid): when funding_rate>0
     # longs pay shorts, so a long's cost is +rate and a short's is −rate (side·rate).
