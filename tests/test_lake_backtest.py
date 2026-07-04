@@ -298,16 +298,17 @@ def test_oi_grid_override() -> None:
 
 
 def test_bybit_config_is_multiyear_without_oi_spread() -> None:
-    """The bybit config spans years for a real validation sample, so it EXCLUDES open_interest
-    and spread (Bybit serves those only for recent days); oi_grid stays 1h for when OI is used."""
+    """The bybit config EXCLUDES open_interest and spread (Bybit serves those only for recent days);
+    oi_grid stays 1h for when OI is used. Default window is ~1y (a walk-forward promotion sample
+    without a multi-year download); the START is widened per-run from the dashboard / CLI."""
     cfg = load_data_config(str(REPO_ROOT / "configs" / "data.bybit.yaml"))
     assert cfg.exchange_id == "bybit"
     assert cfg.oi_grid == "1h"
     types = {k.data_type for k in cfg.required_keys(SYM)}
-    assert OPEN_INTEREST not in types and "spread" not in types  # excluded for multi-year history
+    assert OPEN_INTEREST not in types and "spread" not in types  # excluded (short retention)
     assert {"ohlcv", "mark", "index", "funding"} <= types  # the long-history series remain
-    years = (cfg.window_end_ms - cfg.window_start_ms) / 1000 / 86400 / 365
-    assert years > 3  # a real sample, not a few days
+    days = (cfg.window_end_ms - cfg.window_start_ms) / 1000 / 86400
+    assert 300 < days < 400  # ~1 year default (not a few days, not multi-year)
 
 
 def test_lake_candidate_strategy_builds_real_strategy() -> None:

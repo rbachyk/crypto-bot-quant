@@ -150,14 +150,15 @@ def test_head_deletion_is_detected_and_repaired(tmp_path) -> None:
     key = SeriesKey(cfg.exchange_id, OHLCV, cfg.symbols[0], "5m")
     iv = key.interval_ms
     start, end = cfg.window_start_ms, cfg.window_end_ms
-    ing = Ingestor(get_data_source(cfg.exchange_id), store)
-    ing.download(key, start, end)  # full download records the listing watermark
-    assert store.listing_ts(key) == start
+    listing = start + 8 * iv  # lists mid-window ⇒ the watermark is the real LISTING edge
+    ing = Ingestor(_ListingCutoffSource(get_data_source(cfg.exchange_id), listing), store)
+    ing.download(key, start, end)  # rows[0] = listing (well above start) ⇒ recorded as watermark
+    assert store.listing_ts(key) == listing
 
-    store.delete_range(key, start, start + 5 * iv)  # head-of-series data loss
+    store.delete_range(key, listing, listing + 5 * iv)  # head-of-series loss ABOVE the listing
     report = find_gaps(store, key, start, end)
-    assert report.missing_ts == [start + i * iv for i in range(5)]  # NOT masked as pre-listing
-    assert report.ranges() == [(start, start + 5 * iv)]
+    assert report.missing_ts == [listing + i * iv for i in range(5)]  # NOT masked as pre-listing
+    assert report.ranges() == [(listing, listing + 5 * iv)]
     assert ing.repair(key, start, end).repaired  # ...and it is repairable
     assert find_gaps(store, key, start, end).covered
 
@@ -185,42 +186,66 @@ def test_watermark_survives_delete_range_and_is_monotone_min(tmp_path) -> None:
     key = SeriesKey(cfg.exchange_id, OHLCV, cfg.symbols[0], "5m")
     iv = key.interval_ms
     start, end = cfg.window_start_ms, cfg.window_end_ms
-    Ingestor(get_data_source(cfg.exchange_id), store).download(key, start, end)
-    assert store.listing_ts(key) == start
+    listing = start + 8 * iv  # a real mid-window listing so a watermark is recorded
+    Ingestor(_ListingCutoffSource(get_data_source(cfg.exchange_id), listing), store).download(
+        key, start, end
+    )
+    assert store.listing_ts(key) == listing
 
     store.delete_range(key, start, end)  # wipe the whole series
-    assert store.listing_ts(key) == start  # delete_range must NOT move the watermark
+    assert store.listing_ts(key) == listing  # delete_range must NOT move the watermark
     report = find_gaps(store, key, start, end)
-    assert len(report.missing_ts) == (end - start) // iv  # full loss reported, not "pre-listing"
+    assert len(report.missing_ts) == (end - listing) // iv  # loss from the listing, not pre-listing
 
-    store.record_listing_ts(key, start + iv)  # later/higher probe: ignored (monotone-min)
-    assert store.listing_ts(key) == start
-    store.record_listing_ts(key, start - iv)  # wider window found earlier data: moves down
-    assert store.listing_ts(key) == start - iv
+    store.record_listing_ts(key, listing + iv)  # later/higher probe: ignored (monotone-min)
+    assert store.listing_ts(key) == listing
+    store.record_listing_ts(key, listing - iv)  # wider window found earlier data: moves down
+    assert store.listing_ts(key) == listing - iv
 
 
-def test_incremental_tail_resume_backfills_watermark_from_earliest_not_the_tail(tmp_path) -> None:
-    """A tail resume must NEVER record its own (mid-series) first row as the listing edge — that
-    would mask everything before the tail. It now backfills the watermark from the EARLIEST stored
-    bar instead (data-integrity hygiene for legacy series that have data but no watermark), which is
-    the true listing edge when the first download began at/before the window start, is monotone-min,
-    and self-corrects on a later authoritative from-start full download."""
+class _CountingListingSource(_ListingCutoffSource):
+    """Listing-cutoff source that counts fetch calls (shows a converged window isn't refetched)."""
+
+    def __init__(self, inner: DataSource, listing_ts: int) -> None:
+        super().__init__(inner, listing_ts)
+        self.calls = 0
+
+    def fetch(self, key: SeriesKey, start_ms: int, end_ms: int) -> list[dict]:
+        self.calls += 1
+        return super().fetch(key, start_ms, end_ms)
+
+
+def test_incremental_backfills_widened_window_backward(tmp_path) -> None:
+    """Widening the window START backfills the missing OLDER slice (not just the forward tail), down
+    to the exchange's listing floor — and a converged window is not re-fetched (no pre-listing
+    re-scan every run). Answers: set 1y now, 3y later ⇒ only the missing 2y (+ tail) is fetched."""
     cfg = small_cfg()
     store = fresh_store(tmp_path)
     key = SeriesKey(cfg.exchange_id, OHLCV, cfg.symbols[0], "5m")
-    start, end = cfg.window_start_ms, cfg.window_end_ms
-    half = start + (end - start) // 2
-    src = get_data_source(cfg.exchange_id)
-    store.write(key, src.fetch(key, start, half))  # legacy series [start, half]: data, no watermark
-    earliest = store.earliest_ts(key)
+    iv = key.interval_ms
+    full_start, end = cfg.window_start_ms, cfg.window_end_ms
+    listing = full_start + 10 * iv
+    src = _CountingListingSource(get_data_source(cfg.exchange_id), listing)
     ing = Ingestor(src, store)
-    assert ing.update_incremental(key, start, end) > 0  # resumes from `half`, fetches [half, end]
-    assert store.listing_ts(key) == earliest == start  # from the EARLIEST bar…
-    assert store.listing_ts(key) != half  # …never the tail resume's first row
-    # An EMPTY series' incremental update resumes from the window start ⇒ it IS the probe.
-    key2 = SeriesKey(cfg.exchange_id, OHLCV, cfg.symbols[0], "1h")
-    assert ing.update_incremental(key2, start, end) > 0
-    assert store.listing_ts(key2) == start
+
+    # 1) First build a NARROW window [narrow_start, end], well after the listing.
+    narrow_start = listing + 40 * iv
+    ing.update_incremental(key, narrow_start, end)
+    assert store.earliest_ts(key) == narrow_start
+    assert store.listing_ts(key) is None  # data at narrow_start ⇒ NOT the listing → no watermark
+
+    # 2) WIDEN to the full window: backward backfill fetches [full_start, narrow_start), reaching
+    #    the listing edge; the forward tail is already at `end` (no-op).
+    ing.update_incremental(key, full_start, end)
+    assert store.earliest_ts(key) == listing  # reached the listing edge, not full_start
+    assert store.listing_ts(key) == listing  # …and recorded it as the floor
+    assert find_gaps(store, key, full_start, end).covered  # pre-listing absence is not a gap
+
+    # 3) Re-running the SAME widened window fetches NOTHING (at the floor, up to date) — the
+    #    pre-listing range [full_start, listing) is not re-scanned.
+    src.calls = 0
+    assert ing.update_incremental(key, full_start, end) == 0
+    assert src.calls == 0
 
 
 # --------------------------------------------------------------------------- #

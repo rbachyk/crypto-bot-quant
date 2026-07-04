@@ -76,15 +76,17 @@ data:
   # back to listing. (For a recent OI/spread study, narrow the window + re-add those series.)
   required_series: ["ohlcv", "mark", "index", "funding"]
 
-  # ~5.5 years of history so validation has a real sample (not a 5-day window). The download is
-  # large and runs in the background; symbols listed later than the start simply have a shorter
-  # series (the backtest uses whatever each symbol has).
+  # Default ~1 year of history — enough for a walk-forward promotion pass without waiting on a
+  # multi-year download. Override the START per-download from the dashboard (Data Coverage → Start
+  # date) or the CLI (`--days` / `--as-of`); symbols listed later than the start simply have a
+  # shorter series (the backtest uses whatever each symbol has). Widen it only when a run needs more
+  # walk-forward folds.
   window:
     # ``now`` anchors the END to the current time (floored to the last closed hour) at load time,
     # so the window always reaches fresh data and never goes stale. Put an ISO date here only to
     # pin a fixed historical window.
     as_of: now
-    duration_hours: 48000 # ~5.5 years → back to ~Jan 2021
+    duration_hours: 8760 # ~1 year (365d); widen for more walk-forward history
 
   # Snapshot retention: with `as_of: now` every hourly build mints a NEW dataset version, so
   # rows/dirs/quality-reports grow without bound. The data-platform job keeps the newest N

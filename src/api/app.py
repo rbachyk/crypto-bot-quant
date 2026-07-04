@@ -1502,14 +1502,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
         body = (
             '<div class="card"><h2>Download real market data</h2>'
+            '<p style="margin:0 0 8px"><label>Start date '
+            '<input type="date" id="dl-start" style="padding:4px"></label> '
+            '<span class="meta">blank = config default (~1y). Widening the start backfills the '
+            "missing older data; each run also fetches up to now.</span></p>"
             '<form method="post" action="/api/data/download" style="display:inline;'
-            'margin-right:8px"><button class="btn" type="submit">&#11015; Update data (incremental)'
+            "margin-right:8px\" onsubmit=\"this.action='/api/data/download?'+dlStart('')\">"
+            '<button class="btn" type="submit">&#11015; Update data (incremental)'
             "</button></form>"
             '<form method="post" action="/api/data/download?full=true" style="display:inline" '
-            "onsubmit=\"return confirm('Force a FULL re-download of the whole window? Slow — only "
-            "needed to repair corrupt data.');\">"
+            "onsubmit=\"this.action='/api/data/download?full=true'+dlStart('&');"
+            "return confirm('Force a FULL re-download of the window? Slow — only needed to repair "
+            "corrupt data.');\">"
             '<button class="btn btn-neutral" type="submit">&#11119; Force full re-download'
             "</button></form>"
+            "<script>function dlStart(sep){var d=document.getElementById('dl-start').value;"
+            "return d?(sep+'start='+encodeURIComponent(d)):'';}</script>"
             + job_line
             + '<p class="meta">Fetches REAL Bybit history (ccxt) for the symbols/window in '
             "<code>configs/data.bybit.yaml</code>, validates it, and builds a versioned snapshot "
@@ -1534,18 +1542,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/data/download")
     def download_data(
-        full: bool = False, user: str = Depends(require_dashboard_auth)
+        full: bool = False, start: str = "", user: str = Depends(require_dashboard_auth)
     ) -> RedirectResponse:
         """Enqueue a real-data download + dataset build (Bybit ccxt source, bybit config).
-        Incremental by default (only candles since the last download); ``full=true`` re-fetches."""
+
+        Incremental by default (only candles since the last download); ``full=true`` re-fetches.
+        ``start`` (an ISO date, e.g. 2025-07-01) overrides the window START for this build — blank
+        uses the config default (~1y). An unparseable date is ignored (falls back to the default)."""
         from src.jobs import JobQueue
 
-        JobQueue(settings).enqueue(
+        params: dict = {"config_path": "configs/data.bybit.yaml", "full": full}
+        if start.strip():
+            try:
+                from src.data.schema import parse_utc_ms
+
+                s = start.strip()
+                params["start_ms"] = parse_utc_ms(s if "T" in s else f"{s}T00:00:00Z")
+            except Exception:  # noqa: BLE001 - bad date → ignore, use the config default window
+                pass
+        JobQueue(settings).enqueue("build_dataset_version", params, requested_by=user)
+        _audit(
             "build_dataset_version",
-            {"config_path": "configs/data.bybit.yaml", "full": full},
-            requested_by=user,
+            target="data.bybit",
+            actor=user,
+            detail={"full": full, "start": start.strip() or None},
         )
-        _audit("build_dataset_version", target="data.bybit", actor=user, detail={"full": full})
         return RedirectResponse(url="/dashboard/data-coverage", status_code=303)
 
     # ----- Universe (#3) -------------------------------------------------- #

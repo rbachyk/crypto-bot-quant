@@ -277,6 +277,16 @@ def _build_dataset_version(ctx: JobContext, params: dict) -> dict:
     # can land an hour apart — the download window would then differ from the validated/snapshotted
     # one (spurious trailing-gap failures, non-reproducible snapshot id at hour boundaries).
     cfg = load_data_config(cfg_path, as_of_ms=params.get("as_of_ms"))
+    # Optional per-download window START override (dashboard "Start date"): shrink the window so a
+    # promotion pass doesn't wait on a multi-year download. Ignored unless it's a sane point before
+    # the window end.
+    start_ms = params.get("start_ms")
+    if start_ms is not None:
+        from dataclasses import replace
+
+        start_ms = int(start_ms)
+        if 0 < start_ms < cfg.window_end_ms:
+            cfg = replace(cfg, window_start_ms=start_ms)
     platform = DataPlatform(cfg=cfg)
     syms = cfg.active_symbols()
     # Surface the FROZEN window end so an operator can reproduce this exact snapshot later: pass
