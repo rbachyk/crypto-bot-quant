@@ -159,6 +159,9 @@ class RiskAdjustedReward:
             # its edge in normal books but no longer trivially dominates a taker in a 20bps spread.
             nonfill_prob = min(1.0, (max(0.0, spread_bps) / cfg.maker_nonfill_spread_bps) ** 2)
             maker_nonfill_cost = nonfill_prob * max(0.0, raw_edge)
+            # The maker only pays its fee on the fraction that actually FILLS — charging the full
+            # maker fee AND forgoing the non-fill edge double-counted the non-fill cost (L-H).
+            fee_cost *= 1.0 - nonfill_prob
 
         # --- funding impact ----------------------------------------------- #
         # Positive funding_z means longs pay shorts; negative = shorts pay longs.

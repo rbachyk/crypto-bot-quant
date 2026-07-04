@@ -131,10 +131,18 @@ class ShadowPredictor:
         # measured nothing about execution. Targets are built from the fields already on each
         # sample (candidate execution geometry + realized R):
         labels = [s.label for s in samples]  # meta-labeler: profitable? (take=1 / skip=0)
-        pnls = [s.realized_pnl for s in samples]
-        med_pnl = statistics.median(pnls) if pnls else 0.0
+        # Target thresholds are computed over the TRAINING portion only (chronologically the first
+        # 1-test_fraction), so a training sample's label never depends on test-set statistics — a
+        # mild temporal leak into the "OOS" numbers (L-F). All models share test_fraction=0.25 by
+        # default; the meta-labeler's is used as the representative split.
+        order = sorted(range(len(samples)), key=lambda i: samples[i].candidate.decision_ts)
+        tf = float(self.cfg.meta_labeler.test_fraction)
+        split = max(1, int(len(samples) * (1.0 - tf))) if 0.0 < tf < 1.0 else len(samples)
+        train_pnls = [samples[i].realized_pnl for i in order[:split]]
+        med_pnl = statistics.median(train_pnls) if train_pnls else 0.0
         # symbol_ranker: is this a TOP-quartile opportunity by realized R (a high-rank symbol)?
-        q75_pnl = self._quantile(pnls, 0.75)
+        q75_pnl = self._quantile(train_pnls, 0.75)
+        pnls = [s.realized_pnl for s in samples]
         # exec_quality: did the trade CLEAR its own execution-cost hurdle — realized R greater than
         #   the modelled round-trip cost expressed in R (exec_cost / stop_frac)? This is a REALIZED
         #   outcome (depends on realized_pnl, which the model never sees), so it is NOT a tautology:
@@ -258,12 +266,21 @@ class ShadowPredictor:
             )
 
             m["test_accuracy"] = round(float(accuracy_score(y_test, y_pred)), 4)
+            # A multi-class model (the regime classifier) would raise from the default
+            # average="binary"; use macro averaging when >2 classes are present (L-G).
+            classes = set(y_test) | set(y_pred)
+            avg = "binary" if len(classes) <= 2 else "macro"
             m["test_precision"] = round(
-                float(precision_score(y_test, y_pred, zero_division=0.0)), 4
+                float(precision_score(y_test, y_pred, average=avg, zero_division=0.0)), 4
             )
-            m["test_recall"] = round(float(recall_score(y_test, y_pred, zero_division=0.0)), 4)
+            m["test_recall"] = round(
+                float(recall_score(y_test, y_pred, average=avg, zero_division=0.0)), 4
+            )
+            # Brier only for BINARY models: predict_proba here returns P(class=1) for a binary
+            # model but the max-class probability for the multi-class regime model, which is NOT a
+            # calibrated P(class=1), so a brier over it would be meaningless (L-G).
             probas = model.predict_proba(X_test) if hasattr(model, "predict_proba") else None
-            if probas is not None and len(set(y_test)) > 1:
+            if probas is not None and len(classes) == 2 and len(set(y_test)) > 1:
                 m["test_brier_score"] = round(float(brier_score_loss(y_test, probas)), 4)
         else:
             m["test_samples"] = 0
