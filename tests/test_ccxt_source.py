@@ -348,6 +348,41 @@ def test_funding_interval_switch_stores_cleanly_with_no_gaps_or_duplicates(tmp_p
     assert store.count(key) == 7
 
 
+class _LateListingFundingClient:
+    """Models Bybit funding history: a bounded ``[since, since + limit*8h]`` window that comes back
+    EMPTY when it falls entirely BEFORE the symbol's listing (verified against live Bybit)."""
+
+    def __init__(self, listing_ms: int, end_ms: int) -> None:
+        self._listing = listing_ms
+        self._end = end_ms
+
+    def fetch_funding_rate_history(self, symbol, since=0, limit=200):
+        iv = TIMEFRAME_MS["8h"]
+        window_end = since + limit * iv  # Bybit serves a bounded time window per page
+        t = ((max(since, self._listing) + iv - 1) // iv) * iv
+        out = []
+        while t < window_end and t < self._end and len(out) < limit:
+            out.append({"timestamp": t, "fundingRate": 0.0001})
+            t += iv
+        return out
+
+
+def test_funding_fetch_advances_past_pre_listing_empty_pages() -> None:
+    """A from-window-start funding fetch must NOT give up when the first Bybit page (a bounded
+    ``[since, since+200*8h]`` window) falls entirely before the symbol lists and returns EMPTY — it
+    advances past the empty span and still reaches the funding that begins at listing. The old code
+    ``break``-ed on the first empty page and stored ZERO funding, failing coverage for the whole
+    window on every late-listing symbol."""
+    h8 = TIMEFRAME_MS["8h"]
+    listing = 600 * h8  # ~200 days in: several empty 200*8h pages precede it
+    end = listing + 50 * h8
+    src = CcxtDataSource("bybit", client=_LateListingFundingClient(listing, end))
+    rows = src.fetch(SeriesKey("bybit", FUNDING, "BTC/USDT:USDT", "8h"), 0, end)
+    assert rows, "funding fetch returned nothing despite data existing from the listing"
+    assert rows[0]["ts"] == listing  # first settlement is the listing edge, not window start
+    assert [r["ts"] for r in rows] == list(range(listing, end, h8))  # contiguous, no gaps
+
+
 def test_lone_funding_settlement_falls_back_to_market_interval() -> None:
     """With a single settlement there is no spacing to observe: the stamp falls back to the
     market's CURRENT fundingInterval metadata (240 min -> 4h), never the config label (8h)."""

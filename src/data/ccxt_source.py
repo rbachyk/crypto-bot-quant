@@ -58,6 +58,12 @@ from src.data.source import DataSource
 
 # Bybit v5 kline endpoints cap a page at 1000 rows.
 _PAGE = 1000
+# Bybit funding-rate-history caps a page at 200 rows and serves a bounded [since, since+200*iv]
+# time window — an empty result means "no settlements in that span" (e.g. pre-listing), so the
+# funding fetch advances by this span past empty windows; the cap bounds a pathological forward
+# scan (a ~5.5y window at 8h needs ~30 skips; 128 covers >20y at any nominal interval).
+_FUNDING_PAGE = 200
+_MAX_FUNDING_EMPTY_SKIPS = 128
 # Conservative default L1 spread estimate (bps) when historical bid/ask is unavailable.
 _DEFAULT_SPREAD_BPS = 5.0
 # ccxt timeframe strings match our schema labels (1m/5m/1h/...), so no translation needed.
@@ -291,12 +297,24 @@ class CcxtDataSource(DataSource):
         # filter drops anything before ``start_ms``.
         since = max(0, start_ms - key.interval_ms)
         last_seen = -1
+        empty_skips = 0
         while since < end_ms:
             batch = self._call(
-                self._ex.fetch_funding_rate_history, key.symbol, since=since, limit=200
+                self._ex.fetch_funding_rate_history, key.symbol, since=since, limit=_FUNDING_PAGE
             )
             if not batch:
-                break
+                # Bybit serves a bounded [since, since+_FUNDING_PAGE*iv] window and returns EMPTY
+                # when it falls entirely BEFORE the symbol's listing / funding retention (verified
+                # live: a from-2021 fetch of a mid-2021-listed symbol returned nothing → the old
+                # `break` stored ZERO funding, so coverage reported the whole window missing).
+                # Advance PAST the empty span instead of giving up: empty ⇒ no settlements at any
+                # cadence there, so skipping it drops no data, and the from-window-start fetch now
+                # reaches the funding that begins at listing.
+                since += _FUNDING_PAGE * key.interval_ms
+                empty_skips += 1
+                if empty_skips > _MAX_FUNDING_EMPTY_SKIPS:
+                    break
+                continue
             done = False
             for f in batch:
                 ts = int(f["timestamp"])
