@@ -119,20 +119,40 @@ class ShadowPredictor:
             fitting and out-of-sample metrics are reported alongside the
             training metrics.
         """
+        import statistics
+
         from .labels import LabeledSample
 
         assert all(isinstance(s, LabeledSample) for s in samples), "samples must be LabeledSample"
 
-        labels = [s.label for s in samples]
+        # Each model gets its OWN target, not the meta-labeler's take/skip label (M33). Training
+        # exec_quality / strategy_selector / symbol_ranker on take/skip meant three of the five
+        # models learned the SAME thing — and the exec-style router derived from a model that
+        # measured nothing about execution. Targets are built from the fields already on each
+        # sample (candidate execution geometry + realized R):
+        labels = [s.label for s in samples]  # meta-labeler: profitable? (take=1 / skip=0)
+        pnls = [s.realized_pnl for s in samples]
+        exec_costs = [self._exec_cost(s.candidate) for s in samples]
+        med_pnl = statistics.median(pnls) if pnls else 0.0
+        med_cost = statistics.median(exec_costs) if exec_costs else 0.0
+        # symbol_ranker: is this a TOP-quartile opportunity by realized R (a high-rank symbol)?
+        q75_pnl = self._quantile(pnls, 0.75)
+        # exec_quality: was the modelled execution cost LOW (a good fill environment)? — a target
+        #   that genuinely depends on spread/slippage, so the model learns execution, not take/skip.
+        exec_labels = [1 if c <= med_cost else 0 for c in exec_costs]
+        # strategy_selector: is this an ABOVE-median-quality pick (the selector's job is relative,
+        #   not the absolute >0 take/skip cut)?
+        strat_labels = [1 if p >= med_pnl else 0 for p in pnls]
+        sym_labels = [1 if p >= q75_pnl else 0 for p in pnls]
 
         metrics: dict[str, dict] = {}
-        for model, model_cfg in (
-            (self._meta, self.cfg.meta_labeler),
-            (self._exec, self.cfg.exec_quality),
-            (self._strat, self.cfg.strategy_selector),
-            (self._sym, self.cfg.symbol_ranker),
+        for model, model_cfg, model_labels in (
+            (self._meta, self.cfg.meta_labeler, labels),
+            (self._exec, self.cfg.exec_quality, exec_labels),
+            (self._strat, self.cfg.strategy_selector, strat_labels),
+            (self._sym, self.cfg.symbol_ranker, sym_labels),
         ):
-            metrics[model.model_type] = self._train_one(model, model_cfg, samples, labels)
+            metrics[model.model_type] = self._train_one(model, model_cfg, samples, model_labels)
 
         # Regime classifier uses encoded regime index as labels for multi-class.
         _REGIME_MAP = {
@@ -153,6 +173,22 @@ class ShadowPredictor:
         )
 
         return metrics
+
+    @staticmethod
+    def _exec_cost(cand) -> float:
+        """Modelled round-trip execution cost fraction: taker fees + slippage + half-spread. The
+        exec_quality target is 'was this LOW?' so the model learns execution conditions (M33)."""
+        spread_frac = 0.5 * float(getattr(cand, "spread_bps", 0.0) or 0.0) / 10_000.0
+        return 2.0 * 0.0004 + float(getattr(cand, "slippage_est", 0.0) or 0.0) + spread_frac
+
+    @staticmethod
+    def _quantile(values: list[float], q: float) -> float:
+        """Simple nearest-rank quantile (no numpy dependency); 0.0 for an empty list."""
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        idx = min(len(ordered) - 1, max(0, int(round(q * (len(ordered) - 1)))))
+        return ordered[idx]
 
     def _train_one(
         self,
@@ -199,9 +235,26 @@ class ShadowPredictor:
             X_test = [X[i] for i in test_idx]
             y_test = [labels[i] for i in test_idx]
             preds = model.predict(X_test)
-            correct = sum(1 for p, y in zip(preds, y_test, strict=False) if p.label == y)
+            y_pred = [p.label for p in preds]
             m["test_samples"] = len(test_idx)
-            m["test_accuracy"] = round(correct / len(test_idx), 4)
+            # Genuine OUT-OF-SAMPLE metrics on the held-out split (L27): the model's own
+            # accuracy/precision/recall/brier are in-sample and flagged as such — these test_*
+            # numbers are the ones a promotion reader should trust.
+            from sklearn.metrics import (
+                accuracy_score,
+                brier_score_loss,
+                precision_score,
+                recall_score,
+            )
+
+            m["test_accuracy"] = round(float(accuracy_score(y_test, y_pred)), 4)
+            m["test_precision"] = round(
+                float(precision_score(y_test, y_pred, zero_division=0.0)), 4
+            )
+            m["test_recall"] = round(float(recall_score(y_test, y_pred, zero_division=0.0)), 4)
+            probas = model.predict_proba(X_test) if hasattr(model, "predict_proba") else None
+            if probas is not None and len(set(y_test)) > 1:
+                m["test_brier_score"] = round(float(brier_score_loss(y_test, probas)), 4)
         else:
             m["test_samples"] = 0
         return m

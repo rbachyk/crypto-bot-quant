@@ -5,10 +5,15 @@ indicating whether to take (1) or skip (0) the trade, based on the eventual
 outcome.  Labels are generated from paper trade outcomes — profitable trades
 within the hold window get label=1; losses get label=0.
 
-For the Phase 9 gate check (no real paper trade history yet) we expose a
-:func:`synthetic_labels` function that generates a deterministic reference
-dataset from candidate features, enabling gate checks to verify the full
-pipeline works end-to-end before real observations accumulate.
+Two label sources (audit H18):
+  * :func:`build_labels_from_paper_outcomes` — the REAL pipeline: joins the
+    decision-time feature vectors persisted in ``decision_logs`` to realized
+    ``paper_trades`` outcomes per paper-money session. This is the production
+    training source once paper trades with persisted features accumulate.
+  * :func:`synthetic_labels` / :func:`build_reference_dataset` — a deterministic
+    reference dataset from candidate features, for PLUMBING self-checks only
+    (it is constructed so a correct meta-labeler wins, so it is never evidence
+    of edge). :func:`build_training_dataset` prefers real and falls back to it.
 """
 
 from __future__ import annotations
@@ -166,6 +171,143 @@ def build_reference_dataset(
     for idx, s in enumerate(samples):
         s.candidate = replace(s.candidate, decision_ts=1_700_000_000_000 + idx * 60_000)
     return samples
+
+
+# Sessions with these prefixes are NOT paper-money runs (demo/testnet/live are real-venue; selftest
+# is a gate self-check) — they are excluded from the real training set, matching the PAPER-B scope.
+_NON_PAPER_SESSION_PREFIXES: tuple[str, ...] = ("demo:", "testnet:", "live:", "selftest:")
+
+# ML feature-row keys (kept local to avoid importing the features module at label-build time).
+_CANDIDATE_FEATURE_KEYS = ("signal_strength", "expected_edge_frac", "spread_bps", "slippage_est")
+_PIPELINE_FEATURE_KEYS = ("atr_pct", "premium", "funding_z", "rv_short", "ret_1")
+
+
+def build_labels_from_paper_outcomes(*, lookback_days: int = 120) -> list[LabeledSample]:
+    """REAL ML training labels from persisted paper trades (AGENTS.md Section 20; audit H18).
+
+    Joins the decision-time feature vectors persisted in ``decision_logs`` (action=execute, with
+    non-empty ``features``) to realized outcomes in ``paper_trades``, per paper-money session. As a
+    paper session holds at most one position per symbol at a time, executed decisions and closed
+    trades for a given ``(session, symbol, strategy, side)`` occur in lockstep, so they are paired
+    positionally in chronological order (robust to ``paper_trades`` carrying only a persist-time
+    ``created_at``, not the entry ts). Each pair becomes a :class:`LabeledSample` whose label is the
+    realized sign of ``pnl_r``.
+
+    Returns ``[]`` when no real paper data with persisted features exists yet — the caller then
+    falls back to the synthetic reference dataset (PLUMBING only, never evidence of edge)."""
+    from collections import defaultdict
+    from datetime import UTC, datetime, timedelta
+
+    from src.db.base import session_scope
+    from src.db.models import DecisionLog, PaperTradeRecord
+
+    cutoff = datetime.now(UTC) - timedelta(days=lookback_days)
+
+    def _is_paper(session_id: str | None) -> bool:
+        sid = session_id or ""
+        return bool(sid) and not sid.startswith(_NON_PAPER_SESSION_PREFIXES)
+
+    with session_scope() as session:
+        decisions = (
+            session.query(DecisionLog)
+            .filter(DecisionLog.action == "execute", DecisionLog.ts >= cutoff)
+            .order_by(DecisionLog.ts)
+            .all()
+        )
+        dkey_rows: dict[tuple, list] = defaultdict(list)
+        for d in decisions:
+            feats = dict(d.features or {})
+            if not feats or not _is_paper(d.session_id):
+                continue  # no persisted feature vector (old rows / H18 not yet live), or not paper
+            dkey_rows[(d.session_id, d.symbol, d.strategy, int(d.side))].append(
+                {
+                    "symbol": d.symbol,
+                    "strategy": d.strategy,
+                    "strategy_version": d.strategy_version or "",
+                    "side": int(d.side),
+                    "regime": d.regime if hasattr(d, "regime") else "",
+                    "features": feats,
+                    "ts": d.ts,
+                }
+            )
+
+        trades = (
+            session.query(
+                PaperTradeRecord.session_id,
+                PaperTradeRecord.symbol,
+                PaperTradeRecord.strategy,
+                PaperTradeRecord.side,
+                PaperTradeRecord.pnl_r,
+                PaperTradeRecord.created_at,
+            )
+            .filter(PaperTradeRecord.created_at >= cutoff)
+            .order_by(PaperTradeRecord.created_at, PaperTradeRecord.id)
+            .all()
+        )
+        tkey_pnls: dict[tuple, list[float]] = defaultdict(list)
+        for sid, sym, strat, side, pnl_r, _created in trades:
+            if _is_paper(sid):
+                tkey_pnls[(sid, sym, strat, int(side))].append(float(pnl_r))
+
+    samples: list[LabeledSample] = []
+    for key, drows in dkey_rows.items():
+        pnls = tkey_pnls.get(key, [])
+        for drow, pnl_r in zip(drows, pnls, strict=False):  # positional lockstep per key
+            samples.append(_labeled_sample_from_real(drow, pnl_r))
+    # Chronological order for the downstream chronological train/test split (no temporal leakage).
+    samples.sort(key=lambda s: s.candidate.decision_ts)
+    return samples
+
+
+def _labeled_sample_from_real(drow: dict, pnl_r: float) -> LabeledSample:
+    """Reconstruct a training :class:`LabeledSample` from a persisted decision row + realized R."""
+    from datetime import datetime
+
+    feats = drow["features"]
+    ts = drow["ts"]
+    decision_ms = int(ts.timestamp() * 1000) if isinstance(ts, datetime) else 0
+    cand = Candidate(
+        symbol=drow["symbol"],
+        strategy=drow["strategy"],
+        strategy_version=drow["strategy_version"],
+        side=drow["side"],
+        entry_price=0.0,
+        stop_frac=0.0,
+        tp_frac=0.0,
+        regime=drow.get("regime") or "",
+        session=0,
+        signal_strength=float(feats.get("signal_strength", 0.0)),
+        expected_edge_frac=float(feats.get("expected_edge_frac", 0.0)),
+        spread_bps=float(feats.get("spread_bps", 0.0)),
+        slippage_est=float(feats.get("slippage_est", 0.0)),
+        features={k: float(feats.get(k, 0.0)) for k in _PIPELINE_FEATURE_KEYS},
+        decision_ts=decision_ms,
+    )
+    return LabeledSample(
+        candidate=cand,
+        label=label_from_outcome(pnl_r),
+        realized_pnl=float(pnl_r),
+        hold_bars=0,
+    )
+
+
+def build_training_dataset(
+    *, prefer_real: bool = True, min_real: int = 50, seed: int = 42
+) -> tuple[list[LabeledSample], str]:
+    """Return ``(samples, source)`` for ML training/eval (audit H18).
+
+    Prefers REAL labels from paper outcomes when at least ``min_real`` exist; otherwise falls back
+    to the synthetic reference dataset (``source="synthetic"``) so the pipeline still runs for
+    plumbing while real data accumulates. ``source`` is one of ``"real"`` / ``"synthetic"`` so the
+    caller can tag/log which was used and never present synthetic numbers as evidence of edge."""
+    if prefer_real:
+        try:
+            real = build_labels_from_paper_outcomes()
+        except Exception:  # noqa: BLE001 - DB unavailable / schema drift → fall back to synthetic
+            real = []
+        if len(real) >= min_real:
+            return real, "real"
+    return build_reference_dataset(seed=seed), "synthetic"
 
 
 def train_test_split(

@@ -468,17 +468,32 @@ def _build_ml_dataset(ctx: JobContext, params: dict) -> dict:
     paper trade outcomes accumulate (Phase 10+), this job builds from the real
     shadow_log + paper_trades tables.
     """
-    from src.ml.labels import build_reference_dataset
+    from src.ml.labels import build_labels_from_paper_outcomes, build_reference_dataset
 
     n_good = int(params.get("n_good", 40))
     n_bad = int(params.get("n_bad", 30))
     n_neutral = int(params.get("n_neutral", 30))
     seed = int(params.get("seed", 42))
 
-    ctx.log(f"building ML dataset: n_good={n_good} n_bad={n_bad} n_neutral={n_neutral}")
+    # Prefer REAL labels from persisted paper outcomes (H18); fall back to the synthetic reference
+    # dataset (plumbing only) while real data accumulates. Never presents synthetic as real.
+    real = build_labels_from_paper_outcomes()
+    if real:
+        ctx.log(f"building ML dataset from {len(real)} REAL paper-outcome labels")
+        ctx.progress(1, 1, f"{len(real)} real labeled samples")
+        return {
+            "message": f"built ML dataset: {len(real)} REAL samples",
+            "n_samples": len(real),
+            "source": "real",
+        }
+    ctx.log(f"no real paper labels yet; synthetic reference dataset: n_good={n_good} n_bad={n_bad}")
     samples = build_reference_dataset(n_good=n_good, n_bad=n_bad, n_neutral=n_neutral, seed=seed)
-    ctx.progress(1, 1, f"{len(samples)} labeled samples")
-    return {"message": f"built ML dataset: {len(samples)} samples", "n_samples": len(samples)}
+    ctx.progress(1, 1, f"{len(samples)} synthetic labeled samples")
+    return {
+        "message": f"built ML dataset: {len(samples)} synthetic samples (no real data yet, H18)",
+        "n_samples": len(samples),
+        "source": "synthetic",
+    }
 
 
 @job_handler("train_ml_models")
@@ -490,22 +505,23 @@ def _train_ml_models(ctx: JobContext, params: dict) -> dict:
     """
     from src.ml import ShadowPredictor
     from src.ml.config import load_ml_config
-    from src.ml.labels import build_reference_dataset, train_test_split
+    from src.ml.labels import build_training_dataset, train_test_split
 
-    ctx.log("loading ML config and building reference dataset")
+    ctx.log("loading ML config and building training dataset (real paper outcomes preferred)")
     ml_cfg = load_ml_config()
-    samples = build_reference_dataset(seed=42)
+    samples, source = build_training_dataset()
     train_samples, _ = train_test_split(samples, seed=42)
 
-    ctx.log(f"training 5 shadow models on {len(train_samples)} samples")
+    ctx.log(f"training 5 shadow models on {len(train_samples)} {source} samples")
     predictor = ShadowPredictor.from_config(ml_cfg)
     metrics = predictor.train(train_samples)
     ctx.progress(1, 1, "5 models trained")
-    ctx.log(f"train metrics: {metrics}")
+    ctx.log(f"train metrics ({source} data): {metrics}")
     return {
-        "message": "5 shadow ML models trained (shadow mode; no live influence)",
+        "message": f"5 shadow ML models trained on {source} data (shadow mode; no live influence)",
         "model_version": ml_cfg.model_version,
         "ml_stage": ml_cfg.ml_stage,
+        "data_source": source,
         "metrics": metrics,
     }
 
@@ -520,12 +536,12 @@ def _evaluate_ml_models(ctx: JobContext, params: dict) -> dict:
     from src.config import get_settings
     from src.ml import ShadowPredictor, ShadowScorer
     from src.ml.config import load_ml_config
-    from src.ml.labels import build_reference_dataset, train_test_split
+    from src.ml.labels import build_training_dataset, train_test_split
 
     ctx.log("evaluating shadow ML models against ML-PROMO kill criteria")
     ml_cfg = load_ml_config()
     settings = get_settings()
-    samples = build_reference_dataset(seed=42)
+    samples, source = build_training_dataset()
     train_samples, test_samples = train_test_split(samples, seed=42)
 
     predictor = ShadowPredictor.from_config(ml_cfg)
@@ -543,14 +559,22 @@ def _evaluate_ml_models(ctx: JobContext, params: dict) -> dict:
         max_best_removed_pct=kc.max_best_trades_removed_pct,
     )
     score = scorer.score(test_samples, test_preds)
-    ctx.progress(1, 1, f"scoring: passed={score.passed}")
-    ctx.log(f"expectancy improvement: {score.expectancy_improvement:+.4f}R")
+    ctx.progress(1, 1, f"scoring: passed={score.passed} on {source} data")
+    ctx.log(f"expectancy improvement ({source} data): {score.expectancy_improvement:+.4f}R")
+    # A PASS on SYNTHETIC data is only pipeline plumbing — it is NOT evidence of edge and never
+    # promotes. Only a PASS on REAL paper-outcome data is a real evaluation result (H18).
+    passed = bool(score.passed) and source == "real"
     return {
-        "message": f"ML evaluation: {'PASS' if score.passed else 'FAIL'}",
-        "passed": score.passed,
+        "message": f"ML evaluation ({source} data): {'PASS' if passed else 'FAIL'}",
+        "passed": passed,
+        "data_source": source,
         "scoring": score.to_dict(),
-        "fail_reasons": score.fail_reasons,
-        "note": "promotion requires ML-PROMO gate PASS + manual_reviewed=True in registry",
+        "fail_reasons": (
+            score.fail_reasons
+            if source == "real"
+            else [*score.fail_reasons, "synthetic data — plumbing only, not evidence of edge (H18)"]
+        ),
+        "note": "promotion requires ML-PROMO gate PASS on REAL data + manual_reviewed=True",
     }
 
 
@@ -564,12 +588,12 @@ def _run_ml_shadow_pass(ctx: JobContext, params: dict) -> dict:
     from src.config import get_settings
     from src.ml import ShadowPredictor
     from src.ml.config import load_ml_config
-    from src.ml.labels import build_reference_dataset, train_test_split
+    from src.ml.labels import build_training_dataset, train_test_split
 
     ctx.log("running ML shadow pass (shadow mode; applied=False on all log entries)")
     ml_cfg = load_ml_config()
     settings = get_settings()
-    samples = build_reference_dataset(seed=42)
+    samples, source = build_training_dataset()
     train_samples, test_samples = train_test_split(samples, seed=42)
 
     predictor = ShadowPredictor.from_config(ml_cfg)
@@ -578,13 +602,17 @@ def _run_ml_shadow_pass(ctx: JobContext, params: dict) -> dict:
         [s.candidate for s in test_samples[:20]],
         settings=settings,
         write_to_db=True,
-        synthetic_source=True,  # reference dataset: tag rows so ML-PROMO excludes them
+        # Tag rows synthetic ONLY when the data is synthetic, so ML-PROMO excludes plumbing runs
+        # but counts genuine real-data shadow decisions (H18).
+        synthetic_source=(source != "real"),
     )
-    ctx.progress(1, 1, f"{len(result.shadow_log_ids)} shadow log entries written")
-    assert not result.applied, "shadow pass must never set applied=True"
+    ctx.progress(1, 1, f"{len(result.shadow_log_ids)} shadow log entries written ({source})")
+    if result.applied:
+        raise RuntimeError("shadow pass must never set applied=True")
     return {
         "message": f"shadow pass: {len(result.shadow_log_ids)} entries logged (applied=False)",
         "model_version": result.model_version,
+        "data_source": source,
         "shadow_log_ids": len(result.shadow_log_ids),
         "applied": result.applied,
     }

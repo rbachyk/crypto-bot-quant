@@ -102,4 +102,11 @@ class _SklearnModelMixin:
         self.is_trained = self._clf is not None
 
     def performance_report(self) -> dict:
-        return dict(self._metrics)
+        m = dict(self._metrics)
+        # These accuracy/precision/recall/brier numbers are computed on the SAME rows the model was
+        # fitted on (the caller passes only the training split), so they are optimistic in-sample
+        # metrics. Flag them explicitly so nothing downstream reads them as out-of-sample
+        # performance (L27); genuine OOS metrics come from ShadowPredictor.train's held-out
+        # evaluation (the ``test_*`` keys).
+        m.setdefault("in_sample", True)
+        return m

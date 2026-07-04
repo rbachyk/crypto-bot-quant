@@ -80,12 +80,20 @@ class ShadowScorer:
         max_tail_loss_ratio: float = 1.0,
         max_best_removed_pct: float = 0.2,
         top_n: int = 10,
+        min_taken: int = 3,
+        min_coverage_frac: float = 0.05,
     ) -> None:
         self.min_improvement = min_improvement
         self.min_pf_ratio = min_pf_ratio
         self.max_tail_loss_ratio = max_tail_loss_ratio
         self.max_best_removed_pct = max_best_removed_pct
         self.top_n = top_n
+        # A degenerate block-everything (or block-almost-everything) model scores VACUOUSLY well on
+        # every other criterion — 0 trades → expectancy 0 (beats a negative baseline), profit_factor
+        # 1.0, worst-trade 0 — so without a coverage floor it "improves" on a bad baseline window
+        # while trading nothing (M30). Require both an absolute floor and a minimum coverage.
+        self.min_taken = min_taken
+        self.min_coverage_frac = min_coverage_frac
 
     def score(
         self,
@@ -120,6 +128,19 @@ class ShadowScorer:
         removed_pct = removed / max(top_n, 1)
 
         fail_reasons: list[str] = []
+        # Coverage floor FIRST (M30): a model that takes too few trades is degenerate — its
+        # expectancy/PF/tail numbers are vacuous, not evidence of skill.
+        coverage = n_taken / n if n > 0 else 0.0
+        if n_taken < self.min_taken:
+            fail_reasons.append(
+                f"too few trades taken: {n_taken} < min_taken={self.min_taken} "
+                "(degenerate/block-everything model)"
+            )
+        elif coverage < self.min_coverage_frac:
+            fail_reasons.append(
+                f"coverage too low: {coverage:.1%} < {self.min_coverage_frac:.0%} "
+                f"({n_taken}/{n} taken)"
+            )
         if exp_improvement < self.min_improvement:
             fail_reasons.append(
                 f"expectancy did not improve: "
