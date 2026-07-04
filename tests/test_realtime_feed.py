@@ -86,6 +86,19 @@ def test_live_feed_yields_well_formed_candidates_from_stream() -> None:
         assert int(cand.decision_ts) == decision_ts
 
 
+def test_latest_hl_returns_completed_bars_high_low() -> None:
+    """The realtime exit check reads latest_hl to fill a held position's stop/TP at the intrabar
+    bracket level (parity fix a). It must return the LATEST completed bar's (high, low)."""
+    feed = _feed(max_groups=1)
+    list(feed.groups())  # advance the reader so it has bars
+    bars = feed._reader.ohlcv(SYM)
+    assert bars, "feed should have completed bars after streaming"
+    hl = feed.latest_hl(SYM)
+    assert hl == (float(bars[-1]["high"]), float(bars[-1]["low"]))
+    assert hl[0] >= hl[1]  # high >= low
+    assert feed.latest_hl("NOPE/USDT:USDT") is None  # unseen symbol
+
+
 def test_partial_seed_is_reseeded_not_left_dark() -> None:
     """REGRESSION (E3): the seed guard checks EVERY symbol, not just symbols[0]. A prior PARTIAL
     seed (symbols[0] filled but another symbol empty after a per-symbol REST outage) must trigger a

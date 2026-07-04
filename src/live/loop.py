@@ -528,6 +528,7 @@ class LiveLoop:
         on_flush: Callable[[PaperSession], None] | None = None,
         on_session_start: Callable[[str], None] | None = None,
         price_of: Callable[[str], float | None] | None = None,
+        hl_of: Callable[[str], tuple[float, float] | None] | None = None,
         bar_iv: int = 0,
     ) -> LiveRunResult:
         """Process feed groups one tick at a time; halt on kill switch / foreign orders.
@@ -594,8 +595,11 @@ class LiveLoop:
             # the new bar breaches their stop/TP/time-stop — otherwise a paper position (built with
             # exit_move_frac=0) would never close and the session would book no realized P&L.
             if self.mode == "paper" and price_of is not None:
+                # Pass hl_of so the exit check uses THIS (completed) bar's intrabar wick and fills
+                # at the bracket level — parity with the backtest and the exchange-resident stop/TP
+                # a real venue fills intrabar. Falls back to close-only when the feed has no OHLC.
                 self.engine.simulate_paper_exits(
-                    price_of, decision_ts, session, bar_iv=self._bar_iv
+                    price_of, decision_ts, session, bar_iv=self._bar_iv, hl_of=hl_of
                 )
             before_exec = session.executed_count
             before_rej = session.rejected_count
@@ -862,6 +866,7 @@ def run_replay_session(
         on_flush=on_flush,
         on_session_start=on_session_start,
         price_of=getattr(feed, "latest_price", None),  # only the realtime feed marks live prices
+        hl_of=getattr(feed, "latest_hl", None),  # intrabar wick for bracket-level exit parity (a)
         bar_iv=timeframe_ms(tf),  # pin the time-stop interval to the configured timeframe
     )
 

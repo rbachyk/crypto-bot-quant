@@ -575,6 +575,16 @@ class LiveCandidateFeed:
         bars = self._reader.ohlcv(symbol)
         return float(bars[-1]["close"]) if bars else None
 
+    def latest_hl(self, symbol: str) -> tuple[float, float] | None:
+        """(high, low) of the latest COMPLETED bar — None if unseen yet. Lets the paper exit
+        simulator check a held position's stop/TP against this bar's intrabar wick and fill at the
+        bracket level, matching the per-trade backtest and the exchange-resident stop/TP a real
+        (demo/live) venue fills intrabar. The bar ending at the current decision ts is complete (the
+        reader appends closed bars), and exits are checked BEFORE new entries, so a position opened
+        this bar is not yet held and its own forming bar is never peeked at — no look-ahead."""
+        bars = self._reader.ohlcv(symbol)
+        return (float(bars[-1]["high"]), float(bars[-1]["low"])) if bars else None
+
     def funding_events(self, symbol: str) -> list[dict]:
         """Funding events ({ts, funding_rate}) for a symbol from the rolling reader — lets the
         paper engine accrue funding on held positions exactly as the basket loop / backtest do
