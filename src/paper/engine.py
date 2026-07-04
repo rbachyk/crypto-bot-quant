@@ -911,7 +911,24 @@ class PaperTradingEngine:
                     exit_reason = "stop"
 
         raw_pnl = (exit_price - entry_price) * candidate.side * fill.qty
-        fee = fill.fee
+        # Charge the EXIT-side fee whenever an exit actually occurred (M-F). ``fill.fee`` is the
+        # ENTRY fee only; the backtest and the live held-close both add an exit fee, and the replay
+        # path (which now always resolves a concrete exit) previously booked round-trips minus just
+        # ONE fee — inflating every replay net_pnl / expectancy the PAPER-B/promotion gates read. A
+        # maker take-profit on a maker entry exits maker (mirrors the backtest); every other exit is
+        # taker. A still-"open" position (live path) books no exit fee here — it closes later.
+        exit_fee = 0.0
+        if exit_reason != "open":
+            spec = self._meta.spec(candidate.symbol)
+            fields = spec.fields if spec is not None else {}
+            maker_exit = bool(candidate.maker) and exit_reason == "take_profit"
+            rate = (
+                float(fields.get("maker_fee", 0.0002) or 0.0002)
+                if maker_exit
+                else float(fields.get("taker_fee", 0.0006) or 0.0006)
+            )
+            exit_fee = rate * fill.qty * exit_price
+        fee = fill.fee + exit_fee
         pnl = raw_pnl - fee - funding_amount
         risk_amount = (
             decision.risk_amount
