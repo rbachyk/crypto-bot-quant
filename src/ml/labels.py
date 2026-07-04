@@ -23,7 +23,11 @@ import math
 import random
 from dataclasses import dataclass, replace
 
+import structlog
+
 from src.ranking.candidate import Candidate
+
+_log = structlog.get_logger("ml.labels")
 
 
 @dataclass(slots=True)
@@ -225,7 +229,7 @@ def build_labels_from_paper_outcomes(*, lookback_days: int = 120) -> list[Labele
                     "strategy": d.strategy,
                     "strategy_version": d.strategy_version or "",
                     "side": int(d.side),
-                    "regime": d.regime if hasattr(d, "regime") else "",
+                    # regime is filled from the paired TRADE row (DecisionLog has no regime column).
                     "features": feats,
                     "ts": d.ts,
                 }
@@ -238,22 +242,43 @@ def build_labels_from_paper_outcomes(*, lookback_days: int = 120) -> list[Labele
                 PaperTradeRecord.strategy,
                 PaperTradeRecord.side,
                 PaperTradeRecord.pnl_r,
+                PaperTradeRecord.regime,
                 PaperTradeRecord.created_at,
             )
             .filter(PaperTradeRecord.created_at >= cutoff)
             .order_by(PaperTradeRecord.created_at, PaperTradeRecord.id)
             .all()
         )
-        tkey_pnls: dict[tuple, list[float]] = defaultdict(list)
-        for sid, sym, strat, side, pnl_r, _created in trades:
+        # Store (realized R, realized regime): the regime comes from the TRADE row — DecisionLog has
+        # no regime column, so without this every real sample's regime is "" and the regime
+        # classifier collapses to a single class and never trains on real data.
+        tkey_out: dict[tuple, list[tuple[float, str]]] = defaultdict(list)
+        for sid, sym, strat, side, pnl_r, regime, _created in trades:
             if _is_paper(sid):
-                tkey_pnls[(sid, sym, strat, int(side))].append(float(pnl_r))
+                tkey_out[(sid, sym, strat, int(side))].append((float(pnl_r), regime or ""))
 
     samples: list[LabeledSample] = []
+    skipped_keys = 0
     for key, drows in dkey_rows.items():
-        pnls = tkey_pnls.get(key, [])
-        for drow, pnl_r in zip(drows, pnls, strict=False):  # positional lockstep per key
-            samples.append(_labeled_sample_from_real(drow, pnl_r))
+        outcomes = tkey_out.get(key, [])
+        # Positional lockstep is only sound when the executed decisions and closed trades for this
+        # (session,symbol,strategy,side) are 1:1 — true when every execute-decision produced exactly
+        # one trade in the same order (a paper session holds ≤1 position per symbol). If the counts
+        # DISAGREE (an execute-decision that never filled / was rejected post-execute, a still-open
+        # position, a non-FIFO close), the pairing would mislabel feature-vector↔realized-R, so
+        # skip the whole key rather than emit corrupt labels. paper_trades carries no decision link
+        # (trade_id) to join on precisely, so conservative skipping is the safe choice.
+        if len(drows) != len(outcomes):
+            skipped_keys += 1
+            continue
+        for drow, (pnl_r, regime) in zip(drows, outcomes, strict=True):
+            samples.append(_labeled_sample_from_real({**drow, "regime": regime}, pnl_r))
+    if skipped_keys:
+        _log.warning(
+            "ml_real_labels_key_count_mismatch",
+            skipped_keys=skipped_keys,
+            note="decision/trade counts disagreed for these keys; skipped to avoid mislabeling",
+        )
     # Chronological order for the downstream chronological train/test split (no temporal leakage).
     samples.sort(key=lambda s: s.candidate.decision_ts)
     return samples

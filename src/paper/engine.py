@@ -993,9 +993,11 @@ class PaperTradingEngine:
             self._trail_dist.pop(candidate.symbol, None)
             self._peak.pop(candidate.symbol, None)
             self._venue.positions.pop(candidate.symbol, None)
-            # The trade closed → its PnL is REALIZED. Accumulate it for the loss/streak breakers
-            # so a losing session halts new entries on the next candidate (Section 17).
-            self._register_realized(candidate.symbol, pnl)
+            # The trade closed → its PnL is REALIZED. Accumulate it (and the replay-accrued funding)
+            # for the loss/streak/funding breakers so a losing session halts new entries on the next
+            # candidate (Section 17). Passing funding here keeps the funding breaker fed on the
+            # replay path too — the held/live paths already pass it.
+            self._register_realized(candidate.symbol, pnl, funding=funding_amount)
         session.decision_logs.append(
             self._decision_log(candidate, "execute", "approved", True, ks_state)
         )

@@ -219,28 +219,24 @@ class CrossSectionalEngine:
                     continue
                 equity += self._close_leg(leg, prior, "gap_close", result, sym_in)
                 del holdings[sym]
-        # Open new legs (stable same-side members are kept — no churn). Per-symbol target notionals
-        # are dollar- or beta-neutral depending on config. Openability (priceable bar+row, non-toxic
-        # spread) is resolved BEFORE sizing so a skipped leg doesn't silently leave the basket net-
-        # directional: the target notional is balanced across the names that can ACTUALLY open on
-        # each side (L7). When both sides open fully this is identical to the old equal weighting.
+        # Open new legs (stable same-side members are kept — no churn). Per-leg target notional is
+        # divided over the FULL target basket (all longs+shorts, kept + new), so each new leg is the
+        # SAME size as the kept legs and total book exposure ≈ gross. (An earlier attempt sized over
+        # only the newly-opening names, over-allocating 5-10x whenever most legs were kept — the
+        # normal no-churn case. Reverted.) A toxic-skipped/ungapped leg simply doesn't open, leaving
+        # a residual directional tilt that is TRACKED below (full compensation needs resizing kept
+        # legs, i.e. churn, which the design avoids) — L7.
         gross = equity * self.portfolio_gross * self.risk_scale
-        # Book-level leverage cap: gross exposure / equity may not exceed the account leverage
-        # ceiling — the per-trade engine enforces this via RiskSimulator; the basket had none (M5).
+        # Book-level leverage cap: bound the sizing budget so a full basket's exposure / equity
+        # stays within the account leverage ceiling — the basket had none (M5). Kept legs from a
+        # prior, higher-equity rebalance can still sit above; that residual is surfaced by the log.
         gross = min(gross, equity * float(self.cfg.account.max_leverage))
-
-        def _new_openable(sym: str) -> bool:
-            return sym not in holdings and self._openable(
-                sym, bars_by_ts, rows_by_ts, by_symbol, ts
-            )
-
-        open_longs = {s for s in longs if _new_openable(s)}
-        open_shorts = {s for s in shorts if _new_openable(s)}
-        notionals = self._target_notionals(open_longs, open_shorts, ts, gross)
-        for sym in (*open_longs, *open_shorts):
-            side = target[sym]
+        notionals = self._target_notionals(longs, shorts, ts, gross)
+        for sym in (*longs, *shorts):
+            if sym in holdings or not self._openable(sym, bars_by_ts, rows_by_ts, by_symbol, ts):
+                continue
             leg = self._open_leg(
-                sym, side, notionals.get(sym, 0.0),
+                sym, target[sym], notionals.get(sym, 0.0),
                 bars_by_ts[sym][ts], rows_by_ts[sym][ts], ts, by_symbol[sym],
             )
             if leg is not None:

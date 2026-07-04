@@ -129,9 +129,12 @@ class ShadowScorer:
 
         fail_reasons: list[str] = []
         # Coverage floor FIRST (M30): a model that takes too few trades is degenerate — its
-        # expectancy/PF/tail numbers are vacuous, not evidence of skill.
+        # expectancy/PF/tail numbers are vacuous, not evidence of skill. The ABSOLUTE ``min_taken``
+        # floor only applies once the test set is large enough for it to be meaningful (>= 10·
+        # min_taken); on a small split we fall back to the coverage FRACTION so a legitimately
+        # selective model (e.g. 2 of 20 genuinely good trades) is not mislabeled degenerate.
         coverage = n_taken / n if n > 0 else 0.0
-        if n_taken < self.min_taken:
+        if n >= 10 * self.min_taken and n_taken < self.min_taken:
             fail_reasons.append(
                 f"too few trades taken: {n_taken} < min_taken={self.min_taken} "
                 "(degenerate/block-everything model)"

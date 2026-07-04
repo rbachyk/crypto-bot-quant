@@ -166,10 +166,16 @@ class LearnerController:
                 mode=self.mode.value,
             )
 
+        applied = self.mode is LearnerMode.LIVE_BOUNDED and not self._frozen
+
         # Immutable invariant (Section 21.6, M36): a learner take=True cannot RESURRECT a candidate
-        # the deterministic system hard-blocked. Enforced here because only the controller sees the
-        # candidate's block status; a no-trade regime on the context is a hard block too.
-        if guard.action.take and (hard_blocked or self._is_no_trade_regime(ctx)):
+        # the deterministic system hard-blocked. Only enforced on the APPLIED path (LIVE_BOUNDED) —
+        # the invariant is about EXECUTION, and rejecting in SHADOW/RECOMMEND would drop the action
+        # entirely, so the shadow log and the online-learning update never see those (hard-blocked,
+        # take=True) rows the policy most needs to learn from. In shadow/recommend the action flows
+        # with applied=False (it changes nothing); only when it would actually be applied is it
+        # rejected. A no-trade regime on the context counts as a hard block.
+        if applied and guard.action.take and (hard_blocked or self._is_no_trade_regime(ctx)):
             return ControllerDecision(
                 action=None,
                 applied=False,
@@ -181,8 +187,6 @@ class LearnerController:
                 ),
                 mode=self.mode.value,
             )
-
-        applied = self.mode is LearnerMode.LIVE_BOUNDED and not self._frozen
         return ControllerDecision(
             action=guard.action,
             applied=applied,

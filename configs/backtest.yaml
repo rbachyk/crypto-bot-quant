@@ -102,7 +102,6 @@ backtest:
   # --- Walk-forward validation (Section 16) ---------------------------------
   walk_forward:
     folds: 5                     # number of out-of-sample test folds
-    train_frac: 0.5              # fraction of each window used for (notional) training
     # Locked hold-out: the most-recent fraction is untouched during all folds and
     # is evaluated EXACTLY ONCE at the end (Section 16).
     holdout_frac: 0.2

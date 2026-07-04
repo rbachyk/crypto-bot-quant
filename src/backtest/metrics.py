@@ -158,8 +158,9 @@ def _stability(trades: list[Trade], segments: int = 5) -> dict:
         return {"segments": 0, "positive_segments": 0, "segment_expectancy_r": [], "pnl_std": 0.0}
     ordered = sorted(trades, key=lambda t: t.exit_ts)
     n = len(ordered)
-    # Exactly ``min(segments, n)`` contiguous chunks with the remainder spread across the earliest
-    # chunks (boundaries at ⌊k·n/segs⌋). The old ``range(0, n, n//segments)`` produced segments+1
+    # Exactly ``min(segments, n)`` contiguous chunks with the remainder distributed across the
+    # LATER chunks (boundaries at ⌊k·n/segs⌋, e.g. n=12,segs=5 → sizes 2,2,3,2,3). The old
+    # ``range(0, n, n//segments)`` produced segments+1
     # chunks whenever n wasn't a multiple of segments — a tiny tail chunk counted as a full,
     # equally-weighted segment and skewed positive_segments (L3).
     segs = min(segments, n)

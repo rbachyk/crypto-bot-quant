@@ -103,7 +103,7 @@ class LiveCandidateFeed:
         # exchange-of-record). Throttled to one symbol's check per this many advances.
         self.ws_rest_check = bool(ws_rest_check)
         self._ws_rest_every = 20
-        self._ws_rest_counter = 0
+        self._ws_rest_counter: dict[str, int] = {}  # per-symbol advance counter for the throttle
         # Per-symbol measured feed round-trip latency (ms), refreshed each advance and threaded into
         # the candidate so the execution revalidator's abnormal-latency blocker sees a REAL number
         # instead of a 5.0 constant that could never trip (M12).
@@ -367,8 +367,12 @@ class LiveCandidateFeed:
             and self.data_manager is not None
             and self.rest_source is not None
         ):
-            self._ws_rest_counter += 1
-            if self._ws_rest_counter % self._ws_rest_every == 0:
+            # Throttle PER SYMBOL: a single global counter modulo N with an N-symbol universe lands
+            # on the same symbol index every cycle, so only that one symbol was ever cross-checked
+            # and drift on all the others went undetected. Count each symbol's own advances.
+            c = self._ws_rest_counter.get(sym, 0) + 1
+            self._ws_rest_counter[sym] = c
+            if c % self._ws_rest_every == 0:
                 self._cross_check_ws_rest(sym, ts, float(bar["close"]))
         last_ts[sym] = ts
         self._reader.append_bar(sym, bar)

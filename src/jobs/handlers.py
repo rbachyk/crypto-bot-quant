@@ -468,31 +468,23 @@ def _build_ml_dataset(ctx: JobContext, params: dict) -> dict:
     paper trade outcomes accumulate (Phase 10+), this job builds from the real
     shadow_log + paper_trades tables.
     """
-    from src.ml.labels import build_labels_from_paper_outcomes, build_reference_dataset
+    from src.ml.labels import build_training_dataset
 
-    n_good = int(params.get("n_good", 40))
-    n_bad = int(params.get("n_bad", 30))
-    n_neutral = int(params.get("n_neutral", 30))
     seed = int(params.get("seed", 42))
 
-    # Prefer REAL labels from persisted paper outcomes (H18); fall back to the synthetic reference
-    # dataset (plumbing only) while real data accumulates. Never presents synthetic as real.
-    real = build_labels_from_paper_outcomes()
-    if real:
-        ctx.log(f"building ML dataset from {len(real)} REAL paper-outcome labels")
-        ctx.progress(1, 1, f"{len(real)} real labeled samples")
-        return {
-            "message": f"built ML dataset: {len(real)} REAL samples",
-            "n_samples": len(real),
-            "source": "real",
-        }
-    ctx.log(f"no real paper labels yet; synthetic reference dataset: n_good={n_good} n_bad={n_bad}")
-    samples = build_reference_dataset(n_good=n_good, n_bad=n_bad, n_neutral=n_neutral, seed=seed)
-    ctx.progress(1, 1, f"{len(samples)} synthetic labeled samples")
+    # Prefer REAL labels from persisted paper outcomes, else the synthetic reference dataset
+    # (plumbing only). Routed through build_training_dataset so the SAME real/synthetic decision
+    # (and its >=min_real threshold) and the SAME DB-error → synthetic fallback apply here as in the
+    # train/evaluate jobs — a DB outage no longer turns this plumbing job red, and the reported
+    # `source` no longer disagrees with what training/eval actually use.
+    samples, source = build_training_dataset(seed=seed)
+    ctx.log(f"built ML dataset: {len(samples)} {source} labeled samples")
+    ctx.progress(1, 1, f"{len(samples)} {source} labeled samples")
     return {
-        "message": f"built ML dataset: {len(samples)} synthetic samples (no real data yet, H18)",
+        "message": f"built ML dataset: {len(samples)} {source} samples"
+        + ("" if source == "real" else " (no real data yet, H18)"),
         "n_samples": len(samples),
-        "source": "synthetic",
+        "source": source,
     }
 
 
@@ -602,9 +594,13 @@ def _run_ml_shadow_pass(ctx: JobContext, params: dict) -> dict:
         [s.candidate for s in test_samples[:20]],
         settings=settings,
         write_to_db=True,
-        # Tag rows synthetic ONLY when the data is synthetic, so ML-PROMO excludes plumbing runs
-        # but counts genuine real-data shadow decisions (H18).
-        synthetic_source=(source != "real"),
+        # ALWAYS tag these rows synthetic — even on real data. This is a BATCH pass over candidates
+        # reconstructed from historical decision_logs but stamped ts=now, so ML-PROMO's real join
+        # (links a shadow row to the first paper_trade within 48h AFTER its ts) pairs them with
+        # unrelated FUTURE trades and manufactures false "real" evidence for a live-blocking gate.
+        # Genuine real shadow evidence must come from live inference on the candidate stream (still
+        # unwired — the H18 closed loop), not from this offline reconstruction.
+        synthetic_source=True,
     )
     ctx.progress(1, 1, f"{len(result.shadow_log_ids)} shadow log entries written ({source})")
     if result.applied:
