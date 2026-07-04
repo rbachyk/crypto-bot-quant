@@ -208,8 +208,16 @@ def build_labels_from_paper_outcomes(*, lookback_days: int = 120) -> list[Labele
     cutoff = datetime.now(UTC) - timedelta(days=lookback_days)
 
     def _is_paper(session_id: str | None) -> bool:
+        # POSITIVE rule, not a denylist (L-J): a paper-money session is either a bare id with no
+        # scheme prefix (the default paper session — a uuid, `paper/engine.py`) or the explicit
+        # `paper:` scheme (the basket paper loop). Any OTHER scheme (`demo:`/`testnet:`/`live:`/
+        # `selftest:`, or a future `backtest:`/`replay:`) is NOT paper — so a new subsystem writing
+        # decision_logs/paper_trades under its own scheme is never silently swept into the training
+        # set. Kept consistent with the PAPER-B gate's non-paper prefixes.
         sid = session_id or ""
-        return bool(sid) and not sid.startswith(_NON_PAPER_SESSION_PREFIXES)
+        if not sid or sid.startswith(_NON_PAPER_SESSION_PREFIXES):
+            return False
+        return ":" not in sid or sid.startswith("paper:")
 
     with session_scope() as session:
         decisions = (
