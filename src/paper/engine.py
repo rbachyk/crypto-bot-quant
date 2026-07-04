@@ -404,7 +404,8 @@ class PaperTradingEngine:
             self._funding_watermark[sym] = last
 
     def simulate_paper_exits(
-        self, price_of, now_ts: int, session: PaperSession, *, bar_iv: int = 0, hl_of=None
+        self, price_of, now_ts: int, session: PaperSession, *, bar_iv: int = 0, hl_of=None,
+        charge_funding_and_roll: bool = True,
     ) -> int:
         """Close held PAPER positions whose bracket (stop / trailing-stop / take-profit) or
         time-stop is breached by the latest bar — the exchange-side exit a real venue would fill but
@@ -419,13 +420,17 @@ class PaperTradingEngine:
         filled at the exact bracket level (stop before take-profit, no intrabar look-ahead — parity
         with the per-trade backtest engine, M-G); when absent (realtime, close-only) it falls back
         to the close exactly as before. Returns the count of positions closed. Real venues manage
-        their own exits, so the loop only calls this in paper mode."""
-        # Roll the daily/weekly loss windows for THIS bar before booking any exit, so a loss closed
-        # on the first bar of a new day counts toward the new day's daily-loss breaker (B2/R3).
-        self._roll_loss_windows(now_ts)
-        # Accrue funding on every held position crossing a funding timestamp this bar (parity with
-        # the backtest), BEFORE marking exits so a leg that closes here realizes its full funding.
-        self._charge_open_funding(now_ts)
+        their own exits, so the loop only calls this in paper mode. ``charge_funding_and_roll``
+        =False skips the once-per-bar loss-window roll + funding accrual — used for the SECOND
+        same-bar call that checks a just-opened position's ENTRY-bar wick (MG-M1), so funding/loss
+        aren't double-counted for that bar."""
+        if charge_funding_and_roll:
+            # Roll the daily/weekly loss windows for THIS bar before booking any exit, so a loss
+            # closed on the first bar of a new day counts toward the new day's daily-loss breaker.
+            self._roll_loss_windows(now_ts)
+            # Accrue funding on every held position crossing a funding timestamp this bar (parity
+            # with the backtest) BEFORE marking exits, so a leg closing here realizes its funding.
+            self._charge_open_funding(now_ts)
         closed = 0
         for sym in list(self._open_positions):
             price = price_of(sym)

@@ -119,15 +119,18 @@ def test_concurrent_lake_replay_holds_positions_and_caps_bind(tmp_path) -> None:
     _seed(store, start, end)
     cfg = _data_cfg(start, end)
 
-    groups, bars_by_ts, iv, strat = build_lake_replay_timeline(
+    groups, bars_by_ts, funding_by_sym, iv, strat = build_lake_replay_timeline(
         cfg, timeframe=TF, symbols=[SYM], store=store
     )
     assert groups and bars_by_ts and iv == timeframe_ms(TF)
-    # Held candidates carry NO pre-resolved exit.
+    # Held candidates carry NO pre-resolved exit, and each carries a NON-ZERO time-stop horizon so
+    # the time-stop fires (MG-H2: reference momentum's Signal has no hold_bars → must default).
     assert all(inp.exit_reason is None for g in groups.values() for inp in g)
+    assert all(inp.candidate.hold_bars > 0 for g in groups.values() for inp in g)
 
     engine = _Eng()
     engine.set_bar_interval(iv)
+    engine.set_funding_source(lambda s: funding_by_sym.get(s, []))  # MG-H1: accrue held funding
     session = engine.new_session("lake_concurrent_test")
 
     # Instrument the open book to prove the one-position-per-symbol cap binds during the walk.
@@ -187,11 +190,12 @@ def test_concurrent_replay_is_a_subset_of_legacy_and_tracks_backtest(tmp_path) -
     legacy_trades = len(leg_sess.trades)
 
     # Concurrent replay — holds positions, so overlapping same-symbol signals are capped out.
-    groups, bars_by_ts, iv, _ = build_lake_replay_timeline(
+    groups, bars_by_ts, funding_by_sym, iv, _ = build_lake_replay_timeline(
         cfg, timeframe=TF, symbols=[SYM], store=store
     )
     con = _Eng()
     con.set_bar_interval(iv)
+    con.set_funding_source(lambda s: funding_by_sym.get(s, []))
     con_sess = con.new_session("concurrent")
     _drive_lake_replay(con, con_sess, groups, bars_by_ts, iv)
     concurrent_trades = len(con_sess.trades)

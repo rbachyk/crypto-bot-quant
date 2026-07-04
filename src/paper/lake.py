@@ -13,6 +13,7 @@ feed exists (later milestone), this is how paper forward-tests on real data.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from src.backtest.service import build_lake_inputs, lake_candidate_strategy, make_strategy
@@ -241,9 +242,16 @@ def _eval_strategy_over_lake(
             if concurrent:
                 # Held candidate (M-G): no pre-resolved exit — the timeline driver opens it and
                 # closes it via simulate_paper_exits (which accrues funding on the held position).
+                # The engine's held-open path arms the time-stop from ``candidate.hold_bars``, but a
+                # Signal with no hold_bars (e.g. reference momentum) leaves it 0 → the time-stop
+                # would never fire and the position would ride to end-of-data. Stamp the effective
+                # horizon (the signal's, else the threaded default) so the time-stop matches the
+                # legacy replay / backtest (MG-H2).
+                eff_hold = int(getattr(sig, "hold_bars", 0) or 0) or hold_bars
+                held = replace(cand, hold_bars=eff_hold)
                 out.append(
                     PaperCandidateInput(
-                        candidate=cand, equity=equity, exit_move_frac=0.0, hold_bars=hold_bars,
+                        candidate=held, equity=equity, exit_move_frac=0.0, hold_bars=eff_hold,
                         exit_reason=None, funding_frac=0.0,
                     )
                 )
@@ -416,11 +424,18 @@ def build_lake_replay_timeline(
     store: SeriesStore | None = None,
     equity: float = 10_000.0,
     hold_bars: int = _DEFAULT_HOLD_BARS,
-) -> tuple[dict[int, list[PaperCandidateInput]], dict[str, dict[int, dict]], int, str]:
+) -> tuple[
+    dict[int, list[PaperCandidateInput]],
+    dict[str, dict[int, dict]],
+    dict[str, list[dict]],
+    int,
+    str,
+]:
     """Build the concurrent-replay timeline (M-G): per-entry-ts HELD candidate GROUPS + per-symbol
-    bars (for price_of/hl_of) + the bar interval + a strategy label. The driver walks the shared bar
-    timeline, closing held positions via ``simulate_paper_exits`` and opening new signals, so open
-    positions accumulate and the risk caps bind — unlike the legacy per-candidate flatten."""
+    bars (for price_of/hl_of) + per-symbol funding events (for the held-position funding accrual) +
+    the bar interval + a strategy label. The driver walks the shared bar timeline, closing held
+    positions via ``simulate_paper_exits`` and opening new signals, so open positions accumulate and
+    the risk caps bind — unlike the legacy per-candidate flatten."""
     from collections import defaultdict
 
     from src.backtest.config import load_backtest_config
@@ -472,7 +487,11 @@ def build_lake_replay_timeline(
         ):
             groups[int(inp.candidate.decision_ts)].append(inp)
     bars_by_ts = {si.symbol: {int(b["ts"]): b for b in si.bars} for si in lake_inputs}
-    return dict(groups), bars_by_ts, timeframe_ms(timeframe), strat_label
+    # Per-symbol funding events so the driver accrues funding on HELD positions via the engine's
+    # _charge_open_funding (which applies costs.funding_multiplier via FundingModel) — the shared
+    # exit path no-ops without a funding source, so the concurrent path paid zero funding (MG-H1).
+    funding_by_sym = {si.symbol: list(si.funding_events) for si in lake_inputs}
+    return dict(groups), bars_by_ts, funding_by_sym, timeframe_ms(timeframe), strat_label
 
 
 def run_lake_paper_session(
@@ -512,10 +531,12 @@ def run_lake_paper_session(
     if concurrent:
         # M-G: drive the engine over the shared bar timeline so open positions accumulate and the
         # concurrency/heat/net-beta risk caps bind (exit-then-enter each bar, intrabar exits).
-        groups, bars_by_ts, iv, strat_id = build_lake_replay_timeline(
+        groups, bars_by_ts, funding_by_sym, iv, strat_id = build_lake_replay_timeline(
             data_cfg, timeframe=tf, symbols=syms, settings=settings,
             candidate_id=candidate_id, multi_strategy=multi_strategy,
         )
+        # Accrue funding on held positions (MG-H1) — same source shape the realtime loop wires.
+        engine.set_funding_source(lambda s: funding_by_sym.get(s, []))
         tag = "lakebt" if multi_strategy else "lake"
         name = session_name or f"{tag}:{data_cfg.exchange_id}:{dsv}:{tf}:{strat_id}:concurrent"
         session = engine.new_session(name)
@@ -565,6 +586,13 @@ def _drive_lake_replay(
         group = groups.get(ts)
         if group:
             engine.process_candidates(group, session)
+            # Entry-bar intrabar exit (MG-M1): a position opened at this bar's OPEN can be stopped/
+            # taken by THIS bar's wick (backtest and legacy replay both check the entry bar). Run
+            # the intrabar check once more at the same ts WITHOUT re-rolling funding/loss windows
+            # (they already ran above) — re-checking already-open positions is idempotent.
+            engine.simulate_paper_exits(
+                price_of, ts, session, bar_iv=iv, hl_of=hl_of, charge_funding_and_roll=False
+            )
     # Force-close anything still open at end-of-data on its last known close (backtest parity).
     if timeline:
         last_ts = timeline[-1]
