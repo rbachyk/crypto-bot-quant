@@ -74,11 +74,17 @@ class DataPlatform:
             key, self.cfg.window_start_ms, self.cfg.series_end_ms(key)
         )
 
-    def download_all(self) -> int:
-        """Idempotent full download of every required series over the window."""
+    def download_all(self, *, full: bool = False) -> int:
+        """Download every required series over the window, returning the count of NEW rows written.
+
+        INCREMENTAL by default: each series resumes from its newest stored ts, so a re-run only
+        fetches the candles that appeared since the last download (an empty/never-downloaded series
+        still fetches the whole window and records its listing watermark). ``full=True`` forces a
+        re-fetch of the entire window per series — use it only to rebuild a suspected-corrupt store;
+        writes are idempotent either way, so the full path just re-pulls data already on disk."""
         written = 0
         for key in self.cfg.all_required_keys():
-            written += self.download(key)
+            written += self.download(key) if full else self.update_incremental(key)
         return written
 
     def ensure_coverage(self, repair: bool = True) -> CoverageReport:

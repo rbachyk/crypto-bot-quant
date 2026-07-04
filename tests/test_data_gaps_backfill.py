@@ -69,6 +69,50 @@ def test_incremental_update_fetches_only_the_tail(tmp_path) -> None:
     assert find_gaps(store, key, cfg.window_start_ms, cfg.window_end_ms).covered
 
 
+class _SpySource:
+    """Wraps a source and records the (start, end) range of every fetch, to prove download_all
+    resumes past the window start (incremental) vs re-fetches from it (full)."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.fetches: list[tuple[int, int]] = []
+
+    def fetch(self, key, start, end):
+        self.fetches.append((start, end))
+        return self._inner.fetch(key, start, end)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def test_platform_download_all_incremental_by_default(tmp_path, monkeypatch) -> None:
+    """download_all() must NOT re-fetch the whole window when the store already has data — it
+    resumes past the window start (the dashboard/CLI 'incremental' path). full=True re-fetches from
+    the window start (the 'force full re-download' path)."""
+    monkeypatch.setenv("DATA_LAKE_PATH", str(tmp_path / "dl"))
+    monkeypatch.setenv("ARTIFACT_PATH", str(tmp_path / "art"))
+    from src.config import get_settings
+    from src.data.platform import DataPlatform
+
+    get_settings.cache_clear()
+    cfg = small_cfg()
+    spy = _SpySource(get_data_source(cfg.exchange_id))
+    platform = DataPlatform(cfg=cfg, source=spy)
+
+    assert platform.download_all() > 0  # first fill of an empty store
+    ws = cfg.window_start_ms
+
+    spy.fetches.clear()
+    assert platform.download_all() == 0  # incremental: nothing new
+    # Whatever it did fetch resumed AFTER the window start — never a from-scratch re-pull.
+    assert all(start > ws for start, _ in spy.fetches)
+
+    spy.fetches.clear()
+    platform.download_all(full=True)  # force full: every series re-fetched from the window start
+    assert spy.fetches and all(start == ws for start, _ in spy.fetches)
+    get_settings.cache_clear()
+
+
 def test_missing_symbol_cannot_be_filled(tmp_path) -> None:
     cfg = small_cfg(symbols=("BTC/USDT:USDT",))
     store = fresh_store(tmp_path)

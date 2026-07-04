@@ -147,6 +147,12 @@ def download(
         "", "--data-version", help="DATA_VERSION label ('' = config default)"
     ),
     repair: bool = typer.Option(True, "--repair/--no-repair", help="auto-fill safe gaps"),
+    full: bool = typer.Option(
+        False,
+        "--full/--incremental",
+        help="re-fetch the ENTIRE window per series (default: incremental — only candles that "
+        "appeared since the last download; an empty series still fetches the full window)",
+    ),
 ) -> None:
     """Download real public market data into a versioned DATA_VERSION snapshot.
 
@@ -156,6 +162,10 @@ def download(
     configs/data.bybit.yaml`` for the real Bybit contract (OI sampled at 1h); the
     default ``configs/data.yaml`` stays on the offline skeleton. CLI flags override
     individual fields of the chosen config.
+
+    INCREMENTAL by default: each series resumes from its newest stored candle, so a
+    re-run only pulls what's new instead of re-downloading years of data. Pass
+    ``--full`` to force a whole-window re-fetch (e.g. to rebuild a suspect store).
     """
     from dataclasses import replace
 
@@ -186,7 +196,7 @@ def download(
     )
 
     platform = DataPlatform(cfg=cfg)
-    written = platform.download_all()
+    written = platform.download_all(full=full)
     run = platform.run_full(repair=repair, source_jobs=["cli.download"])
     typer.echo(
         json.dumps(
@@ -196,6 +206,7 @@ def download(
                 "symbols": cfg.symbols,
                 "timeframes": cfg.timeframes,
                 "window": [cfg.window_start_ms, cfg.window_end_ms],
+                "mode": "full" if full else "incremental",
                 "rows_written": written,
                 "snapshot_id": run.snapshot.snapshot_id,
                 "coverage_ok": run.coverage.covered,
