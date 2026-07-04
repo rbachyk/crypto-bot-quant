@@ -199,19 +199,24 @@ def test_watermark_survives_delete_range_and_is_monotone_min(tmp_path) -> None:
     assert store.listing_ts(key) == start - iv
 
 
-def test_incremental_tail_resume_does_not_mint_a_watermark(tmp_path) -> None:
-    """A tail resume starts mid-series by construction — recording its first row as 'listing'
-    would mask everything before the tail. Only from-the-start fetches record the watermark."""
+def test_incremental_tail_resume_backfills_watermark_from_earliest_not_the_tail(tmp_path) -> None:
+    """A tail resume must NEVER record its own (mid-series) first row as the listing edge — that
+    would mask everything before the tail. It now backfills the watermark from the EARLIEST stored
+    bar instead (data-integrity hygiene for legacy series that have data but no watermark), which is
+    the true listing edge when the first download began at/before the window start, is monotone-min,
+    and self-corrects on a later authoritative from-start full download."""
     cfg = small_cfg()
     store = fresh_store(tmp_path)
     key = SeriesKey(cfg.exchange_id, OHLCV, cfg.symbols[0], "5m")
     start, end = cfg.window_start_ms, cfg.window_end_ms
     half = start + (end - start) // 2
     src = get_data_source(cfg.exchange_id)
-    store.write(key, src.fetch(key, start, half))  # legacy series: data, no watermark
+    store.write(key, src.fetch(key, start, half))  # legacy series [start, half]: data, no watermark
+    earliest = store.earliest_ts(key)
     ing = Ingestor(src, store)
-    assert ing.update_incremental(key, start, end) > 0
-    assert store.listing_ts(key) is None  # tail resume minted nothing
+    assert ing.update_incremental(key, start, end) > 0  # resumes from `half`, fetches [half, end]
+    assert store.listing_ts(key) == earliest == start  # from the EARLIEST bar…
+    assert store.listing_ts(key) != half  # …never the tail resume's first row
     # An EMPTY series' incremental update resumes from the window start ⇒ it IS the probe.
     key2 = SeriesKey(cfg.exchange_id, OHLCV, cfg.symbols[0], "1h")
     assert ing.update_incremental(key2, start, end) > 0

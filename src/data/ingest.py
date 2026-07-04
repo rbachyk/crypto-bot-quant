@@ -54,6 +54,18 @@ class Ingestor:
         stored ts without reading the whole multi-year series. Only a from-the-start fetch may
         record the listing watermark — a tail resume starts mid-series by construction."""
         last = self.store.latest_ts(key)
+        # Backfill the listing watermark for a series that HAS data but never recorded one (legacy
+        # series, or one only ever built incrementally) WITHOUT a full re-download: the earliest
+        # stored bar is the listing edge whenever the first download began at/before the window
+        # start (the norm — the window starts years before most listings). record_listing_ts is
+        # monotone-min, so a later full download that recovers earlier data still corrects it. This
+        # is data-integrity hygiene (once recorded, future head-of-series loss stays detectable and
+        # the panel shows a real listing date); it does NOT change gap counts — grid_start =
+        # max(start, earliest) already equals the prior no-watermark first-stored fallback.
+        if last is not None and self.store.listing_ts(key) is None:
+            earliest = self.store.earliest_ts(key)
+            if earliest is not None:
+                self.store.record_listing_ts(key, earliest)
         resume = (last + key.interval_ms) if (last is not None and last >= start_ms) else start_ms
         if resume >= end_ms:
             return 0
