@@ -1384,6 +1384,69 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return f'<div class="card"><h2>{_esc(title)}</h2><table>{rows}</table></div>'
 
     # ----- Data Coverage (#2) --------------------------------------------- #
+    def _data_status_card() -> str:
+        """Current data window + per-symbol history status (where each symbol's data actually
+        begins vs the window start), so a coverage failure is legible: a symbol that LISTED after
+        the window start has its earliest bar well above the start — expected, not a gap."""
+        from src.data.config import load_data_config
+        from src.data.schema import MARK, OHLCV, SeriesKey, ms_to_iso, timeframe_ms
+        from src.data.store import SeriesStore
+
+        try:
+            dc = load_data_config("configs/data.bybit.yaml")
+        except Exception as exc:  # noqa: BLE001 - config unreadable → show a note, never 500
+            return f'<div class="card"><h2>Data window</h2><p class="meta">unavailable ({_esc(str(exc))})</p></div>'
+        store = SeriesStore(settings.data_lake_path)
+        ws, we = dc.window_start_ms, dc.window_end_ms
+        days = (we - ws) / 86_400_000
+        base = dc.base_timeframe
+        slack = 2 * timeframe_ms(base)  # a bar or two above the start is not "late"
+        rows: list[list] = []
+        for sym in dc.active_symbols():
+            key = SeriesKey(dc.exchange_id, OHLCV, sym, base)
+            first = store.earliest_ts(key)
+            last = store.latest_ts(key)
+            listing = store.listing_ts(key)
+            mark_last = store.latest_ts(SeriesKey(dc.exchange_id, MARK, sym, base))
+            if first is None:
+                status = _status_badge("failed") + " no data"
+            elif first > ws + slack:
+                late_days = (first - ws) / 86_400_000
+                status = f"listed +{late_days:.0f}d after start (not a gap)"
+            elif last is not None and last < we - slack:
+                status = _status_badge("failed") + " stale tail"
+            else:
+                status = _status_badge("passed") + " covers window"
+            rows.append([
+                _esc(sym),
+                ms_to_iso(first)[:10] if first else "—",
+                ms_to_iso(last)[:16] if last else "—",
+                ms_to_iso(listing)[:10] if listing else "⚠ no watermark",
+                ms_to_iso(mark_last)[:16] if mark_last else "—",
+                status,
+            ])
+        window_line = (
+            f'<p><b>Window</b>: <code>{_esc(ms_to_iso(ws))}</code> → '
+            f'<code>{_esc(ms_to_iso(we))}</code> ({days:.0f} days) · '
+            f'<b>DATA_VERSION</b> <code>{_esc(dc.data_version)}</code> · '
+            f'{len(dc.active_symbols())} symbols · base <code>{_esc(base)}</code></p>'
+            '<p class="meta">A symbol that LISTED after the window start (e.g. many alts on Bybit '
+            'post-2021) shows its history beginning later — that leading absence is expected and '
+            'should not fail coverage once its listing watermark is recorded (a full re-download '
+            'records it). "⚠ no watermark" means gap-detection is falling back to the first stored '
+            'bar for that series.</p>'
+        )
+        return (
+            '<div class="card"><h2>Current data window &amp; per-symbol status</h2>'
+            + window_line
+            + _rows_table(
+                ["Symbol", "History from", "Last bar", "Listing watermark", "Last mark", "Status"],
+                rows,
+                "No symbols configured.",
+            )
+            + "</div>"
+        )
+
     @app.get("/dashboard/data-coverage", response_class=HTMLResponse)
     def dashboard_data_coverage(user: str = Depends(require_dashboard_auth)) -> str:
         from src.db.models import DatasetVersion, JobStatus
@@ -1458,7 +1521,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "exact reason; fix and re-run. Keep the window recent (open-interest has short "
             "retention on Bybit).</p>"
             "</div>"
-            f'<div class="card"><h2>DATA_VERSION snapshots ({len(data)})</h2>'
+            + _data_status_card()
+            + f'<div class="card"><h2>DATA_VERSION snapshots ({len(data)})</h2>'
             + _rows_table(
                 ["Snapshot", "Exchange", "Valid", "Symbols", "Rows", "Issue"],
                 data,

@@ -143,6 +143,21 @@ class SeriesStore:
                     return max(int(r["ts"]) for r in rows)
         return None
 
+    def earliest_ts(self, key: SeriesKey) -> int | None:
+        """The OLDEST stored timestamp for ``key`` (``None`` if empty). Reads only the oldest
+        partition file, so it stays cheap for multi-year series — used by the data-status panel to
+        show where each symbol's history actually begins vs the window start (a symbol that listed
+        after the window start has its earliest bar well above the start, which is NOT a gap)."""
+        sdir = self._series_dir(key)
+        if not sdir.exists():
+            return None
+        for year_dir in sorted(d for d in sdir.iterdir() if d.is_dir()):
+            for mfile in sorted(year_dir.glob("*.parquet")):
+                rows = self._read_file(mfile)
+                if rows:
+                    return min(int(r["ts"]) for r in rows)
+        return None
+
     def count(self, key: SeriesKey, start_ms: int | None = None, end_ms: int | None = None) -> int:
         return len(self.read(key, start_ms, end_ms))
 
