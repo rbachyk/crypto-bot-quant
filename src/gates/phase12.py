@@ -428,13 +428,19 @@ def check_rl_shadow(settings: Settings) -> list[Criterion]:
         from src.adaptation.policy_base import Context
         from src.adaptation.store import reset_memory_sink, write_learner_log
 
+        # Write under an ISOLATED self-test learner id (NOT the real LEARNER_ID) and DELETE the rows
+        # after verification — mirroring phase11. Otherwise these 5 synthetic rows persist forever
+        # under the real RL learner id, and the rl_simulation/rl_shadow reports (which select by
+        # that id and exclude synthetic rows only by an unrelated rationale prefix) count them as
+        # RL shadow decisions that never happened (audit H-E).
+        rl_selftest_id = f"{LEARNER_ID}_selftest"
         reset_memory_sink()
         policy = RLPolicy.build_default(n_generations=2, episode_length=20)
         for i in range(5):
             ctx = Context(signal_strength=0.6 + i * 0.05, expected_edge_frac=0.003)
             action = policy.decide(ctx)
             write_learner_log(
-                learner_id=action.learner_id,
+                learner_id=rl_selftest_id,
                 learner_version=action.learner_version,
                 mode=action.mode,
                 symbol="BTCUSDT",
@@ -448,7 +454,8 @@ def check_rl_shadow(settings: Settings) -> list[Criterion]:
                 write_to_db=True,
             )
 
-        # Verify DB rows.
+        # Verify DB rows, then remove the self-test rows (gate runs must not accumulate synthetic
+        # rows in production tables).
         from src.db.base import session_scope
         from src.db.models import LearnerLog
 
@@ -456,17 +463,24 @@ def check_rl_shadow(settings: Settings) -> list[Criterion]:
             rl_applied = (
                 session.query(LearnerLog)
                 .filter(
-                    LearnerLog.learner_id == LEARNER_ID,
+                    LearnerLog.learner_id == rl_selftest_id,
                     LearnerLog.applied.is_(True),
                 )
                 .count()
             )
-            rl_total = session.query(LearnerLog).filter(LearnerLog.learner_id == LEARNER_ID).count()
+            rl_total = (
+                session.query(LearnerLog)
+                .filter(LearnerLog.learner_id == rl_selftest_id)
+                .count()
+            )
+            session.query(LearnerLog).filter(
+                LearnerLog.learner_id == rl_selftest_id
+            ).delete(synchronize_session=False)
 
         out.append(
             Criterion.ok(
                 "rl_shadow_applied_false",
-                f"wrote 5 RL learner_log entries; "
+                f"wrote 5 RL learner_log entries (isolated self-test id, removed after verify); "
                 f"total={rl_total} applied=True={rl_applied} (must be 0)",
             )
             if rl_applied == 0
