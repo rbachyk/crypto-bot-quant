@@ -394,6 +394,33 @@ class LiveLoop:
     # ML-PROMO join links a shadow row to the first paper_trade in the 48h AFTER it (audit M-A).
     _SHADOW_FRESHNESS_MS = 3_600_000  # 1h
 
+    def _ensure_shadow_predictor(self) -> None:
+        """Build + train the shadow predictor ONCE, off the per-bar hot path (H-C M2).
+
+        Warmed up at ``run()`` start (paper mode) so the 120-day dataset scan and the five sklearn
+        fits don't block the first bar's ``process_candidates``. Idempotent: returns once built,
+        disabled (ml_stage < 2), or after a build failure has latched ``_shadow_disabled``."""
+        if self._shadow_disabled or self._shadow_predictor is not None:
+            return
+        try:
+            from src.ml.config import load_ml_config
+            from src.ml.labels import build_training_dataset
+            from src.ml.shadow import ShadowPredictor
+
+            ml_cfg = load_ml_config()
+            if int(getattr(ml_cfg, "ml_stage", 0)) < 2:
+                self._shadow_disabled = True
+                return
+            samples, source = build_training_dataset()
+            predictor = ShadowPredictor.from_config(ml_cfg)
+            predictor.train(samples)
+            self._shadow_predictor = predictor
+            self._ml_cfg = ml_cfg
+            _log.info("shadow_producer_ready", data_source=source, n_train=len(samples))
+        except Exception:  # noqa: BLE001 - shadow warm-up must never disturb the trading loop
+            _log.warning("shadow_producer_error", exc_info=True)
+            self._shadow_disabled = True
+
     def _maybe_shadow_log(
         self, group: list[PaperCandidateInput], decision_ts: int, executed_trades: list
     ) -> None:
@@ -418,21 +445,9 @@ class LiveLoop:
         if not cands:
             return
         try:
+            self._ensure_shadow_predictor()
             if self._shadow_predictor is None:
-                from src.ml.config import load_ml_config
-                from src.ml.labels import build_training_dataset
-                from src.ml.shadow import ShadowPredictor
-
-                ml_cfg = load_ml_config()
-                if int(getattr(ml_cfg, "ml_stage", 0)) < 2:
-                    self._shadow_disabled = True
-                    return
-                samples, source = build_training_dataset()
-                predictor = ShadowPredictor.from_config(ml_cfg)
-                predictor.train(samples)
-                self._shadow_predictor = predictor
-                self._ml_cfg = ml_cfg
-                _log.info("shadow_producer_ready", data_source=source, n_train=len(samples))
+                return  # disabled (stage < 2) or a build failure already latched
             result = self._shadow_predictor.run(
                 cands,
                 settings=self.settings,
@@ -543,6 +558,11 @@ class LiveLoop:
             result.halted = True
             session.foreign_order_halt_triggered = True
             return result
+
+        # H-C M2: warm up the shadow predictor here (paper mode), BEFORE the tick loop, so the
+        # one-time 120-day dataset scan + sklearn fits are paid off the per-bar critical path.
+        if self.mode == "paper":
+            self._ensure_shadow_predictor()
 
         # The feed interleaves empty groups (a new bar with no signal) so held positions re-mark
         # every bar; only non-empty (signal) groups count toward max_ticks and the on_tick index.
