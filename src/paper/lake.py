@@ -180,11 +180,17 @@ def _eval_strategy_over_lake(
     hold_bars: int,
     equity: float,
     promoted: bool,
+    concurrent: bool = False,
 ) -> list[PaperCandidateInput]:
     """Evaluate ONE per-row strategy over pre-built lake feature frames → candidate inputs.
 
     Factored out so the single-strategy and multi-strategy (active-set) builders share the
-    exact same Candidate construction and forward-move accounting (Parity Rule)."""
+    exact same Candidate construction and forward-move accounting (Parity Rule).
+
+    ``concurrent=True`` (M-G) emits HELD candidates (``exit_reason=None``, ``exit_move_frac=0.0``)
+    for the timeline driver, which opens them as held positions and closes them via the shared
+    ``simulate_paper_exits`` bracket walk — so open positions accumulate and the risk caps bind.
+    Default (``False``) keeps the legacy per-candidate pre-resolved-exit build."""
     from src.backtest.config import load_backtest_config
 
     # Apply the SAME funding multiplier the backtest FundingModel uses (L-L) so replay funding
@@ -220,11 +226,6 @@ def _eval_strategy_over_lake(
             if entry_bar is None:
                 continue  # no tradable bar at this timestamp (pre-listing or interior gap)
             entry_price = float(si.bars[entry_bar]["open"])
-            exit_bar, exit_price, exit_reason, funding_frac = _simulate_replay_exit(
-                si, entry_bar, entry_price, sig, hold_bars
-            )
-            funding_frac *= funding_multiplier  # L-L: match the backtest FundingModel
-            exit_move_frac = exit_price / entry_price - 1.0 if entry_price > 0 else 0.0
             cand = build_candidate(
                 si.symbol,
                 row,
@@ -237,6 +238,21 @@ def _eval_strategy_over_lake(
                 risk_scale=float(getattr(strategy, "risk_scale", 1.0)),
                 regime=tracked,
             )
+            if concurrent:
+                # Held candidate (M-G): no pre-resolved exit — the timeline driver opens it and
+                # closes it via simulate_paper_exits (which accrues funding on the held position).
+                out.append(
+                    PaperCandidateInput(
+                        candidate=cand, equity=equity, exit_move_frac=0.0, hold_bars=hold_bars,
+                        exit_reason=None, funding_frac=0.0,
+                    )
+                )
+                continue
+            exit_bar, exit_price, exit_reason, funding_frac = _simulate_replay_exit(
+                si, entry_bar, entry_price, sig, hold_bars
+            )
+            funding_frac *= funding_multiplier  # L-L: match the backtest FundingModel
+            exit_move_frac = exit_price / entry_price - 1.0 if entry_price > 0 else 0.0
             out.append(
                 PaperCandidateInput(
                     candidate=cand,
@@ -389,6 +405,76 @@ def build_active_lake_inputs(
     return out, [sid for _s, sid, _v in active]
 
 
+def build_lake_replay_timeline(
+    data_cfg: DataConfig,
+    *,
+    timeframe: str,
+    symbols: list[str],
+    settings: Settings | None = None,
+    candidate_id: str | None = None,
+    multi_strategy: bool = False,
+    store: SeriesStore | None = None,
+    equity: float = 10_000.0,
+    hold_bars: int = _DEFAULT_HOLD_BARS,
+) -> tuple[dict[int, list[PaperCandidateInput]], dict[str, dict[int, dict]], int, str]:
+    """Build the concurrent-replay timeline (M-G): per-entry-ts HELD candidate GROUPS + per-symbol
+    bars (for price_of/hl_of) + the bar interval + a strategy label. The driver walks the shared bar
+    timeline, closing held positions via ``simulate_paper_exits`` and opening new signals, so open
+    positions accumulate and the risk caps bind — unlike the legacy per-candidate flatten."""
+    from collections import defaultdict
+
+    from src.backtest.config import load_backtest_config
+    from src.data.schema import timeframe_ms
+
+    settings = settings or get_settings()
+    series_store = store if store is not None else SeriesStore(settings.data_lake_path)
+
+    # Resolve the strategy set (single candidate/reference, or the active promoted ensemble) with
+    # the SAME per-row-only filtering the legacy builders use (no cross-asset/basket strategies).
+    specs: list[tuple] = []
+    if multi_strategy:
+        active, _skipped = resolve_active_strategies(settings)
+        specs = [(s, sid, ver) for (s, sid, ver) in active if not hasattr(s, "evaluate_portfolio")]
+        strat_label = "ensemble"
+    else:
+        bt_cfg = load_backtest_config()
+        if candidate_id:
+            strategy, sid, ver = lake_candidate_strategy(candidate_id)
+        else:
+            strategy = make_strategy(bt_cfg)
+            sid = bt_cfg.reference_strategy.name
+            ver = bt_cfg.reference_strategy.strategy_version
+        if hasattr(strategy, "evaluate_portfolio"):
+            raise ValueError(
+                f"candidate {candidate_id!r} is a cross-asset (portfolio) strategy; concurrent "
+                "lake replay supports per-row strategies only"
+            )
+        specs = [(strategy, sid, ver)]
+        strat_label = sid
+
+    lake_inputs = build_lake_inputs(
+        series_store,
+        exchange_id=data_cfg.exchange_id,
+        symbols=symbols,
+        timeframe=timeframe,
+        base_timeframe=data_cfg.base_timeframe,
+        funding_timeframe=data_cfg.funding_timeframe,
+        start_ms=data_cfg.window_start_ms,
+        end_ms=data_cfg.window_end_ms,
+        oi_timeframe=data_cfg.oi_grid,
+    )
+    groups: dict[int, list[PaperCandidateInput]] = defaultdict(list)
+    for strategy, sid, ver in specs:
+        promoted = is_strategy_promoted(sid, ver)
+        for inp in _eval_strategy_over_lake(
+            strategy, sid, ver, lake_inputs,
+            hold_bars=hold_bars, equity=equity, promoted=promoted, concurrent=True,
+        ):
+            groups[int(inp.candidate.decision_ts)].append(inp)
+    bars_by_ts = {si.symbol: {int(b["ts"]): b for b in si.bars} for si in lake_inputs}
+    return dict(groups), bars_by_ts, timeframe_ms(timeframe), strat_label
+
+
 def run_lake_paper_session(
     data_cfg: DataConfig | None = None,
     *,
@@ -399,6 +485,7 @@ def run_lake_paper_session(
     multi_strategy: bool = False,
     dataset_version: str | None = None,
     session_name: str | None = None,
+    concurrent: bool = False,
 ) -> tuple[PaperSession, PaperReport, str]:
     """Run + persist a real-data backtest/replay over a snapshot. Returns (session, report, id).
 
@@ -412,29 +499,79 @@ def run_lake_paper_session(
     tf = timeframe or data_cfg.base_timeframe
     syms = symbols or data_cfg.active_symbols()
     dsv = dataset_version or data_cfg.data_version
-    if multi_strategy:
-        inputs, ids = build_active_lake_inputs(
-            data_cfg, timeframe=tf, symbols=syms, settings=settings
-        )
-        strat_id = "ensemble"
-        name = session_name or f"lakebt:{data_cfg.exchange_id}:{dsv}:{tf}:ensemble"
-    else:
-        inputs, strat_id, _ = build_lake_paper_inputs(
-            data_cfg, timeframe=tf, symbols=syms, candidate_id=candidate_id, settings=settings
-        )
-        name = session_name or f"lake:{data_cfg.exchange_id}:{dsv}:{tf}:{strat_id}"
+    from src.data.schema import timeframe_ms
+
     engine = PaperTradingEngine(
         config_version=settings.config_version,
         universe_version=settings.universe_version,
         settings=settings,
     )
     # L10: hold horizons (exit_ts) are counted in THIS session's decision bars, not 1m bars.
-    from src.data.schema import timeframe_ms
-
     engine.set_bar_interval(timeframe_ms(tf))
-    session = engine.new_session(name)
-    engine.process_candidates(inputs, session)
+
+    if concurrent:
+        # M-G: drive the engine over the shared bar timeline so open positions accumulate and the
+        # concurrency/heat/net-beta risk caps bind (exit-then-enter each bar, intrabar exits).
+        groups, bars_by_ts, iv, strat_id = build_lake_replay_timeline(
+            data_cfg, timeframe=tf, symbols=syms, settings=settings,
+            candidate_id=candidate_id, multi_strategy=multi_strategy,
+        )
+        tag = "lakebt" if multi_strategy else "lake"
+        name = session_name or f"{tag}:{data_cfg.exchange_id}:{dsv}:{tf}:{strat_id}:concurrent"
+        session = engine.new_session(name)
+        _drive_lake_replay(engine, session, groups, bars_by_ts, iv)
+    else:
+        if multi_strategy:
+            inputs, _ids = build_active_lake_inputs(
+                data_cfg, timeframe=tf, symbols=syms, settings=settings
+            )
+            strat_id = "ensemble"
+            name = session_name or f"lakebt:{data_cfg.exchange_id}:{dsv}:{tf}:ensemble"
+        else:
+            inputs, strat_id, _ = build_lake_paper_inputs(
+                data_cfg, timeframe=tf, symbols=syms, candidate_id=candidate_id, settings=settings
+            )
+            name = session_name or f"lake:{data_cfg.exchange_id}:{dsv}:{tf}:{strat_id}"
+        session = engine.new_session(name)
+        engine.process_candidates(inputs, session)
+
     session.ended_at = datetime.now(UTC)
     report = build_paper_report(session)
     persist_paper_session(session, report, settings)
     return session, report, session.session_id
+
+
+def _drive_lake_replay(
+    engine: PaperTradingEngine,
+    session: PaperSession,
+    groups: dict[int, list[PaperCandidateInput]],
+    bars_by_ts: dict[str, dict[int, dict]],
+    iv: int,
+) -> None:
+    """Walk the shared bar timeline (M-G): each ts, close held positions via the intrabar bracket
+    walk, then open the ts's new signals (risk caps bind against the accumulated open book).
+    Remaining opens are force-closed at the last bar."""
+    timeline = sorted({ts for m in bars_by_ts.values() for ts in m})
+    for ts in timeline:
+        def price_of(sym: str, _ts: int = ts) -> float | None:
+            b = bars_by_ts.get(sym, {}).get(_ts)
+            return float(b["close"]) if b is not None else None
+
+        def hl_of(sym: str, _ts: int = ts) -> tuple[float, float] | None:
+            b = bars_by_ts.get(sym, {}).get(_ts)
+            return (float(b["high"]), float(b["low"])) if b is not None else None
+
+        engine.simulate_paper_exits(price_of, ts, session, bar_iv=iv, hl_of=hl_of)
+        group = groups.get(ts)
+        if group:
+            engine.process_candidates(group, session)
+    # Force-close anything still open at end-of-data on its last known close (backtest parity).
+    if timeline:
+        last_ts = timeline[-1]
+        for sym in list(engine._open_positions):
+            last = bars_by_ts.get(sym, {}).get(last_ts)
+            if last is None:  # symbol ended early — use its own final bar
+                sym_bars = bars_by_ts.get(sym, {})
+                last = sym_bars[max(sym_bars)] if sym_bars else None
+            if last is not None:
+                engine._book_paper_exit(sym, float(last["close"]), "end_of_data", last_ts, session)

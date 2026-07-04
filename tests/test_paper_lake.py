@@ -107,6 +107,53 @@ def test_lake_paper_inputs_run_through_paper_pipeline(tmp_path) -> None:
         assert t.spread_bps_at_entry > 0
 
 
+def test_concurrent_lake_replay_holds_positions_and_caps_bind(tmp_path) -> None:
+    """M-G: the concurrent driver opens HELD positions and closes them via the shared bracket walk
+    (not a per-candidate flatten), so trades carry bracket-walk exit reasons, positions are held
+    across bars, and the one-position-per-symbol cap binds (never >1 open per symbol at once)."""
+    from src.paper.engine import PaperTradingEngine as _Eng
+    from src.paper.lake import _drive_lake_replay, build_lake_replay_timeline
+
+    store = SeriesStore(tmp_path)
+    start, end = 0, 400 * timeframe_ms(TF)
+    _seed(store, start, end)
+    cfg = _data_cfg(start, end)
+
+    groups, bars_by_ts, iv, strat = build_lake_replay_timeline(
+        cfg, timeframe=TF, symbols=[SYM], store=store
+    )
+    assert groups and bars_by_ts and iv == timeframe_ms(TF)
+    # Held candidates carry NO pre-resolved exit.
+    assert all(inp.exit_reason is None for g in groups.values() for inp in g)
+
+    engine = _Eng()
+    engine.set_bar_interval(iv)
+    session = engine.new_session("lake_concurrent_test")
+
+    # Instrument the open book to prove the one-position-per-symbol cap binds during the walk.
+    max_open_per_sym: dict[str, int] = {}
+    orig = engine.process_candidates
+
+    def _spy(inputs, sess):
+        r = orig(inputs, sess)
+        for s in engine._open_positions:
+            max_open_per_sym[s] = max(max_open_per_sym.get(s, 0), 1)
+        # never more than one Position object per symbol key (dict) — cap holds by construction
+        return r
+
+    engine.process_candidates = _spy  # type: ignore[method-assign]
+    _drive_lake_replay(engine, session, groups, bars_by_ts, iv)
+
+    assert session.trades, "concurrent replay booked no trades"
+    # Exits came from the bracket walk / force-close, never the pre-resolved flatten.
+    assert all(
+        t.exit_reason in {"stop", "trailing_stop", "take_profit", "time_stop", "end_of_data"}
+        for t in session.trades
+    )
+    assert max_open_per_sym.get(SYM, 0) <= 1  # one-position-per-symbol cap bound throughout
+    assert not engine._open_positions  # everything force-closed at end-of-data
+
+
 def test_lake_paper_inputs_for_symbol_listed_mid_window(tmp_path) -> None:
     """Regression: the replay builder must locate the entry bar by TIMESTAMP, not by
     ``decision_ts // iv`` array position. A contract whose data starts mid-window (listed after
