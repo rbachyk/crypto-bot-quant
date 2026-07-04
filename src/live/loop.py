@@ -700,6 +700,9 @@ def run_replay_session(
             poll_sec=poll_sec,  # >0 → continuous session (waits for new bars)
             should_stop=_stop_or_killed,  # responsive Stop AND kill switch during the wait (H6)
             on_cycle=on_heartbeat,  # per-cycle liveness (even when no signal fires)
+            # A websocket primary can silently drift from the exchange-of-record — cross-check it
+            # against REST (M13). A pure-REST transport is already the source-of-record, so skip it.
+            ws_rest_check=(transport == "ws"),
         )
         # The real-time feed owns the data-manager halt; don't double-poll at the loop level.
         loop = LiveLoop(mode=mode, settings=settings, guard=guard, kill_switch=kill_switch)

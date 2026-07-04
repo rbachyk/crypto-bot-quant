@@ -151,10 +151,14 @@ class MLFilter:
             else:
                 blocked.append(cand)
 
-        # Safety invariant 1: filter cannot create new candidates.
-        assert len(passed) <= len(candidates), "BUG: filter produced more candidates than input"
-        # Safety invariant 2: all passed candidates are from the original list.
-        assert all(c in candidates for c in passed), "BUG: filter introduced a foreign candidate"
+        # Safety invariants — raise (not assert) so they survive `python -O`, which strips asserts.
+        # These guard a venue-facing filter, so they must never be optimized away (L23).
+        # Invariant 1: the filter can only ever REMOVE candidates, never create them.
+        if len(passed) > len(candidates):
+            raise RuntimeError("BUG: filter produced more candidates than input")
+        # Invariant 2: every passed candidate is one of the originals (no foreign candidate).
+        if not all(c in candidates for c in passed):
+            raise RuntimeError("BUG: filter introduced a foreign candidate")
 
         result = FilterResult(
             passed=passed,

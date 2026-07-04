@@ -91,12 +91,23 @@ class LiveCandidateFeed:
         equity: float = 10_000.0,
         should_stop=None,
         on_cycle=None,
+        ws_rest_check: bool = False,
     ) -> None:
         self.settings = settings or get_settings()
         self.data_cfg = data_cfg
         self.feed_source = feed_source
         self.rest_source = rest_source
         self.data_manager = data_manager
+        # Opt-in ws-vs-REST integrity cross-check (M13). Off by default so a pure-REST feed adds no
+        # extra REST load; the ws transport enables it (a ws stream can silently drift from the
+        # exchange-of-record). Throttled to one symbol's check per this many advances.
+        self.ws_rest_check = bool(ws_rest_check)
+        self._ws_rest_every = 20
+        self._ws_rest_counter = 0
+        # Per-symbol measured feed round-trip latency (ms), refreshed each advance and threaded into
+        # the candidate so the execution revalidator's abnormal-latency blocker sees a REAL number
+        # instead of a 5.0 constant that could never trip (M12).
+        self._last_latency_ms: dict[str, float] = {}
         self.timeframe = timeframe or data_cfg.base_timeframe
         self.symbols = symbols or data_cfg.active_symbols()
         self.window_bars = window_bars
@@ -292,6 +303,8 @@ class LiveCandidateFeed:
                 spread_bps=float(row.get("spread_bps", self._toxic_spread / 5.0)),
                 promoted=promoted, data_ok=True, risk_scale=risk_scale,
                 regime=row.get("regime_tracked"),
+                # Real per-symbol feed latency (M12); slippage_est defaults to spread-derived.
+                latency_ms=self._last_latency_ms.get(sym, 5.0),
             )
             # Real exits are exchange-side (bracket SL/TP/trailing) → no forward move in live mode.
             out.append(PaperCandidateInput(candidate=cand, equity=self.equity, exit_move_frac=0.0))
@@ -315,12 +328,48 @@ class LiveCandidateFeed:
         a one-off feature error) is caught by the caller and never kills the whole stream."""
         if self.data_manager is not None and not self.data_manager.is_fresh(sym):
             return None
+        t0 = time.perf_counter()
         got = self.feed_source.latest_bar(sym)
+        # Measure the feed round-trip (REST call, or a ws cache read ≈ 0) as the symbol's latency.
+        self._last_latency_ms[sym] = (time.perf_counter() - t0) * 1000.0
         if got is None:
             return None
         ts, bar = got
         if ts <= last_ts[sym]:
             return None
+        # Deliver bars missed since the last append (a reconnect/outage gap) to the rolling reader
+        # BEFORE this bar, so feature lookback isn't silently holed (M13). Only fires on a genuine
+        # multi-bar gap; the data manager REST-fetches the interior bars and returns them in order.
+        iv = timeframe_ms(self.timeframe)
+        if self.data_manager is not None and 0 <= last_ts[sym] < ts - iv:
+            try:
+                recovered = self.data_manager.backfill_after_reconnect(
+                    sym, ts, since_ms=last_ts[sym] + iv
+                )
+            except Exception:  # noqa: BLE001 - a backfill blip must not kill the stream
+                recovered = []
+                _log.warning("live_feed_backfill_error", symbol=sym, exc_info=True)
+            appended = 0
+            for r in recovered:
+                if last_ts[sym] < int(r["ts"]) < ts:
+                    self._reader.append_bar(sym, r)
+                    appended += 1
+            if appended:
+                _log.info(
+                    "live_feed_backfilled_gap",
+                    symbol=sym, bars=appended, from_ts=last_ts[sym], to_ts=ts,
+                )
+        # ws-vs-REST integrity cross-check (M13, opt-in + throttled): compare this bar's close
+        # against the REST source-of-record. A divergence beyond tolerance sets the symbol's
+        # integrity fault, which the data-manager poll turns into an exchange-wide halt.
+        if (
+            self.ws_rest_check
+            and self.data_manager is not None
+            and self.rest_source is not None
+        ):
+            self._ws_rest_counter += 1
+            if self._ws_rest_counter % self._ws_rest_every == 0:
+                self._cross_check_ws_rest(sym, ts, float(bar["close"]))
         last_ts[sym] = ts
         self._reader.append_bar(sym, bar)
         frame = compute_features(sym, self._reader, self.feat_cfg)
@@ -329,6 +378,22 @@ class LiveCandidateFeed:
         row = self._augment_and_track(sym, frame.rows[-1])
         self._latest_rows[sym] = row
         return (sym, bar, row)
+
+    def _cross_check_ws_rest(self, sym: str, ts: int, ws_close: float) -> None:
+        """Fetch the REST bar at ``ts`` and record any ws-vs-REST divergence on the data manager
+        (M13). Best-effort: a REST blip must never kill the stream."""
+        try:
+            from src.data.schema import OHLCV, SeriesKey, timeframe_ms
+
+            iv = timeframe_ms(self.timeframe)
+            rows = self.rest_source.fetch(
+                SeriesKey(self.data_cfg.exchange_id, OHLCV, sym, self.timeframe), ts, ts + iv
+            )
+            match = next((r for r in rows if int(r["ts"]) == ts), None)
+            if match is not None:
+                self.data_manager.compare_ws_rest(sym, ws_close, float(match["close"]))
+        except Exception:  # noqa: BLE001 - integrity probe is best-effort
+            _log.debug("live_feed_ws_rest_check_error", symbol=sym, exc_info=True)
 
     def groups(self) -> Iterator[tuple[int, list[PaperCandidateInput]]]:
         # Seed if ANY symbol is unseeded — not just symbols[0]. A prior partial seed (a per-symbol

@@ -119,22 +119,32 @@ class LiveDataManager:
         return {s for s, st in self._state.items() if st.stale}
 
     # -- reconnect backfill --------------------------------------------- #
-    def backfill_after_reconnect(self, symbol: str, now_ms: int) -> int:
-        """REST-backfill the gap since the last seen bar; returns bars recovered."""
+    def backfill_after_reconnect(
+        self, symbol: str, now_ms: int, *, since_ms: int | None = None
+    ) -> list[dict]:
+        """REST-backfill the closed bars missed since the last seen bar and return them (sorted by
+        ts), advancing this symbol's freshness watermark. The live feed appends the returned rows to
+        its rolling reader so a reconnect gap doesn't leave feature lookback silently holed (M13).
+
+        ``since_ms`` overrides the start anchor — the feed passes its ROLLING READER's watermark,
+        which is the true source of the gap (the manager's own freshness watermark may already have
+        advanced past it via ``poll``)."""
         st = self._state.get(symbol)
         if st is None:
-            return 0
+            return []
         since = (
-            (st.last_bar_ts + self.interval_ms)
+            since_ms
+            if since_ms is not None
+            else (st.last_bar_ts + self.interval_ms)
             if st.last_bar_ts >= 0
             else now_ms - self.stale_after_ms
         )
-        rows = self.source.backfill(symbol, since, now_ms) or []
+        rows = sorted(self.source.backfill(symbol, since, now_ms) or [], key=lambda r: int(r["ts"]))
         if rows:
             st.last_bar_ts = max(st.last_bar_ts, max(int(r["ts"]) for r in rows))
             st.last_update_ms = now_ms
             st.stale = False
-        return len(rows)
+        return rows
 
     # -- ws vs REST cross-check ----------------------------------------- #
     def compare_ws_rest(self, symbol: str, ws_close: float, rest_close: float) -> bool:

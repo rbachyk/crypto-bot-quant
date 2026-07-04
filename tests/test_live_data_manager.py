@@ -121,7 +121,7 @@ def test_reconnect_backfill_recovers_freshness() -> None:
     # Gap, then reconnect with REST backfill of the missed bars.
     src.backfill_rows = [{"ts": 1_000_000 + IV}, {"ts": 1_000_000 + 2 * IV}]
     recovered = mgr.backfill_after_reconnect("BTC/USDT:USDT", 1_000_000 + 3 * IV)
-    assert recovered == 2
+    assert [int(r["ts"]) for r in recovered] == [1_000_000 + IV, 1_000_000 + 2 * IV]
     assert mgr.is_fresh("BTC/USDT:USDT")
 
 
