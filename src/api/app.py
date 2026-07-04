@@ -3903,13 +3903,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/dashboard/shadow", response_class=HTMLResponse)
     def dashboard_shadow(user: str = Depends(require_dashboard_auth)) -> str:
         from src.db.models import ShadowLog
+        from src.ml.shadow import SYNTHETIC_CONTEXT_KEY
 
         with session_scope() as session:
-            logs = (
-                session.execute(select(ShadowLog).order_by(desc(ShadowLog.ts)).limit(200))
+            # Exclude SYNTHETIC (plumbing / reference-dataset) rows so the dashboard shows REAL
+            # shadow activity, not gate self-checks counted as genuine predictions (audit M-K).
+            # Over-fetch then filter in Python (JSON-key filtering is DB-specific); display-only.
+            fetched = (
+                session.execute(select(ShadowLog).order_by(desc(ShadowLog.ts)).limit(400))
                 .scalars()
                 .all()
             )
+            logs = [
+                lg for lg in fetched if not (lg.context_features or {}).get(SYNTHETIC_CONTEXT_KEY)
+            ][:200]
             total = len(logs)
             applied = sum(1 for lg in logs if lg.applied)
             by_type: dict[str, int] = {}
