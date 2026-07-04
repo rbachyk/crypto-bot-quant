@@ -154,6 +154,63 @@ def test_concurrent_lake_replay_holds_positions_and_caps_bind(tmp_path) -> None:
     assert not engine._open_positions  # everything force-closed at end-of-data
 
 
+def test_concurrent_replay_is_a_subset_of_legacy_and_tracks_backtest(tmp_path) -> None:
+    """M-G parity oracle. (1) The concurrent driver can only REMOVE entries vs the legacy flatten
+    (an overlapping same-symbol signal is rejected while a position is held), never add — so
+    0 < concurrent_trades <= legacy_trades. (2) It stays in the same order of magnitude as a
+    BacktestEngine run of the same strategy/window (a gross divergence — caps not binding, exits
+    wrong — would break this)."""
+    from src.backtest.config import load_backtest_config
+    from src.backtest.engine import BacktestEngine
+    from src.backtest.metrics import build_report
+    from src.backtest.service import build_lake_inputs
+    from src.exchange.metadata import load_metadata_config
+    from src.paper.engine import PaperTradingEngine as _Eng
+    from src.paper.lake import (
+        _drive_lake_replay,
+        build_lake_paper_inputs,
+        build_lake_replay_timeline,
+        make_strategy,
+    )
+
+    store = SeriesStore(tmp_path)
+    start, end = 0, 400 * timeframe_ms(TF)
+    _seed(store, start, end)
+    cfg = _data_cfg(start, end)
+
+    # Legacy replay (per-candidate flatten) — takes every risk-approved signal.
+    legacy_inputs, _, _ = build_lake_paper_inputs(cfg, timeframe=TF, symbols=[SYM], store=store)
+    leg = _Eng()
+    leg.set_bar_interval(timeframe_ms(TF))
+    leg_sess = leg.new_session("legacy")
+    leg.process_candidates(legacy_inputs, leg_sess)
+    legacy_trades = len(leg_sess.trades)
+
+    # Concurrent replay — holds positions, so overlapping same-symbol signals are capped out.
+    groups, bars_by_ts, iv, _ = build_lake_replay_timeline(
+        cfg, timeframe=TF, symbols=[SYM], store=store
+    )
+    con = _Eng()
+    con.set_bar_interval(iv)
+    con_sess = con.new_session("concurrent")
+    _drive_lake_replay(con, con_sess, groups, bars_by_ts, iv)
+    concurrent_trades = len(con_sess.trades)
+
+    assert 0 < concurrent_trades <= legacy_trades  # caps can only remove entries, never add
+
+    # Backtest of the SAME strategy/window as an independent oracle (order-of-magnitude band; cost
+    # models differ so exact parity isn't expected).
+    bt_cfg = load_backtest_config()
+    lake_inputs = build_lake_inputs(
+        store, exchange_id=EX, symbols=[SYM], timeframe=TF, base_timeframe=BASE,
+        funding_timeframe=FUND, start_ms=start, end_ms=end, oi_timeframe=OI_TF,
+    )
+    bt = BacktestEngine(bt_cfg, load_metadata_config(), make_strategy(bt_cfg))
+    bt_trades = build_report(bt.run(lake_inputs)).trade_count
+    if bt_trades > 0:
+        assert 0.2 * bt_trades <= concurrent_trades <= 5 * bt_trades
+
+
 def test_lake_paper_inputs_for_symbol_listed_mid_window(tmp_path) -> None:
     """Regression: the replay builder must locate the entry bar by TIMESTAMP, not by
     ``decision_ts // iv`` array position. A contract whose data starts mid-window (listed after
