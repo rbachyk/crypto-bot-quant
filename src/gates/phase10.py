@@ -137,17 +137,26 @@ def check_ml_phase10(settings: Settings) -> list[Criterion]:
             )
         )
 
-        # Check DB writes with applied=False for Stage 3.
-        engine.run(shadow_result.bundles, write_to_db=True)
+        # Check DB writes with applied=False for Stage 3, scoped to THIS run's rows, then DELETE
+        # them: these RECOMMEND rows are built from the SYNTHETIC reference dataset, so leaving them
+        # in production shadow_logs makes reports/dashboards count fabricated recommendations as
+        # real (audit M-J). Mirrors the phase9 plumbing cleanup.
+        rec_db_result = engine.run(shadow_result.bundles, write_to_db=True)
         from src.db.base import session_scope
         from src.db.models import ShadowLog
 
         with session_scope() as session:
             applied_db = (
                 session.query(ShadowLog)
-                .filter(ShadowLog.mode == "RECOMMEND", ShadowLog.applied.is_(True))
+                .filter(ShadowLog.id.in_(rec_db_result.log_ids), ShadowLog.applied.is_(True))
                 .count()
+                if rec_db_result.log_ids
+                else 0
             )
+            if rec_db_result.log_ids:
+                session.query(ShadowLog).filter(
+                    ShadowLog.id.in_(rec_db_result.log_ids)
+                ).delete(synchronize_session=False)
         out.append(
             Criterion.ok(
                 "recommendation_db_applied_false",
