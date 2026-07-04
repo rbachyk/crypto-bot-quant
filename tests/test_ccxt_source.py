@@ -390,6 +390,18 @@ def test_fetch_metadata_unknown_symbol(adapter: CcxtExchangeAdapter) -> None:
         adapter.fetch_metadata("NOPE/USDT:USDT")
 
 
+def test_decimal_places_precision_handles_negative_digit_count() -> None:
+    """DECIMAL_PLACES mode: a NEGATIVE precision (ccxt's tens/hundreds rounding, e.g. -1 -> tick 10)
+    must yield a valid increment, not a dropped tick. Positive and zero cases still map cleanly."""
+    import ccxt
+
+    adapter = CcxtExchangeAdapter("bybit", client=FakeBybit())
+    adapter._ex.precisionMode = int(ccxt.DECIMAL_PLACES)
+    assert adapter._increment_and_decimals(2) == (pytest.approx(0.01), 2)
+    assert adapter._increment_and_decimals(0) == (pytest.approx(1.0), 0)
+    assert adapter._increment_and_decimals(-1) == (pytest.approx(10.0), 0)
+
+
 def test_adapter_ping(adapter: CcxtExchangeAdapter) -> None:
     assert adapter.ping() is True
 

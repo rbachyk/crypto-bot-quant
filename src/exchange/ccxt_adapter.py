@@ -65,8 +65,11 @@ class CcxtExchangeAdapter(ExchangeAdapter):
             decimal_places = 2
         mode = getattr(self._ex, "precisionMode", None)
         if mode == decimal_places:
+            # DECIMAL_PLACES is a DIGIT COUNT; increment = 10**-d for ALL d. ccxt allows NEGATIVE
+            # d (round to tens/hundreds: d=-1 → increment 10), so don't null it — 10**-(-1)=10 is a
+            # valid tick, and decimals clamp to 0 (no fractional digits).
             d = int(prec_val)
-            return (10.0 ** (-d) if d >= 0 else None), max(0, d)
+            return 10.0 ** (-d), max(0, d)
         # TICK_SIZE (default / Bybit) — and SIGNIFICANT_DIGITS, which has no fixed tick: treat the
         # value as the increment and derive decimals from it (operator review is the backstop).
         tick = float(prec_val)
