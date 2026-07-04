@@ -227,16 +227,26 @@ class CrossSectionalEngine:
         # a residual directional tilt that is TRACKED below (full compensation needs resizing kept
         # legs, i.e. churn, which the design avoids) — L7.
         gross = equity * self.portfolio_gross * self.risk_scale
-        # Book-level leverage cap: bound the sizing budget so a full basket's exposure / equity
-        # stays within the account leverage ceiling — the basket had none (M5). Kept legs from a
-        # prior, higher-equity rebalance can still sit above; that residual is surfaced by the log.
         gross = min(gross, equity * float(self.cfg.account.max_leverage))
         notionals = self._target_notionals(longs, shorts, ts, gross)
-        for sym in (*longs, *shorts):
-            if sym in holdings or not self._openable(sym, bars_by_ts, rows_by_ts, by_symbol, ts):
-                continue
+        new_syms = [
+            sym
+            for sym in (*longs, *shorts)
+            if sym not in holdings and self._openable(sym, bars_by_ts, rows_by_ts, by_symbol, ts)
+        ]
+        # Book-level leverage cap that bounds the ACTUAL book, not just the new-leg budget (M-I):
+        # cap total exposure (kept legs + new legs) at equity·max_leverage. Kept legs from a prior,
+        # higher-equity rebalance already consume budget, so the new legs get only what remains —
+        # scaled DOWN uniformly (which preserves the new legs' long/short balance) when the target
+        # sizing would breach the ceiling. If the kept book already fills the cap, no new legs open.
+        cap = equity * float(self.cfg.account.max_leverage)
+        existing_gross = sum(leg.notional for leg in holdings.values())
+        new_target_total = sum(notionals.get(sym, 0.0) for sym in new_syms)
+        new_budget = max(0.0, cap - existing_gross)
+        lev_scale = min(1.0, new_budget / new_target_total) if new_target_total > 0 else 1.0
+        for sym in new_syms:
             leg = self._open_leg(
-                sym, target[sym], notionals.get(sym, 0.0),
+                sym, target[sym], notionals.get(sym, 0.0) * lev_scale,
                 bars_by_ts[sym][ts], rows_by_ts[sym][ts], ts, by_symbol[sym],
             )
             if leg is not None:
