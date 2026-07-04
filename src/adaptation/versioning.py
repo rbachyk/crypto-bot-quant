@@ -8,8 +8,11 @@ round-trip.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import os
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,12 +43,23 @@ def _index_path(snapshot_dir: Path) -> Path:
 
 def _append_index(snapshot_dir: Path, meta: SnapshotMeta) -> None:
     """Record ``meta`` in the snapshot directory's index (idempotent by snapshot_id), so saved
-    versions are DISCOVERABLE without externally remembering the exact pickle filename (L34)."""
-    entries = [e for e in list_snapshots(snapshot_dir) if e.snapshot_id != meta.snapshot_id]
-    entries.append(meta)
-    _index_path(snapshot_dir).write_text(
-        json.dumps([asdict(e) for e in entries], indent=2), encoding="utf-8"
-    )
+    versions are DISCOVERABLE without externally remembering the exact pickle filename (L34).
+
+    The whole read-modify-write runs under an ``flock`` on a sidecar lock file and the index is
+    replaced ATOMICALLY (temp + rename), so concurrent ``save_snapshot`` calls serialize instead of
+    racing and dropping entries (L-I)."""
+    path = _index_path(snapshot_dir)
+    lock = path.with_suffix(".json.lock")
+    with lock.open("w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            entries = [e for e in list_snapshots(snapshot_dir) if e.snapshot_id != meta.snapshot_id]
+            entries.append(meta)
+            tmp = path.parent / f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+            tmp.write_text(json.dumps([asdict(e) for e in entries], indent=2), encoding="utf-8")
+            tmp.replace(path)
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def list_snapshots(snapshot_dir: Path) -> list[SnapshotMeta]:
