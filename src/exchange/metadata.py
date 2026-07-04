@@ -177,12 +177,23 @@ def load_metadata_for(exchange_id: str, *, settings: object | None = None) -> Me
 
 
 def sync_verified_metadata(session: Session, cfg: MetadataConfig | None = None) -> int:
-    """Upsert ``[VERIFIED]`` metadata rows from config (the operator-review step).
+    """Upsert metadata rows from config (the operator-review step).
 
-    Idempotent: re-running with the same ``metadata_version`` updates the
-    existing rows in place. Returns the number of symbols written.
+    The DB ``verification_status`` MIRRORS the config's ``verified`` flag: a config that has NOT
+    been operator-reviewed against the venue reference (``verified: false`` — a fetched/template
+    spec) is written ``UNVERIFIED``, never ``VERIFIED``. Otherwise the META gate — which calls THIS
+    function itself and then reads the rows back — would stamp an un-reviewed spec VERIFIED
+    milliseconds before checking it, laundering [UNVERIFIED] metadata into an ``active`` symbol and
+    defeating the Section-6 / Section-2.1 "no [UNVERIFIED] active symbols" guarantee (audit H-F).
+
+    Idempotent: re-running with the same ``metadata_version`` updates the existing rows in place.
+    Returns the number of symbols written.
     """
     cfg = cfg or load_metadata_config()
+    status = (
+        VerificationStatus.VERIFIED if cfg.verified else VerificationStatus.UNVERIFIED
+    )
+    source = "operator_verified" if cfg.verified else "fetched_unverified"
     written = 0
     for symbol, spec in cfg.specs.items():
         row = (
@@ -205,14 +216,14 @@ def sync_verified_metadata(session: Session, cfg: MetadataConfig | None = None) 
                     exchange_id=cfg.exchange_id,
                     symbol=symbol,
                     metadata_version=cfg.metadata_version,
-                    verification_status=VerificationStatus.VERIFIED,
-                    source="operator_verified",
+                    verification_status=status,
+                    source=source,
                     raw=raw,
                 )
             )
         else:
-            row.verification_status = VerificationStatus.VERIFIED
-            row.source = "operator_verified"
+            row.verification_status = status
+            row.source = source
             row.raw = raw
         written += 1
     return written

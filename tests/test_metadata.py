@@ -65,6 +65,48 @@ def test_contradictions_are_detected() -> None:
     assert any("funding_interval_hours" in c for c in VerifiedSpec("Z", bad_fund).contradictions())
 
 
+class _FakeQuery:
+    def filter_by(self, **_kw):
+        return self
+
+    def one_or_none(self):
+        return None  # force the new-row (session.add) path
+
+
+class _FakeSession:
+    def __init__(self) -> None:
+        self.added: list = []
+
+    def query(self, *_a):
+        return _FakeQuery()
+
+    def add(self, obj) -> None:
+        self.added.append(obj)
+
+
+def test_unverified_config_is_written_unverified() -> None:
+    """A config not operator-reviewed (verified=False) must NOT be laundered into VERIFIED rows
+    (audit H-F) — the META gate reads these rows back and would else pass on un-reviewed data."""
+    from dataclasses import replace
+
+    cfg = load_metadata_config()
+    sess = _FakeSession()
+    n = sync_verified_metadata(sess, replace(cfg, verified=False))
+    assert n == len(cfg.symbols())
+    assert sess.added
+    assert all(r.verification_status is VerificationStatus.UNVERIFIED for r in sess.added)
+    assert all(r.source == "fetched_unverified" for r in sess.added)
+
+
+def test_verified_config_is_written_verified() -> None:
+    cfg = load_metadata_config()  # ships verified=True
+    sess = _FakeSession()
+    sync_verified_metadata(sess, cfg)
+    assert sess.added
+    assert all(r.verification_status is VerificationStatus.VERIFIED for r in sess.added)
+    assert all(r.source == "operator_verified" for r in sess.added)
+
+
 @requires_db
 def test_sync_writes_verified_rows_idempotently() -> None:
     cfg = load_metadata_config()
