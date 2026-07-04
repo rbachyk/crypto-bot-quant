@@ -17,7 +17,7 @@ Capital-agnostic: no absolute-currency assumptions. Live trading must be impossi
 Implement **Phase 1 — Infrastructure Foundation**.
 
 ## DELIVERABLES (Roadmap §32, Appendix B)
-- `docker-compose.yml` with: postgres+timescale, redis, backend, dashboard-shell, worker, caddy. Internal network; only 443 exposed.
+- `docker-compose.yml` with: postgres+timescale, redis, backend, dashboard-shell, worker, caddy. Internal network; only 443 exposed. **Use `docker compose` v2** (not legacy `docker-compose`). Every env var goes under each service's `environment:` block — never at the service root (invalid schema). The file must pass `docker compose config -q`.
 - `.env.example` with safe placeholders (no real keys); config system with pydantic-settings env validation.
 - PostgreSQL schema + Alembic migrations for: `jobs`, `job_logs`, `gates`, `gate_results`, `remediation_actions`, `approvals`, `audit_log`.
 - Job orchestration skeleton (enqueue, progress, retry, cancel) with persisted job records + logs.
@@ -45,6 +45,7 @@ Implement **Phase 1 — Infrastructure Foundation**.
 
 ## OUTPUT
 - Complete files at correct paths + the git commands for the commit.
+- **Before writing the report, run `make compose-validate && make docker-up && make health` and confirm all green.** Do not report done on an unstarted or invalid stack.
 - Then a **Completion Report** (Appendix E.2).
 - End with: **Status** (phase/module) · **Tested?** · **Next step** (one line).
 
