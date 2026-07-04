@@ -191,6 +191,8 @@ class LiveLoop:
         # ``None`` until first use / disabled (ml_stage < 2 or non-paper mode).
         self._shadow_predictor: Any | None = None
         self._shadow_disabled = False
+        self._ml_cfg: Any | None = None
+        self._rec_engine: Any | None = None  # H-C Stage 3 recommendation surface (lazy)
         # Consecutive-absence counter for debounced retirement of exchange-side-closed positions.
         self._absent_ticks: dict[str, int] = {}
         # Active time-stop (hold_bars) bookkeeping: the exchange holds SL/TP/trailing natively but
@@ -415,13 +417,30 @@ class LiveLoop:
                 predictor = ShadowPredictor.from_config(ml_cfg)
                 predictor.train(samples)
                 self._shadow_predictor = predictor
+                self._ml_cfg = ml_cfg
                 _log.info("shadow_producer_ready", data_source=source, n_train=len(samples))
-            self._shadow_predictor.run(
+            result = self._shadow_predictor.run(
                 [pin.candidate for pin in group],
                 settings=self.settings,
                 write_to_db=True,
                 synthetic_source=False,  # REAL live candidates → count toward ML-PROMO evidence
             )
+            # H-C Stage 3: surface recommendations (Section 20) on the SAME real bundles — log-only,
+            # applied=False, for the dashboard/reports. Never influences the decision.
+            cfg = self._ml_cfg
+            if (
+                int(getattr(cfg, "ml_stage", 0)) >= 3
+                and getattr(getattr(cfg, "recommendation", None), "enabled", False)
+                and result.bundles
+            ):
+                if self._rec_engine is None:
+                    from src.ml.recommendation import RecommendationEngine
+
+                    self._rec_engine = RecommendationEngine(
+                        model_version=cfg.model_version,
+                        config_version=self.settings.config_version,
+                    )
+                self._rec_engine.run(result.bundles, write_to_db=True)
         except Exception:  # noqa: BLE001 - shadow logging must never disturb the trading loop
             _log.warning("shadow_producer_error", exc_info=True)
             self._shadow_disabled = True  # stop retrying this session after a failure

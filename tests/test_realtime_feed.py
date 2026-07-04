@@ -355,6 +355,7 @@ def test_shadow_producer_logs_fresh_paper_candidates_only() -> None:
     FRESH real candidates (applied=False, untagged real evidence), but NEVER for stale/replay
     candidates (a now-stamped write would mis-join in ML-PROMO) or in a real-venue mode."""
     import time
+    from types import SimpleNamespace
 
     from src.paper.engine import PaperCandidateInput
     from src.ranking.candidate import Candidate
@@ -375,6 +376,7 @@ def test_shadow_producer_logs_fresh_paper_candidates_only() -> None:
             self.calls.append(
                 {"n": len(candidates), "write": write_to_db, "synthetic": synthetic_source}
             )
+            return SimpleNamespace(bundles=[])  # no bundles → Stage-3 rec branch is a clean no-op
 
     now = int(time.time() * 1000)
 
