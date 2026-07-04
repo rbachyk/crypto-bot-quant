@@ -1198,8 +1198,12 @@ def _run_lake_paper_session(ctx: JobContext, params: dict) -> dict:
         candidate_id is None and bool(params.get("ensemble"))
     )
     dataset_version = params.get("dataset_version") or None
+    # Opt-in concurrent replay (M-G): hold positions across bars so the risk caps bind. Off by
+    # default until validated against real snapshots (it moves replay P&L — re-validate).
+    concurrent = bool(params.get("concurrent"))
     ctx.log(
-        f"real-data {'ensemble ' if multi_strategy else ''}session over "
+        f"real-data {'ensemble ' if multi_strategy else ''}"
+        f"{'concurrent ' if concurrent else ''}session over "
         f"{data_cfg.exchange_id}/{data_cfg.data_version}"
     )
     ctx.progress(0, 1, "running lake paper session")
@@ -1210,6 +1214,7 @@ def _run_lake_paper_session(ctx: JobContext, params: dict) -> dict:
         candidate_id=candidate_id,
         multi_strategy=multi_strategy,
         dataset_version=dataset_version,
+        concurrent=concurrent,
     )
     net = sum(t.pnl for t in session.trades)
     if session.executed_count + session.rejected_count == 0:

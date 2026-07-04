@@ -272,6 +272,10 @@ def paper_lake(
         "", "--strategy", help="research candidate id (per-row family B); '' = reference"
     ),
     dataset_version: str = typer.Option("", "--dataset-version", help="snapshot id tag"),
+    concurrent: bool = typer.Option(
+        False, "--concurrent",
+        help="M-G: hold positions across bars so risk caps bind (opt-in; moves replay P&L)",
+    ),
 ) -> None:
     """Run + persist a REAL-DATA (replay) paper session over a snapshot (shadow-only).
 
@@ -289,6 +293,7 @@ def paper_lake(
         symbols=syms,
         candidate_id=strategy or None,
         dataset_version=dataset_version or None,
+        concurrent=concurrent,
     )
     net = sum(t.pnl for t in session.trades)
     typer.echo(
