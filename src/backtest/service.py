@@ -27,7 +27,7 @@ from pathlib import Path
 import structlog
 
 from src.backtest.config import BacktestConfig, load_backtest_config
-from src.backtest.engine import BacktestEngine, BacktestResult, SymbolInput
+from src.backtest.engine import ENGINE_VERSION, BacktestEngine, BacktestResult, SymbolInput
 from src.backtest.metrics import BacktestReport, build_report
 from src.backtest.reference import ReferenceReader
 from src.backtest.strategy import PortfolioStrategy, ReferenceMomentumStrategy, Strategy
@@ -641,10 +641,22 @@ def run_reference_backtest(
 # --------------------------------------------------------------------------- #
 # Persistence (Section 24 reports; Appendix B.4 relational index)              #
 # --------------------------------------------------------------------------- #
+def effective_backtest_version(cfg: BacktestConfig) -> str:
+    """The config ``backtest_version`` combined with the code-level ``ENGINE_VERSION`` (audit H-D).
+    Persisted on every run and used to segregate results computed under different engine cost/
+    geometry models, so a stale-engine run never silently ranks/promotes against a fresh one."""
+    return f"{cfg.backtest_version}:{ENGINE_VERSION}"
+
+
 def run_id(cfg: BacktestConfig, kind: str, payload: dict) -> str:
-    """Content-addressed run id: identical inputs ⇒ identical id (idempotent)."""
+    """Content-addressed run id: identical inputs ⇒ identical id (idempotent). ``ENGINE_VERSION`` is
+    folded into the digest so a re-run under a changed engine mints a DISTINCT id (audit H-D)."""
     digest = hashlib.sha256(
-        json.dumps({"kind": kind, "report": payload}, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(
+            {"kind": kind, "engine": ENGINE_VERSION, "report": payload},
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
     ).hexdigest()[:16]
     return f"{cfg.backtest_version}_{kind}_{digest}"
 
@@ -733,7 +745,9 @@ def persist_backtest_run(
             row = BacktestRun(run_id=rid)
             session.add(row)
         row.kind = kind
-        row.backtest_version = cfg.backtest_version
+        # Stamp the EFFECTIVE version (config + engine cost/geometry model) so the leaderboard can
+        # exclude stale-engine runs (H-D); a bare cfg.backtest_version couldn't tell them apart.
+        row.backtest_version = effective_backtest_version(cfg)
         row.strategy_id = strategy_id or cfg.reference_strategy.name
         row.strategy_version = strategy_version or cfg.reference_strategy.strategy_version
         row.dataset_version = dataset_version
@@ -747,5 +761,5 @@ def persist_backtest_run(
         row.max_drawdown = report.max_drawdown
         row.summary = summary
         row.report_path = report_path
-        row.related_versions = settings.versions()
+        row.related_versions = {**settings.versions(), "engine_version": ENGINE_VERSION}
     return rid

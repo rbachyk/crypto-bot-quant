@@ -143,6 +143,7 @@ def build_leaderboard(
     strategy_id: str | None = None,
     limit: int = 50,
     best_per_iteration: bool = True,
+    include_stale_engine: bool = False,
     session: Any | None = None,
     cfg: BacktestConfig | None = None,
 ) -> list[LeaderboardEntry]:
@@ -151,7 +152,15 @@ def build_leaderboard(
     ``best_per_iteration`` collapses re-runs of the same (strategy, snapshot,
     timeframe, symbols) to their best result so the board shows distinct
     iterations, not duplicates. Pass ``kind=None`` to rank across all run kinds.
+
+    By default only runs computed under the CURRENT engine cost/geometry model are ranked
+    (``backtest_version == effective_backtest_version(cfg)``), so a change to the engine's cost or
+    exit-geometry math forces re-validation instead of letting stale results (computed under a more-
+    favorable model) rank/promote against fresh ones (audit H-D). Pass ``include_stale_engine=True``
+    to see every version.
     """
+    from src.backtest.service import effective_backtest_version
+
     cfg = cfg or load_backtest_config()
     kc = cfg.walk_forward.kill_criteria
 
@@ -159,6 +168,8 @@ def build_leaderboard(
         q = select(BacktestRun)
         if kind:
             q = q.where(BacktestRun.kind == kind)
+        if not include_stale_engine:
+            q = q.where(BacktestRun.backtest_version == effective_backtest_version(cfg))
         if dataset_version:
             q = q.where(BacktestRun.dataset_version == dataset_version)
         if strategy_id:

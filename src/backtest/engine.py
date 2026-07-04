@@ -41,6 +41,16 @@ from src.features.pipeline import FeatureFrame
 
 _log = structlog.get_logger("backtest.engine")
 
+# Version of the engine's COST + EXIT-GEOMETRY model. BUMP THIS whenever the fill/fee/slippage/
+# funding cost math or the stop / trailing-stop / take-profit / time-stop / sizing geometry changes
+# in EITHER engine (per-trade or basket) — a result computed under a different value is NOT
+# comparable to one computed under another, so it is folded into the backtest run identity and
+# stamped on every persisted run so stale-engine results don't silently rank against fresh ones
+# (audit H-D). History: eng_0001 = pre-audit; eng_0002 = post 2026-07 audit waves 2-4 (H2/H3 honest
+# maker fills + deflated-Sharpe, M2 per-symbol exit spread, L2 fold boundary, M5 basket metadata/
+# leverage gates, H-A basket leg sizing).
+ENGINE_VERSION = "eng_0002"
+
 
 # --------------------------------------------------------------------------- #
 # Inputs & outputs                                                             #

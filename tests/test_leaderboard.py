@@ -63,6 +63,9 @@ def _insert(
     timeframe: str = "1h",
     kind: str = "backtest",
 ) -> None:
+    from src.backtest.config import load_backtest_config
+    from src.backtest.service import effective_backtest_version
+
     with session_scope() as s:
         # Idempotent across re-runs: the dev DB persists between runs and run_id is unique.
         s.query(BacktestRun).filter_by(run_id=run_id).delete()
@@ -70,6 +73,9 @@ def _insert(
             BacktestRun(
                 run_id=run_id,
                 kind=kind,
+                # Stamp the CURRENT effective engine version so these rows aren't filtered out as
+                # stale-engine by the default build_leaderboard (H-D).
+                backtest_version=effective_backtest_version(load_backtest_config()),
                 strategy_id=strategy_id,
                 strategy_version="v1",
                 dataset_version=dataset_version,
