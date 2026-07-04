@@ -35,10 +35,11 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        # Detect column type AND server-default drift so autogenerate emits real ALTERs against an
-        # already-deployed schema, rather than only ever reflecting a create_all snapshot (L19).
+        # Detect column TYPE drift so autogenerate emits real ALTERs against an already-deployed
+        # schema, not just a create_all snapshot (L19). compare_server_default is intentionally OFF:
+        # no model declares a server_default (all defaults are Python-side), so it can only produce
+        # spurious "drift" on a future `alembic check` (L-O).
         compare_type=True,
-        compare_server_default=True,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -50,8 +51,7 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            compare_type=True,
-            compare_server_default=True,
+            compare_type=True,  # compare_server_default off (see offline mode, L-O)
         )
         with context.begin_transaction():
             context.run_migrations()

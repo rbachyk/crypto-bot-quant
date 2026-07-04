@@ -50,22 +50,44 @@ class CcxtExchangeAdapter(ExchangeAdapter):
             if m.get("swap") and m.get("linear") and m.get("settle") == "USDT" and m.get("active")
         )
 
+    def _increment_and_decimals(self, prec_val: Any) -> tuple[float | None, int | None]:
+        """Convert a ccxt ``precision`` value to (increment_size, decimal_places), honoring the
+        exchange's ``precisionMode`` (L-R). In TICK_SIZE mode the value IS the increment (Bybit);
+        in DECIMAL_PLACES mode it is a DIGIT COUNT, so the increment is 10**-value — the old code
+        assumed TICK_SIZE and would record e.g. tick_size=2.0 on a DECIMAL_PLACES venue."""
+        if prec_val is None:
+            return None, None
+        try:
+            import ccxt
+
+            decimal_places = int(getattr(ccxt, "DECIMAL_PLACES", 2))
+        except Exception:  # noqa: BLE001 - ccxt absent (injected fake client) → assume TICK_SIZE
+            decimal_places = 2
+        mode = getattr(self._ex, "precisionMode", None)
+        if mode == decimal_places:
+            d = int(prec_val)
+            return (10.0 ** (-d) if d >= 0 else None), max(0, d)
+        # TICK_SIZE (default / Bybit) — and SIGNIFICANT_DIGITS, which has no fixed tick: treat the
+        # value as the increment and derive decimals from it (operator review is the backstop).
+        tick = float(prec_val)
+        return (tick if tick > 0 else None), _decimals(tick)
+
     def fetch_metadata(self, symbol: str) -> SymbolMetadata:
         m = self._markets_loaded().get(symbol)
         if m is None:
             raise KeyError(f"unknown symbol: {symbol}")
         prec = m.get("precision") or {}
         limits = m.get("limits") or {}
-        tick = prec.get("price")
-        step = prec.get("amount")
+        tick_size, price_precision = self._increment_and_decimals(prec.get("price"))
+        step_size, _ = self._increment_and_decimals(prec.get("amount"))
         lev_max = (limits.get("leverage") or {}).get("max")
         funding_min = (m.get("info") or {}).get("fundingInterval")
         return SymbolMetadata(
             symbol=symbol,
-            tick_size=float(tick) if tick is not None else None,
-            lot_size=float(step) if step is not None else None,
-            qty_step=float(step) if step is not None else None,
-            price_precision=_decimals(tick),
+            tick_size=tick_size,
+            lot_size=step_size,
+            qty_step=step_size,
+            price_precision=price_precision,
             min_order_size=(limits.get("amount") or {}).get("min"),
             min_notional=(limits.get("cost") or {}).get("min"),
             max_leverage=int(lev_max) if lev_max else None,
