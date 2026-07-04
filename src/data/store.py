@@ -97,11 +97,27 @@ class SeriesStore:
         sdir = self._series_dir(key)
         if not sdir.exists():
             return []
+        # Prune whole month-partition files that fall entirely OUTSIDE the requested window instead
+        # of reading every partition of a multi-year series on each call (L-Q). Each file spans one
+        # calendar month (year/month.parquet), so only months in [month(start), month(end-1)] can
+        # contribute; the exact [start,end) filter below still trims the two boundary months.
+        lo_ym = _month_of(start_ms) if start_ms is not None else None
+        hi_ym = _month_of(end_ms - 1) if end_ms is not None and end_ms > 0 else None
         rows: list[dict] = []
         for year_dir in sorted(sdir.iterdir()):
             if not year_dir.is_dir():
                 continue
+            try:
+                year = int(year_dir.name)
+            except ValueError:
+                continue
             for mfile in sorted(year_dir.glob("*.parquet")):
+                try:
+                    ym = (year, int(mfile.stem))
+                except ValueError:
+                    continue
+                if (lo_ym is not None and ym < lo_ym) or (hi_ym is not None and ym > hi_ym):
+                    continue
                 rows.extend(self._read_file(mfile))
         rows.sort(key=lambda r: r["ts"])
         if start_ms is not None:
