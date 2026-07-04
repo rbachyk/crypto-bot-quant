@@ -185,6 +185,12 @@ def _eval_strategy_over_lake(
 
     Factored out so the single-strategy and multi-strategy (active-set) builders share the
     exact same Candidate construction and forward-move accounting (Parity Rule)."""
+    from src.backtest.config import load_backtest_config
+
+    # Apply the SAME funding multiplier the backtest FundingModel uses (L-L) so replay funding
+    # matches the backtest it mirrors; harmless at the default 1.0, meaningful for funding-
+    # sensitivity runs.
+    funding_multiplier = float(load_backtest_config().costs.funding_multiplier)
     out: list[PaperCandidateInput] = []
     for si in lake_inputs:
         # Locate the entry bar by its TIMESTAMP, not by ``decision_ts // iv`` array position:
@@ -217,6 +223,7 @@ def _eval_strategy_over_lake(
             exit_bar, exit_price, exit_reason, funding_frac = _simulate_replay_exit(
                 si, entry_bar, entry_price, sig, hold_bars
             )
+            funding_frac *= funding_multiplier  # L-L: match the backtest FundingModel
             exit_move_frac = exit_price / entry_price - 1.0 if entry_price > 0 else 0.0
             cand = build_candidate(
                 si.symbol,
