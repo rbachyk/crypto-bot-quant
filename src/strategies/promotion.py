@@ -21,6 +21,14 @@ from src.db.models import StrategyPromotion
 from src.strategies.research import CandidateValidation
 
 
+def _engine_version() -> str:
+    """Current engine cost/geometry model version (audit H-D). Lazy import so this light registry
+    module doesn't pull the backtest engine's dependency tree at import time."""
+    from src.backtest.engine import ENGINE_VERSION
+
+    return ENGINE_VERSION
+
+
 def _json_safe(obj):  # type: ignore[no-untyped-def]
     """Recursively replace non-finite floats so a value can NEVER break JSON serialization to the
     Postgres summary column. A multi-hour validation must not be lost at the persist step because
@@ -98,6 +106,9 @@ def persist_validations(
             )
             row.validated_at = datetime.now(UTC)
             row.related_versions = versions
+            # Stamp the engine version this verdict was validated under (H-D), so the active-set
+            # readers can exclude promotions computed under a superseded cost/geometry model.
+            row.engine_version = _engine_version()
             written += 1
     return written
 
@@ -114,7 +125,12 @@ def _known_candidate_ids() -> set[str]:
 def promoted_strategies(strategy_version: str | None = None) -> list[str]:
     """candidate_ids of currently-promoted strategies (optionally for one version)."""
     with session_scope() as session:
-        q = select(StrategyPromotion).where(StrategyPromotion.promoted.is_(True))
+        q = select(StrategyPromotion).where(
+            StrategyPromotion.promoted.is_(True),
+            # Only promotions validated under the CURRENT engine cost/geometry model (H-D): a stale-
+            # engine verdict (NULL/older engine_version) is excluded until it is re-validated.
+            StrategyPromotion.engine_version == _engine_version(),
+        )
         if strategy_version:
             q = q.where(StrategyPromotion.strategy_version == strategy_version)
         return [r.candidate_id for r in session.execute(q).scalars().all()]
@@ -131,7 +147,12 @@ def promoted_timeframe(
     Persisted into the promotion summary by :func:`persist_validations`; legacy promotions made
     before this was recorded return None until they are re-validated."""
     with session_scope() as session:
-        q = select(StrategyPromotion).where(StrategyPromotion.promoted.is_(True))
+        q = select(StrategyPromotion).where(
+            StrategyPromotion.promoted.is_(True),
+            # Only promotions validated under the CURRENT engine cost/geometry model (H-D): a stale-
+            # engine verdict (NULL/older engine_version) is excluded until it is re-validated.
+            StrategyPromotion.engine_version == _engine_version(),
+        )
         if strategy_version:
             q = q.where(StrategyPromotion.strategy_version == strategy_version)
         rows = session.execute(q).scalars().all()
@@ -170,7 +191,12 @@ def promoted_strategy_details(strategy_version: str | None = None) -> list[Promo
     cap = load_strategies_config().max_active_strategies
     known = _known_candidate_ids()
     with session_scope() as session:
-        q = select(StrategyPromotion).where(StrategyPromotion.promoted.is_(True))
+        q = select(StrategyPromotion).where(
+            StrategyPromotion.promoted.is_(True),
+            # Only promotions validated under the CURRENT engine cost/geometry model (H-D): a stale-
+            # engine verdict (NULL/older engine_version) is excluded until it is re-validated.
+            StrategyPromotion.engine_version == _engine_version(),
+        )
         if strategy_version:
             q = q.where(StrategyPromotion.strategy_version == strategy_version)
         rows = [
@@ -239,6 +265,7 @@ def is_strategy_promoted(candidate_id: str, strategy_version: str | None = None)
         q = select(StrategyPromotion).where(
             StrategyPromotion.candidate_id == candidate_id,
             StrategyPromotion.promoted.is_(True),
+            StrategyPromotion.engine_version == _engine_version(),  # current-engine only (H-D)
         )
         if strategy_version:
             q = q.where(StrategyPromotion.strategy_version == strategy_version)

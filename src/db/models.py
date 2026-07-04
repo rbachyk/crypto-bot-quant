@@ -463,6 +463,11 @@ class StrategyPromotion(Base):
         DateTime(timezone=True), default=_utcnow, index=True
     )
     related_versions: Mapped[dict] = mapped_column(JSON, default=dict)
+    # The engine cost/geometry model version this verdict was validated under (audit H-D). The
+    # live active-set readers filter to the CURRENT engine version, so a promotion validated under a
+    # superseded cost model (NULL on legacy rows, or an older tag) is excluded until re-validated —
+    # an engine change can no longer leave a stale, more-favorable promotion silently active.
+    engine_version: Mapped[str | None] = mapped_column(String(16), index=True, default=None)
     __table_args__ = (UniqueConstraint("candidate_id", "strategy_version", name="uq_promotion"),)
 
 
