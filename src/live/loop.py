@@ -185,6 +185,12 @@ class LiveLoop:
                     1 for p in self.venue.positions.values() if getattr(p, "owned", True)
                 )
             )
+        # ML shadow producer (H-C Stage 2b): in realtime PAPER mode, log the meta-labeler take/skip
+        # prediction for each real candidate to shadow_logs (applied=False, untagged), so ML-PROMO's
+        # real-evidence join has genuine linked decisions to score. Lazily trained once per session.
+        # ``None`` until first use / disabled (ml_stage < 2 or non-paper mode).
+        self._shadow_predictor: Any | None = None
+        self._shadow_disabled = False
         # Consecutive-absence counter for debounced retirement of exchange-side-closed positions.
         self._absent_ticks: dict[str, int] = {}
         # Active time-stop (hold_bars) bookkeeping: the exchange holds SL/TP/trailing natively but
@@ -381,6 +387,45 @@ class LiveLoop:
         Bybit **demo** run is tagged ``demo:`` and never mixed with testnet/live history."""
         return "paper" if self.mode == "paper" else self.settings.exchange_env
 
+    # Only shadow-log candidates whose decision is genuinely LIVE (within this window of now), so a
+    # now-stamped shadow row is always followed by (not preceded by) its realized paper trade — the
+    # ML-PROMO join links a shadow row to the first paper_trade in the 48h AFTER it (audit M-A).
+    _SHADOW_FRESHNESS_MS = 3_600_000  # 1h
+
+    def _maybe_shadow_log(self, group: list[PaperCandidateInput], decision_ts: int) -> None:
+        """H-C Stage 2b: write the ML models' shadow predictions for REAL live candidates to
+        shadow_logs (applied=False, untagged), the producer of the real evidence ML-PROMO scores.
+        Best-effort: any failure is logged and never disturbs the trading loop."""
+        if self._shadow_disabled or self.mode != "paper" or not group:
+            return
+        now_ms = int(time.time() * 1000)
+        if now_ms - int(decision_ts) > self._SHADOW_FRESHNESS_MS:
+            return  # replay/historical candidate — never now-stamp it (would mis-join, M-A)
+        try:
+            if self._shadow_predictor is None:
+                from src.ml.config import load_ml_config
+                from src.ml.labels import build_training_dataset
+                from src.ml.shadow import ShadowPredictor
+
+                ml_cfg = load_ml_config()
+                if int(getattr(ml_cfg, "ml_stage", 0)) < 2:
+                    self._shadow_disabled = True
+                    return
+                samples, source = build_training_dataset()
+                predictor = ShadowPredictor.from_config(ml_cfg)
+                predictor.train(samples)
+                self._shadow_predictor = predictor
+                _log.info("shadow_producer_ready", data_source=source, n_train=len(samples))
+            self._shadow_predictor.run(
+                [pin.candidate for pin in group],
+                settings=self.settings,
+                write_to_db=True,
+                synthetic_source=False,  # REAL live candidates → count toward ML-PROMO evidence
+            )
+        except Exception:  # noqa: BLE001 - shadow logging must never disturb the trading loop
+            _log.warning("shadow_producer_error", exc_info=True)
+            self._shadow_disabled = True  # stop retrying this session after a failure
+
     def _record_open_ages(self, decision_ts: int, group: list[PaperCandidateInput]) -> None:
         """Remember the entry time + hold horizon of any position this tick just opened, so the
         time-stop can flatten it once aged. Keyed by symbol (max one owned position per symbol)."""
@@ -501,6 +546,11 @@ class LiveLoop:
                 )
             before_exec = session.executed_count
             before_rej = session.rejected_count
+            # H-C Stage 2b: shadow-log the ML models' predictions on these REAL candidates BEFORE
+            # the deterministic pipeline runs (predictions never influence the decision — applied=
+            # False). Only in realtime paper on FRESH candidates, so the ML-PROMO forward join is
+            # sound (never now-stamps a historical/replay decision).
+            self._maybe_shadow_log(group, decision_ts)
             self.engine.process_candidates(group, session)
             self._record_open_ages(decision_ts, group)
             # Reconcile every tick (Section 7); a foreign order/position halts the loop. A real

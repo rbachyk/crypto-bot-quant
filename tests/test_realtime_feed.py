@@ -348,3 +348,54 @@ def test_continuous_feed_stops_on_should_stop() -> None:
     groups = list(feed.groups())  # must return (not hang)
     assert isinstance(groups, list)
     assert calls["n"] > 5  # the stop predicate was polled and eventually halted the stream
+
+
+def test_shadow_producer_logs_fresh_paper_candidates_only() -> None:
+    """H-C Stage 2b: in realtime PAPER mode the loop shadow-logs the ML models' predictions for
+    FRESH real candidates (applied=False, untagged real evidence), but NEVER for stale/replay
+    candidates (a now-stamped write would mis-join in ML-PROMO) or in a real-venue mode."""
+    import time
+
+    from src.paper.engine import PaperCandidateInput
+    from src.ranking.candidate import Candidate
+
+    def _pin(dts: int) -> PaperCandidateInput:
+        cand = Candidate(
+            symbol="BTC/USDT:USDT", strategy="lead_lag_xasset", strategy_version="v1", side=1,
+            entry_price=100.0, stop_frac=0.01, tp_frac=0.02, regime="R1", session=0,
+            decision_ts=dts,
+        )
+        return PaperCandidateInput(candidate=cand, equity=10_000.0, exit_move_frac=0.0)
+
+    class _Spy:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def run(self, candidates, *, settings=None, write_to_db=True, synthetic_source=False):
+            self.calls.append(
+                {"n": len(candidates), "write": write_to_db, "synthetic": synthetic_source}
+            )
+
+    now = int(time.time() * 1000)
+
+    # Paper + fresh → logged, untagged, written.
+    loop = LiveLoop(mode="paper")
+    spy = _Spy()
+    loop._shadow_predictor = spy  # bypass training/DB
+    loop._maybe_shadow_log([_pin(now)], now)
+    assert spy.calls == [{"n": 1, "write": True, "synthetic": False}]
+
+    # Paper + STALE (historical/replay) → NOT logged (freshness gate).
+    loop2 = LiveLoop(mode="paper")
+    spy2 = _Spy()
+    loop2._shadow_predictor = spy2
+    stale = now - 10 * loop2._SHADOW_FRESHNESS_MS
+    loop2._maybe_shadow_log([_pin(stale)], stale)
+    assert spy2.calls == []
+
+    # Real-venue mode → NOT logged (paper env first).
+    loop3 = LiveLoop(mode="testnet")
+    spy3 = _Spy()
+    loop3._shadow_predictor = spy3
+    loop3._maybe_shadow_log([_pin(now)], now)
+    assert spy3.calls == []
