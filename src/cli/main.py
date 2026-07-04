@@ -331,6 +331,104 @@ def ml_shadow_lake(
     typer.echo(job_id)
 
 
+@app.command(name="ml-readiness")
+def ml_readiness(
+    as_json: bool = typer.Option(False, "--json", help="emit machine-readable JSON only"),
+) -> None:
+    """Show how much REAL data has accumulated toward training the shadow ML models and passing the
+    ML-PROMO gate — two independent, count-driven thresholds (no flag flips them):
+
+      * training switches synthetic -> real once >= min_real (50) paired decision/outcome samples
+        exist; each per-model fit additionally needs >= min_train_samples (30) with >= 2 classes.
+      * ML-PROMO scores real performance only once >= min_train_samples (30) shadow predictions
+        link to a paper trade that closed within 48h of the prediction.
+
+    Reads the SAME tables the trainer and gate read (decision_logs, paper_trades, shadow_logs) via
+    the same functions, so the counts match. Read-only — trains nothing, places nothing."""
+    from src.ml.config import load_ml_config
+
+    ml_cfg = load_ml_config()
+    min_real = 50  # build_training_dataset(min_real=...) — synthetic->real training switch
+    min_fit = int(ml_cfg.meta_labeler.min_train_samples)  # per-model fit floor + ML-PROMO floor
+
+    out: dict = {"min_real": min_real, "min_fit": min_fit}
+
+    # Real training samples: decision_logs (execute, with features) joined to closed paper_trades.
+    try:
+        from src.ml.labels import build_labels_from_paper_outcomes
+
+        real = build_labels_from_paper_outcomes()
+        n_real = len(real)
+        n_win = sum(1 for s in real if s.label == 1)
+        out["training"] = {
+            "real_samples": n_real,
+            "wins": n_win,
+            "losses": n_real - n_win,
+            "source": "real" if n_real >= min_real else "synthetic",
+            "per_model_fit_ok": n_real >= min_fit and 0 < n_win < n_real,
+        }
+    except Exception as exc:  # noqa: BLE001 - DB down / schema drift → report, don't crash
+        out["training"] = {"error": str(exc)}
+
+    # ML-PROMO evidence: real (non-synthetic) meta-labeler shadow rows linked to a paper trade
+    # closed within 48h — the exact join the gate scores.
+    try:
+        from src.gates.phase9 import _load_real_shadow_outcomes
+
+        n_shadow, linked = _load_real_shadow_outcomes()
+        out["ml_promo"] = {
+            "real_shadow_rows": n_shadow,
+            "linked_outcomes": len(linked),
+            "scoreable": len(linked) >= min_fit,
+        }
+    except Exception as exc:  # noqa: BLE001
+        out["ml_promo"] = {"error": str(exc)}
+
+    if as_json:
+        typer.echo(json.dumps(out, indent=2))
+        return
+
+    def _bar(have: int, need: int) -> str:
+        if have >= need:
+            return f"{have} / {need}  ✅ met"
+        return f"{have} / {need}  (need {need - have} more)"
+
+    lines = ["ML training readiness", "====================="]
+    tr = out["training"]
+    if "error" in tr:
+        lines.append(f"Real training samples: unavailable ({tr['error']})")
+    else:
+        src_note = (
+            "→ training on REAL data"
+            if tr["source"] == "real"
+            else "→ using SYNTHETIC bootstrap"
+        )
+        lines += [
+            "Real training samples (decision_logs ⋈ paper_trades)",
+            f"  real samples:  {_bar(tr['real_samples'], min_real)}   {src_note}",
+            f"  label balance: {tr['wins']} win / {tr['losses']} loss",
+            f"  per-model fit: {'OK' if tr['per_model_fit_ok'] else 'NOT YET'} "
+            f"(needs ≥{min_fit} samples and ≥2 classes) [meta_labeler view]",
+        ]
+    lines.append("")
+    mp = out["ml_promo"]
+    if "error" in mp:
+        lines.append(f"ML-PROMO real evidence: unavailable ({mp['error']})")
+    else:
+        verdict = "gate can score" if mp["scoreable"] else "gate FAILS CLOSED"
+        lines += [
+            "ML-PROMO real evidence (shadow_logs ⋈ paper_trades ≤48h)",
+            f"  real shadow rows: {mp['real_shadow_rows']}",
+            f"  linked outcomes:  {_bar(mp['linked_outcomes'], min_fit)}   → {verdict}",
+        ]
+    lines += [
+        "",
+        "Only realtime paper (`qbot live --mode paper --realtime`) produces this data;",
+        "lake-replay and the ml-shadow batch jobs are tagged synthetic and do NOT count.",
+    ]
+    typer.echo("\n".join(lines))
+
+
 @app.command(name="promote-lake")
 def promote_lake(
     config_path: str = typer.Option(
