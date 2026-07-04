@@ -3908,15 +3908,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with session_scope() as session:
             # Exclude SYNTHETIC (plumbing / reference-dataset) rows so the dashboard shows REAL
             # shadow activity, not gate self-checks counted as genuine predictions (audit M-K).
-            # Over-fetch then filter in Python (JSON-key filtering is DB-specific); display-only.
-            fetched = (
-                session.execute(select(ShadowLog).order_by(desc(ShadowLog.ts)).limit(400))
+            # Filter in SQL (Postgres JSON ->> operator) so the LIMIT applies to REAL rows only —
+            # a Python over-fetch/truncate could hide real rows behind a wall of synthetic ones
+            # (audit H-D backend M).
+            logs = (
+                session.execute(
+                    select(ShadowLog)
+                    .where(ShadowLog.context_features.op("->>")(SYNTHETIC_CONTEXT_KEY).is_(None))
+                    .order_by(desc(ShadowLog.ts))
+                    .limit(200)
+                )
                 .scalars()
                 .all()
             )
-            logs = [
-                lg for lg in fetched if not (lg.context_features or {}).get(SYNTHETIC_CONTEXT_KEY)
-            ][:200]
             total = len(logs)
             applied = sum(1 for lg in logs if lg.applied)
             by_type: dict[str, int] = {}
