@@ -3544,6 +3544,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         strategy: str = "",
         limit: int = 50,
         best_per_iteration: bool = True,
+        include_stale_engine: bool = False,
         user: str = Depends(require_dashboard_auth),
     ) -> list[dict]:
         from src.backtest.leaderboard import build_leaderboard
@@ -3554,6 +3555,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             strategy_id=strategy or None,
             limit=limit,
             best_per_iteration=best_per_iteration,
+            include_stale_engine=include_stale_engine,
         )
         return [e.to_dict() for e in entries]
 

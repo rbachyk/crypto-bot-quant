@@ -377,6 +377,11 @@ def leaderboard(
     all_iterations: bool = typer.Option(
         False, "--all", help="show every run, not just best-per-iteration"
     ),
+    include_stale_engine: bool = typer.Option(
+        False,
+        "--include-stale-engine",
+        help="also show runs from a prior engine version (default: current engine only)",
+    ),
 ) -> None:
     """Print the backtest iteration leaderboard (ranked by the profitability bar)."""
     from src.backtest.leaderboard import build_leaderboard
@@ -387,6 +392,7 @@ def leaderboard(
         strategy_id=strategy or None,
         limit=limit,
         best_per_iteration=not all_iterations,
+        include_stale_engine=include_stale_engine,
     )
     typer.echo(json.dumps([e.to_dict() for e in entries], indent=2, default=str))
 
