@@ -124,6 +124,10 @@ class PaperDecisionLog:
     universe_version: str
     strategy_version: str
     kill_switch_state: str  # "engaged" | "clear"
+    # Decision-time ML feature vector (the canonical FEATURE_NAMES row). Persisted so the real ML
+    # label pipeline can reconstruct a training feature vector and join it to the realized
+    # paper-trade outcome (H18) — without it, ML training could only ever run on synthetic data.
+    features: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -142,6 +146,7 @@ class PaperDecisionLog:
             "universe_version": self.universe_version,
             "strategy_version": self.strategy_version,
             "kill_switch_state": self.kill_switch_state,
+            "features": dict(self.features),
         }
 
 

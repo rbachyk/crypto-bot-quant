@@ -93,6 +93,12 @@ class PaperCandidateInput:
     exit_move_frac: float = 0.0
     # Number of bars to hold (0 = close next bar).
     hold_bars: int = 0
+    # Replay-path exit already resolved by an intrabar bracket walk (H9): the exit reason and the
+    # funding cost fraction (>0 = paid) accrued while held. When ``exit_reason`` is provided the
+    # engine books it directly instead of re-classifying from the endpoint move — so the replay
+    # path captures intrabar stop/take-profit/trailing hits and funding, matching backtest/live.
+    exit_reason: str | None = None
+    funding_frac: float = 0.0
 
 
 class PaperTradingEngine:
@@ -875,31 +881,38 @@ class PaperTradingEngine:
         )
         exit_move = inp.exit_move_frac
         exit_price = entry_price * (1 + exit_move)
-        # Classify the exit by which bracket the forward price reached. ``exit_move`` is the RAW
-        # (non-side-adjusted) price move; ``exit_move * side > 0`` means it moved in our favour →
-        # the take-profit side, otherwise the stop side. For a SHORT the levels invert (stop ABOVE
-        # entry, TP BELOW), so the comparison flips with side. (The previous code paired the wrong
-        # exit_move sign with the short branches, so a short NEVER classified as tp/stop — it stuck
-        # at "open", pinned its concurrency slot forever and never realized P&L.)
-        exit_reason = "open"
-        if exit_move != 0:
-            favorable = exit_move * candidate.side > 0
-            # tp_price == 0.0 encodes NO fixed TP (the sentinel, L12): never classify a
-            # take-profit exit for it — the position stays open for the trail/time-stop.
-            if favorable and tp_price > 0 and (
-                (candidate.side > 0 and exit_price >= tp_price)
-                or (candidate.side < 0 and exit_price <= tp_price)
-            ):
-                exit_reason = "take_profit"
-            elif not favorable and (
-                (candidate.side > 0 and exit_price <= stop_price)
-                or (candidate.side < 0 and exit_price >= stop_price)
-            ):
-                exit_reason = "stop"
+        funding_amount = 0.0
+        if inp.exit_reason is not None:
+            # Replay path (H9): the exit was already resolved by an intrabar bracket walk that
+            # applied the backtest's stop/trailing/take-profit geometry AND accrued funding — trust
+            # it directly rather than re-classify from the endpoint move (which misses intrabar hits
+            # and books an intrabar stop that recovered by the horizon as a winner).
+            exit_reason = inp.exit_reason
+            funding_amount = inp.funding_frac * entry_price * fill.qty
+        else:
+            # Classify the exit by which bracket the forward price reached. ``exit_move`` is the RAW
+            # (non-side-adjusted) price move; ``exit_move * side > 0`` means it moved our way → the
+            # take-profit side, otherwise the stop side. For a SHORT the levels invert (stop
+            # ABOVE entry, TP BELOW), so the comparison flips with side.
+            exit_reason = "open"
+            if exit_move != 0:
+                favorable = exit_move * candidate.side > 0
+                # tp_price == 0.0 encodes NO fixed TP (the sentinel, L12): never classify a
+                # take-profit exit for it — the position stays open for the trail/time-stop.
+                if favorable and tp_price > 0 and (
+                    (candidate.side > 0 and exit_price >= tp_price)
+                    or (candidate.side < 0 and exit_price <= tp_price)
+                ):
+                    exit_reason = "take_profit"
+                elif not favorable and (
+                    (candidate.side > 0 and exit_price <= stop_price)
+                    or (candidate.side < 0 and exit_price >= stop_price)
+                ):
+                    exit_reason = "stop"
 
         raw_pnl = (exit_price - entry_price) * candidate.side * fill.qty
         fee = fill.fee
-        pnl = raw_pnl - fee
+        pnl = raw_pnl - fee - funding_amount
         risk_amount = (
             decision.risk_amount
             if decision.risk_amount
@@ -929,6 +942,7 @@ class PaperTradingEngine:
             exit_price=exit_price,
             exit_reason=exit_reason,
             fee=fee,
+            funding=funding_amount,  # replay-path accrued funding (H9); 0.0 for live/realtime
             slippage_cost=fill.slippage_cost,
             pnl=pnl,
             pnl_r=pnl_r,
@@ -1026,6 +1040,8 @@ class PaperTradingEngine:
         risk_approved: bool,
         ks_state: str,
     ) -> PaperDecisionLog:
+        from src.ml.features import candidate_to_row
+
         entry_price = candidate.entry_price
         # L14: estimate fees from the symbol's VERIFIED metadata (same source the venue charges
         # from), falling back to a generic taker rate only when the spec carries no fee.
@@ -1051,4 +1067,7 @@ class PaperTradingEngine:
             universe_version=self._universe_version,
             strategy_version=candidate.strategy_version,
             kill_switch_state=ks_state,
+            # Persist the canonical ML feature row so the real label pipeline (H18) can rebuild a
+            # training feature vector for this decision and join it to the realized outcome.
+            features=candidate_to_row(candidate),
         )

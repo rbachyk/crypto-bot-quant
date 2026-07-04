@@ -209,7 +209,10 @@ def _persist_decision_and_explainability(db, session: PaperSession) -> None:
                 side=d.side,
                 action=d.action,
                 reason=d.reason,
-                features={},
+                # Persist the decision-time ML feature row so the real ML label pipeline can join it
+                # to the realized paper-trade outcome (H18); {} for records built without it.
+                features=dict(getattr(d, "features", {}) or {}),
+                ts=d.entry_ts,
                 expected_edge=d.expected_edge,
                 expected_cost=d.expected_fee + d.expected_slippage,
                 risk_approved=d.risk_approved,

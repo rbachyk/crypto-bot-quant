@@ -50,6 +50,8 @@ def build_candidate(
     data_ok: bool = True,
     risk_scale: float = 1.0,
     regime: str | None = None,
+    slippage_est: float | None = None,
+    latency_ms: float = 5.0,
 ) -> Candidate:
     """Build a ranking Candidate from a decision-time feature row + a strategy signal.
 
@@ -93,8 +95,18 @@ def build_candidate(
             else _SENTINEL_EDGE_R * sig.stop_frac
         ),
         spread_bps=spread_bps,
-        slippage_est=0.0005,
-        latency_ms=5.0,
+        # Slippage estimate tied to the REAL modelled spread (half-spread as a fraction of price),
+        # not a 0.0005 constant — otherwise the execution revalidator's max_slippage_frac blocker
+        # could never fire in paper/live (M12). Floored at a small base so a zero-spread sample
+        # still carries some cost.
+        slippage_est=(
+            slippage_est
+            if slippage_est is not None
+            else max(0.0002, 0.5 * spread_bps / 10_000.0)
+        ),
+        # Measured feed latency where the caller supplies it (live); the offline snapshot builder
+        # keeps a nominal value (there is no real round-trip to measure).
+        latency_ms=latency_ms,
         # Research/shadow context flags; live eligibility is judged by the gates, not a run.
         data_fresh=data_ok,
         metadata_verified=True,
@@ -175,7 +187,6 @@ def _eval_strategy_over_lake(
     exact same Candidate construction and forward-move accounting (Parity Rule)."""
     out: list[PaperCandidateInput] = []
     for si in lake_inputs:
-        n = len(si.bars)
         # Locate the entry bar by its TIMESTAMP, not by ``decision_ts // iv`` array position:
         # a contract listed after the window start has its first bar at a large ts (not index 0),
         # so the slot index would point at the wrong bar (or past the end) and silently drop every
@@ -203,8 +214,9 @@ def _eval_strategy_over_lake(
             if entry_bar is None:
                 continue  # no tradable bar at this timestamp (pre-listing or interior gap)
             entry_price = float(si.bars[entry_bar]["open"])
-            exit_bar = min(entry_bar + hold_bars, n - 1)
-            exit_price = float(si.bars[exit_bar]["close"])
+            exit_bar, exit_price, exit_reason, funding_frac = _simulate_replay_exit(
+                si, entry_bar, entry_price, sig, hold_bars
+            )
             exit_move_frac = exit_price / entry_price - 1.0 if entry_price > 0 else 0.0
             cand = build_candidate(
                 si.symbol,
@@ -224,9 +236,65 @@ def _eval_strategy_over_lake(
                     equity=equity,
                     exit_move_frac=exit_move_frac,
                     hold_bars=min(hold_bars, exit_bar - entry_bar),
+                    exit_reason=exit_reason,
+                    funding_frac=funding_frac,
                 )
             )
     return out
+
+
+def _simulate_replay_exit(si, entry_bar: int, entry_price: float, sig, hold_bars: int):
+    """Resolve a replay-paper exit by walking the bars from entry to the hold horizon with the SAME
+    bracket geometry as the per-trade backtest engine (H9): intrabar stop / trailing-stop /
+    take-profit (stop checked before TP within a bar, no intrabar look-ahead on the trail), then a
+    time-stop at the horizon; funding is accrued over the held interval. Returns
+    ``(exit_bar, exit_price, exit_reason, funding_frac)`` where ``funding_frac`` is the funding COST
+    as a fraction of entry price (>0 = paid). The old fixed 12-bar-forward close mislabelled an
+    intrabar stop that recovered by the horizon as a winner and accrued no funding."""
+    n = len(si.bars)
+    side = int(sig.side)
+    stop_price = entry_price * (1.0 - side * float(sig.stop_frac))
+    tp_frac = float(sig.tp_frac)
+    tp_price = 0.0 if tp_frac >= NO_FIXED_TP_FRAC else entry_price * (1.0 + side * tp_frac)
+    trail_dist = float(getattr(sig, "trail_frac", 0.0) or 0.0) * entry_price
+    last_bar = min(entry_bar + hold_bars, n - 1)
+    entry_ts = int(si.bars[entry_bar]["ts"])
+    peak = entry_price  # favorable extreme seen so far (ratcheted AFTER each bar's checks)
+    exit_bar = last_bar
+    exit_price = float(si.bars[last_bar]["close"])
+    exit_reason = "time_stop" if last_bar == entry_bar + hold_bars else "end_of_data"
+    for j in range(entry_bar, last_bar + 1):
+        bar = si.bars[j]
+        high, low = float(bar["high"]), float(bar["low"])
+        if side > 0:
+            eff_stop = max(stop_price, peak - trail_dist) if trail_dist > 0 else stop_price
+            if low <= eff_stop:
+                exit_bar, exit_price = j, eff_stop
+                exit_reason = "trailing_stop" if eff_stop > stop_price else "stop"
+                break
+            if tp_price > 0 and high >= tp_price:
+                exit_bar, exit_price, exit_reason = j, tp_price, "take_profit"
+                break
+            peak = max(peak, high)
+        else:
+            eff_stop = min(stop_price, peak + trail_dist) if trail_dist > 0 else stop_price
+            if high >= eff_stop:
+                exit_bar, exit_price = j, eff_stop
+                exit_reason = "trailing_stop" if eff_stop < stop_price else "stop"
+                break
+            if tp_price > 0 and low <= tp_price:
+                exit_bar, exit_price, exit_reason = j, tp_price, "take_profit"
+                break
+            peak = min(peak, low)
+    exit_ts = int(si.bars[exit_bar]["ts"])
+    # Funding accrued over (entry_ts, exit_ts] — cost convention (>0 = paid): when funding_rate>0
+    # longs pay shorts, so a long's cost is +rate and a short's is −rate (side·rate).
+    funding_frac = sum(
+        side * float(ev["funding_rate"])
+        for ev in si.funding_events
+        if entry_ts < int(ev["ts"]) <= exit_ts
+    )
+    return exit_bar, exit_price, exit_reason, funding_frac
 
 
 def resolve_active_strategies(
