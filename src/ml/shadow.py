@@ -132,14 +132,17 @@ class ShadowPredictor:
         # sample (candidate execution geometry + realized R):
         labels = [s.label for s in samples]  # meta-labeler: profitable? (take=1 / skip=0)
         pnls = [s.realized_pnl for s in samples]
-        exec_costs = [self._exec_cost(s.candidate) for s in samples]
         med_pnl = statistics.median(pnls) if pnls else 0.0
-        med_cost = statistics.median(exec_costs) if exec_costs else 0.0
         # symbol_ranker: is this a TOP-quartile opportunity by realized R (a high-rank symbol)?
         q75_pnl = self._quantile(pnls, 0.75)
-        # exec_quality: was the modelled execution cost LOW (a good fill environment)? — a target
-        #   that genuinely depends on spread/slippage, so the model learns execution, not take/skip.
-        exec_labels = [1 if c <= med_cost else 0 for c in exec_costs]
+        # exec_quality: did the trade CLEAR its own execution-cost hurdle — realized R greater than
+        #   the modelled round-trip cost expressed in R (exec_cost / stop_frac)? This is a REALIZED
+        #   outcome (depends on realized_pnl, which the model never sees), so it is NOT a tautology:
+        #   the model must learn which execution CONTEXTS (spread/slippage/atr) tend to overcome
+        #   their cost, rather than trivially recovering a label that was a deterministic function
+        #   its own spread/slippage inputs (audit M-H). (A realized per-trade execution-cost metric,
+        #   once persisted, would let this target measure fill quality directly — see H-C/M-H.)
+        exec_labels = [1 if s.realized_pnl > self._cost_drag_r(s.candidate) else 0 for s in samples]
         # strategy_selector: is this an ABOVE-median-quality pick (the selector's job is relative,
         #   not the absolute >0 take/skip cut)?
         strat_labels = [1 if p >= med_pnl else 0 for p in pnls]
@@ -176,10 +179,17 @@ class ShadowPredictor:
 
     @staticmethod
     def _exec_cost(cand) -> float:
-        """Modelled round-trip execution cost fraction: taker fees + slippage + half-spread. The
-        exec_quality target is 'was this LOW?' so the model learns execution conditions (M33)."""
+        """Modelled round-trip execution cost fraction: taker fees + slippage + half-spread."""
         spread_frac = 0.5 * float(getattr(cand, "spread_bps", 0.0) or 0.0) / 10_000.0
         return 2.0 * 0.0004 + float(getattr(cand, "slippage_est", 0.0) or 0.0) + spread_frac
+
+    @classmethod
+    def _cost_drag_r(cls, cand) -> float:
+        """Modelled execution cost expressed in R (÷ the stop distance), so it is comparable to
+        ``realized_pnl`` (also in R). The exec_quality target is 'did realized R clear this?' — a
+        non-circular, execution-flavored outcome (M-H)."""
+        stop_frac = float(getattr(cand, "stop_frac", 0.0) or 0.0)
+        return cls._exec_cost(cand) / stop_frac if stop_frac > 0 else cls._exec_cost(cand)
 
     @staticmethod
     def _quantile(values: list[float], q: float) -> float:
