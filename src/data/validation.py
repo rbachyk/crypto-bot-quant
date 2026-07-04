@@ -288,23 +288,39 @@ class DataValidator:
 
     # -- cross-series checks -------------------------------------------- #
     def _check_markindex_alignment(self, start: int, end: int, report: DataQualityReport) -> None:
-        """Mark/index/perp must share the base-timeframe grid (Section 8/23)."""
+        """Every perp bar must carry an aligned mark/index sample on the base-timeframe grid
+        (Section 8/23) — the feature pipeline reads mark/index as-of each perp decision bar.
+
+        Mark/index klines on Bybit can begin EARLIER than the perp contract itself lists (the
+        mark/index price feed predates the contract by minutes-to-hours), so the stored series
+        legitimately carry EXTRA samples BEFORE the perp's first bar. Verified against live Bybit:
+        within the perp's own range every perp bar has a matching mark/index and they equal the
+        perp grid exactly; the only difference is those extra pre-listing samples. Comparing the
+        full sets (the old ``other == perp``) therefore false-flagged every late-listing symbol.
+
+        So compare only WITHIN the perp's own [first, last] range: inside it mark/index must equal
+        the perp grid exactly (this still catches interior gaps and off-grid stamps); samples
+        outside it (mark/index leading or trailing the perp) are ignored — they join to no bar."""
         ex = self.cfg.exchange_id
         base = self.cfg.base_timeframe
         for symbol in self.cfg.active_symbols():
             perp = self.store.timestamps(SeriesKey(ex, OHLCV, symbol, base), start, end)
+            if not perp:
+                continue
+            lo, hi = min(perp), max(perp)
             for dt in (MARK, INDEX):
                 if dt not in self.cfg.required_series:
                     continue
                 other = self.store.timestamps(SeriesKey(ex, dt, symbol, base), start, end)
-                if other == perp:
+                in_range = {t for t in other if lo <= t <= hi}
+                if in_range == perp:
                     continue
-                # Close-time stamping listing edge: mark/index samples carry a kline's close
-                # value stamped at the kline CLOSE, so a symbol whose perp LISTS inside the
-                # window has its first sample one base interval after the perp's first bar
-                # (no earlier kline exists to close at the listing bar's open). That single
-                # leading offset is legitimate, not misalignment.
-                if perp and min(perp) > start and other == perp - {min(perp)}:
+                # ``- {lo}`` tolerance, ONLY when the perp lists INSIDE the window (lo > start): a
+                # symbol whose mark/index instead starts AT the perp listing has its first
+                # close-stamped sample one interval after the perp's first bar (no earlier kline to
+                # close), so it legitimately lacks exactly the perp's first ts. When the perp starts
+                # at the window edge a missing first sample is a real hole, not a listing edge.
+                if lo > start and in_range == perp - {lo}:
                     continue
                 report.violations.append(
                     Violation(

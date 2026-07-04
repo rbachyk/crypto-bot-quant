@@ -180,6 +180,28 @@ def test_markindex_close_stamp_listing_edge_is_not_misalignment(tmp_path) -> Non
     assert "markindex_alignment" not in _critical_checks(store, cfg)
 
 
+def test_markindex_leading_extra_samples_are_not_misalignment(tmp_path) -> None:
+    """Bybit's mark/index kline feed can begin EARLIER than the perp contract lists, so the stored
+    mark/index legitimately carry EXTRA samples BEFORE the perp's first bar (verified against live
+    Bybit: within the perp's range every bar still has a matching mark/index). That must NOT be
+    flagged — only interior gaps / off-grid stamps inside the perp's range are misalignment."""
+    cfg = small_cfg()
+    store = fresh_store(tmp_path)
+    populate(store, cfg)  # perp + mark + index cover the full window
+    iv = SeriesKey(cfg.exchange_id, OHLCV, cfg.symbols[0], "5m").interval_ms
+    listing = cfg.window_start_ms + 4 * iv
+    # Perp lists mid-window; mark/index still reach back to the window start (their feed predates
+    # the contract) — so mark/index each have 4 extra leading samples the perp lacks.
+    store.delete_range(SeriesKey(cfg.exchange_id, OHLCV, cfg.symbols[0], "5m"),
+                       cfg.window_start_ms, listing)
+    perp = store.timestamps(SeriesKey(cfg.exchange_id, OHLCV, cfg.symbols[0], "5m"),
+                            cfg.window_start_ms, cfg.window_end_ms)
+    mark = store.timestamps(SeriesKey(cfg.exchange_id, MARK, cfg.symbols[0], cfg.base_timeframe),
+                            cfg.window_start_ms, cfg.window_end_ms)
+    assert perp < mark  # mark is a strict SUPERSET (extra pre-listing samples)
+    assert "markindex_alignment" not in _critical_checks(store, cfg)
+
+
 # --------------------------------------------------------------------------- #
 # L15: clock drift measured against the EXCHANGE server time, or honestly N/A  #
 # --------------------------------------------------------------------------- #
