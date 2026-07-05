@@ -183,6 +183,45 @@ def test_build_lake_inputs_cache_hit_skips_feature_rebuild(tmp_path, monkeypatch
     assert first[0].frame.feature_names == second[0].frame.feature_names
 
 
+def test_build_lake_inputs_resumes_from_per_symbol_cache(tmp_path, monkeypatch) -> None:
+    """A long build interrupted mid-run (worker reaped on heartbeat starvation, deploy, crash) must
+    RESUME from the symbols already built, not restart from zero — the fix for the 5m/20-symbol
+    build that looped forever. Each symbol is cached on its own, so even with the full-run cache
+    gone the rebuild loads every symbol from cache (compute_features never re-runs)."""
+    import src.backtest.service as svc
+
+    store = SeriesStore(tmp_path)
+    iv = timeframe_ms(TF)
+    start, end = 0, 200 * iv
+    src = DeterministicSource(EX)
+    syms = [SYM, "ETH/USDT:USDT"]
+    for sym in syms:
+        for dt, tf in ((OHLCV, TF), (MARK, BASE), (INDEX, BASE), (SPREAD, BASE),
+                       (OPEN_INTEREST, OI_TF), (FUNDING, FUND)):
+            key = SeriesKey(EX, dt, sym, tf)
+            store.write(key, src.fetch(key, start, end))
+
+    kw = {**_lake_kw(start, end), "symbols": syms}
+    first = build_lake_inputs(store, **kw)
+    assert [si.symbol for si in first] == syms
+
+    # Drop ONLY the full-run cache (the 2-symbol key); keep each symbol's own cache.
+    full_key = svc._lake_inputs_cache_key(
+        store, exchange_id=EX, symbols=syms, timeframe=TF, base_timeframe=BASE,
+        funding_timeframe=FUND, oi_timeframe=OI_TF, start_ms=start, end_ms=end,
+        feat_cfg=svc._lake_feature_config(TF),
+    )
+    (tmp_path / "input_cache" / f"{full_key}.pkl").unlink()
+
+    def _boom(*_a, **_k):
+        raise AssertionError("compute_features must NOT re-run — resume loads per-symbol caches")
+
+    monkeypatch.setattr(svc, "compute_features", _boom)
+    second = build_lake_inputs(store, **kw)  # rebuild with no full-run cache
+    assert [si.symbol for si in second] == syms  # both symbols served from per-symbol cache
+    assert [b["ts"] for b in first[0].bars] == [b["ts"] for b in second[0].bars]
+
+
 def test_build_lake_inputs_cache_invalidates_when_data_changes(tmp_path) -> None:
     """Appending real bars rewrites the parquet → the data fingerprint changes → the stale cache is
     NOT served; the build picks up the new data."""

@@ -293,33 +293,48 @@ def build_lake_inputs(
         if cached is not None:
             _log.info("lake_inputs_cache_hit", key=cache_key, symbols=len(cached))
             return cached
+    # Rebasing shifts to a 0-based origin (deterministic — a pure function of start_ms + iv, NOT of
+    # the data), so each symbol can be rebased on its own the moment it's built. That lets us cache
+    # per-symbol: a long build interrupted mid-run (worker reaped on heartbeat starvation, deploy,
+    # crash) RESUMES from the symbols already done instead of rebuilding all 20 from zero — the
+    # failure that turned the 5m/20-sym build into an infinite loop.
+    iv = timeframe_ms(timeframe)
+    lo = (start_ms // iv) * iv
     inputs: list[SymbolInput] = []
     n = len(symbols)
     for i, symbol in enumerate(symbols):
-        reader = StoreReader(
-            store,
-            exchange_id,
-            timeframe,
-            base_timeframe,
-            funding_timeframe,
-            start_ms,
-            end_ms,
-            oi_timeframe=oi_tf,
-            # Pre-read funding_z's rolling lookback BEFORE the window start, so the feature is
-            # warm from the first row and its value at a ts never depends on the window depth.
-            funding_lookback_ms=feat_cfg.funding_z_lookback_ms,
+        sym_key = (
+            _lake_inputs_cache_key(
+                store, exchange_id=exchange_id, symbols=[symbol], timeframe=timeframe,
+                base_timeframe=base_timeframe, funding_timeframe=funding_timeframe,
+                oi_timeframe=oi_tf, start_ms=start_ms, end_ms=end_ms, feat_cfg=feat_cfg,
+            )
+            if cache_key  # same enable/fingerprint gate as the full-run key
+            else None
         )
-        bars = reader.ohlcv(symbol)
-        if bars:  # no history in window ⇒ excluded from the run (but still advances progress)
-            frame = compute_features(symbol, reader, feat_cfg)
-            spread = store.read(
-                SeriesKey(exchange_id, SPREAD, symbol, base_timeframe), start_ms, end_ms
+        built: SymbolInput | None = None
+        if sym_key:
+            hit = _load_input_cache(store, sym_key)  # cached as a 1-element list
+            if hit:
+                built = hit[0]
+        if built is None:
+            reader = StoreReader(
+                store, exchange_id, timeframe, base_timeframe, funding_timeframe, start_ms, end_ms,
+                oi_timeframe=oi_tf,
+                # Pre-read funding_z's rolling lookback BEFORE the window start, so the feature is
+                # warm from the first row and its value at a ts never depends on the window depth.
+                funding_lookback_ms=feat_cfg.funding_z_lookback_ms,
             )
-            funding = store.read(
-                SeriesKey(exchange_id, FUNDING, symbol, funding_timeframe), start_ms, end_ms
-            )
-            inputs.append(
-                SymbolInput(
+            bars = reader.ohlcv(symbol)
+            if bars:  # no history in window ⇒ excluded from the run (but still advances progress)
+                frame = compute_features(symbol, reader, feat_cfg)
+                spread = store.read(
+                    SeriesKey(exchange_id, SPREAD, symbol, base_timeframe), start_ms, end_ms
+                )
+                funding = store.read(
+                    SeriesKey(exchange_id, FUNDING, symbol, funding_timeframe), start_ms, end_ms
+                )
+                raw = SymbolInput(
                     symbol=symbol,
                     bars=bars,
                     frame=frame,
@@ -331,22 +346,22 @@ def build_lake_inputs(
                     ],
                     activation_ts=0,
                 )
-            )
+                # Rebase THIS symbol now (same origin as the batch rebase → identical result), so
+                # the cached artifact is final and a resumed run needs no post-processing.
+                rebased = rebase_window([raw], lo, end_ms)
+                built = rebased[0] if rebased else None
+                if sym_key and built is not None:
+                    _save_input_cache(store, sym_key, [built])
+        if built is not None:
+            inputs.append(built)
+        # AFTER the symbol is built + cached: report progress (refreshes the worker liveness beacon
+        # by yielding the GIL, so a long build isn't falsely reaped) and let the handler cancel by
+        # raising — a raise here leaves the completed symbols cached, so the run is resumable.
         if on_progress is not None:
             on_progress(i + 1, n, symbol)
-    if not inputs:
-        return inputs
-    # The engine indexes bars by EPOCH TIME, so rebasing is not required for correctness; we
-    # still shift the window to a 0-based origin (aligned to the decision interval) so timestamps
-    # are small and deterministic across snapshots and match the reference series' convention.
-    # A symbol listed mid-window keeps its true offset from this origin (its first bar is NOT at
-    # ts 0) — the engine handles that natively.
-    iv = timeframe_ms(timeframe)
-    lo = (start_ms // iv) * iv
-    result = rebase_window(inputs, lo, end_ms)
-    if cache_key:
-        _save_input_cache(store, cache_key, result)
-    return result
+    if inputs and cache_key:
+        _save_input_cache(store, cache_key, inputs)
+    return inputs
 
 
 def prewarm_input_cache(

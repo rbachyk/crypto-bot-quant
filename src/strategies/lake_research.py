@@ -192,12 +192,18 @@ def validate_all_on_lake(
     settings: Settings | None = None,
     emit: Emit = _noop,
     progress: Callable[[int, int, str], None] | None = None,
+    on_build_progress: Callable[[int, int, str], None] | None = None,
 ) -> list[CandidateValidation]:
     """Validate every enabled candidate over a downloaded snapshot. One candidate failing
     (e.g. a cross-asset family needing a shape this path can't build) shelves only that one.
 
     ``emit`` gets a human line at each stage and ``progress(done, total, msg)`` is called as each
     candidate completes, so the long-running job is observable instead of an opaque CPU spin.
+
+    ``on_build_progress(done, total, symbol)`` fires as each symbol's inputs are built — the caller
+    wires it to report progress AND check cancellation, which also keeps the worker liveness beacon
+    fresh so a long (e.g. 5m/20-symbol) input build is not falsely reaped mid-run. It may RAISE to
+    cancel; the per-symbol input cache means the build resumes from where it stopped.
     """
     settings = settings or get_settings()
     strat_cfg = load_strategies_config()
@@ -221,6 +227,7 @@ def validate_all_on_lake(
         start_ms=data_cfg.window_start_ms,
         end_ms=data_cfg.window_end_ms,
         oi_timeframe=data_cfg.oi_grid,
+        on_progress=on_build_progress,
     )
     if not lake_inputs or all(not getattr(s, "bars", None) for s in lake_inputs):
         raise ValueError(

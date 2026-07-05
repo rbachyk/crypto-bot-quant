@@ -776,11 +776,20 @@ def _run_lake_strategy_validation(ctx: JobContext, params: dict) -> dict:
     ctx.progress(0, 1, "running real-data validation (backtest + walk-forward + stress)")
     # Stream per-stage/per-candidate progress into the job log + progress bar so an hours-long
     # run is observable instead of a silent CPU spin (the operator asked for this explicitly).
+    def _on_build(done: int, total: int, symbol: str) -> None:
+        # Fires per symbol during the (potentially long) input build. Reporting progress refreshes
+        # the worker liveness beacon (I/O yields the GIL to the heartbeat thread) so the build is
+        # not falsely reaped; check_cancelled makes Stop work. A raise here is fine — the per-symbol
+        # input cache means a re-run resumes from the symbols already built.
+        ctx.progress(done, max(total, 1), f"building inputs {done}/{total}: {symbol}")
+        ctx.check_cancelled()
+
     validations = validate_all_on_lake(
         data_cfg,
         timeframe=timeframe,
         emit=lambda msg: ctx.log(msg),
         progress=lambda done, total, msg: ctx.progress(done, max(total, 1), msg),
+        on_build_progress=_on_build,
     )
     written = persist_validations(
         validations,
