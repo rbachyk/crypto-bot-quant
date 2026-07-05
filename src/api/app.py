@@ -3900,9 +3900,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 else '<span class="badge blocked">reference only</span>'
             )
 
+        def _cand_link(cid: str) -> str:
+            return f'<a href="/dashboard/strategies/{_esc(cid)}"><code>{_esc(cid)}</code></a>'
+
         promoted_rows = [
             [
-                f"<code>{_esc(d.candidate_id)}</code>",
+                _cand_link(d.candidate_id),
                 _esc(d.family),
                 f"{d.expectancy_r:+.4f}",
                 _sides(d),
@@ -3916,6 +3919,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for d in details
         ]
         real_n = sum(1 for d in details if d.data_source == "lake")
+        # ALL validation verdicts at this version (incl. SHELVED) so a shelved candidate's evidence
+        # is reachable — each row links to the full per-fold / hold-out / stress detail.
+        from src.db.models import StrategyPromotion
+
+        with session_scope() as _s:
+            all_rows = (
+                _s.execute(
+                    select(StrategyPromotion)
+                    .where(StrategyPromotion.strategy_version == scfg.strategy_version)
+                    .order_by(desc(StrategyPromotion.promoted), StrategyPromotion.candidate_id)
+                )
+                .scalars()
+                .all()
+            )
+            verdict_rows = [
+                [
+                    _cand_link(r.candidate_id),
+                    _esc(r.family),
+                    (
+                        _status_badge("passed" if r.promoted else "failed")
+                        + (" promoted" if r.promoted else " shelved")
+                    ),
+                    f"{float(r.expectancy_r):+.4f}",
+                    _esc(dict(r.summary or {}).get("timeframe") or "—"),
+                    _esc("; ".join(list(r.shelved_reasons or [])[:2]) or "—"),
+                ]
+                for r in all_rows
+            ]
         pool_rows = [
             [f"<code>{_esc(c.id)}</code>", _esc(c.family), _esc(c.exit_profile)]
             for c in enabled_pool
@@ -3969,6 +4000,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             + f'<p class="meta">The top {cap} (ACTIVE) trade in live/demo; the rest stay '
             "promoted-but-benched. <b>reference only</b> = validated on fixtures (no real-data "
             "evidence yet); <b>REAL DATA</b> = validated on your downloaded snapshot.</p></div>"
+            '<div class="card"><h2>All validation verdicts (click a candidate for full evidence)</h2>'
+            + _rows_table(
+                ["Candidate", "Family", "Verdict", "Expectancy R", "TF", "Top reasons"],
+                verdict_rows,
+                "No validation runs yet.",
+            )
+            + '<p class="meta">Every candidate\'s last verdict at this version. Click through for '
+            "the per-fold + locked-hold-out walk-forward breakdown, deflated Sharpe, cost stress, "
+            "and the full backtest report — all captured during validation.</p></div>"
             '<div class="card"><h2>Candidate pool (enabled in config)</h2>'
             + _rows_table(
                 ["Candidate", "Family", "Exit profile"], pool_rows, "No enabled candidates."
@@ -3976,6 +4016,203 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             + "</div>"
         )
         return _page("Strategies", body)
+
+    @app.get("/dashboard/strategies/{candidate_id}", response_class=HTMLResponse)
+    def dashboard_strategy_detail(
+        candidate_id: str, user: str = Depends(require_dashboard_auth)
+    ) -> str:
+        """Full validation evidence for ONE candidate (promoted OR shelved) — every metric captured
+        during the last real-data validation: per-fold + locked-hold-out walk-forward breakdown,
+        deflated Sharpe, fee/slippage stress, and the full backtest report (expectancy, PF, cost
+        split, by-side). Answers 'why shelved / why the hold-out failed' without a re-run."""
+        from src.data.schema import ms_to_iso
+        from src.db.models import StrategyPromotion
+        from src.strategies.config import load_strategies_config
+
+        scfg = load_strategies_config()
+        with session_scope() as s:
+            row = (
+                s.execute(
+                    select(StrategyPromotion)
+                    .where(
+                        StrategyPromotion.candidate_id == candidate_id,
+                        StrategyPromotion.strategy_version == scfg.strategy_version,
+                    )
+                    .order_by(desc(StrategyPromotion.validated_at))
+                )
+                .scalars()
+                .first()
+            )
+            if row is None:
+                return _page(
+                    f"Strategy · {candidate_id}",
+                    '<div class="card"><p>No validation on record for '
+                    f"<code>{_esc(candidate_id)}</code> at version "
+                    f"<code>{_esc(scfg.strategy_version)}</code>. Run <b>Validate on REAL data</b> "
+                    'on the <a href="/dashboard/strategies">Strategies</a> page.</p></div>',
+                )
+            promoted = row.promoted
+            expectancy, family = float(row.expectancy_r), row.family
+            allow_long, allow_short = row.allow_long, row.allow_short
+            reasons = list(row.shelved_reasons or [])
+            engine_version = row.engine_version or "—"
+            validated_at = row.validated_at
+            summary = dict(row.summary or {})
+
+        wf = dict(summary.get("walk_forward") or {})
+        report = dict(summary.get("report") or {})
+        fee, slip = dict(summary.get("fee_stress") or {}), dict(summary.get("slippage_stress") or {})
+        data_source = summary.get("data_source", "")
+        timeframe = summary.get("timeframe", "") or "—"
+
+        def _d(ts: object) -> str:
+            return ms_to_iso(int(ts))[:16] if ts else "—"
+
+        sides = "/".join(x for x, on in (("long", allow_long), ("short", allow_short)) if on) or "—"
+        verdict = _status_badge("passed" if promoted else "failed") + (
+            " PROMOTED" if promoted else " SHELVED"
+        )
+        prov = "REAL DATA (lake)" if data_source == "lake" else "reference fixtures only"
+        header = _kv_card(
+            f"{candidate_id} — verdict",
+            [
+                ("verdict", verdict),
+                ("family", family),
+                ("expectancy R", f"{expectancy:+.4f}"),
+                ("sides", sides),
+                ("timeframe", timeframe),
+                ("data source", prov),
+                ("engine version", engine_version),
+                ("validated at", validated_at.strftime("%Y-%m-%d %H:%M") if validated_at else "—"),
+            ],
+        )
+        reasons_html = (
+            '<div class="card"><h2>Why shelved</h2><ul>'
+            + "".join(f"<li>{_esc(r)}</li>" for r in reasons)
+            + "</ul></div>"
+            if reasons
+            else ""
+        )
+
+        # ---- walk-forward: per-fold + locked hold-out --------------------------------------- #
+        of = dict(wf.get("overfitting") or {})
+        wf_head = _kv_card(
+            "Walk-forward",
+            [
+                ("passed", _status_badge("passed" if wf.get("passed") else "failed")),
+                ("folds passed", f"{wf.get('folds_passed', 0)} / {wf.get('n_folds', 0)}"),
+                ("deflated Sharpe", f"{float(of.get('deflated_sharpe', 0)):.3f}"),
+            ],
+        )
+        fold_rows: list[list] = []
+        for i, f in enumerate(wf.get("folds") or []):
+            fails = "; ".join(f.get("failures", []))
+            fold_rows.append([
+                f"#{f.get('index', i)}",
+                f"{_d(f.get('lo_ts'))} → {_d(f.get('hi_ts'))}",
+                f.get("trade_count", 0),
+                f"{float(f.get('expectancy_r', 0)):+.4f}",
+                f"{float(f.get('profit_factor', 0)):.2f}",
+                f"{float(f.get('max_drawdown', 0)):.3f}",
+                _status_badge("passed" if f.get("passed") else "failed")
+                + (f" <span class='meta'>{_esc(fails)}</span>" if fails else ""),
+            ])
+        ho = wf.get("holdout")
+        if ho:
+            fold_rows.append([
+                "<b>HOLD-OUT</b>",
+                f"{_d(ho.get('lo_ts'))} → {_d(ho.get('hi_ts'))}",
+                ho.get("trade_count", 0),
+                f"{float(ho.get('expectancy_r', 0)):+.4f}",
+                f"{float(ho.get('profit_factor', 0)):.2f}",
+                f"{float(ho.get('max_drawdown', 0)):.3f}",
+                _status_badge("passed" if ho.get("passed") else "failed")
+                + f" <span class='meta'>net {float(ho.get('net_pnl', 0)):+.2f}</span>",
+            ])
+        wf_card = (
+            '<div class="card"><h2>Walk-forward folds &amp; locked hold-out</h2>'
+            + wf_head
+            + _rows_table(
+                ["Fold", "Period (UTC)", "Trades", "Expectancy R", "PF", "Max DD", "Verdict"],
+                fold_rows,
+                "No walk-forward result (single side / skipped).",
+            )
+            + '<p class="meta">Each fold is a STABILITY check (edge present, expectancy&gt;0). The '
+            "locked HOLD-OUT is the most-recent 20% of the window by time, judged once on the full "
+            "economic criteria (expectancy positive net of costs) — its length scales with the "
+            "window, so a short window makes it a recent, thinner test.</p></div>"
+        )
+
+        # ---- cost stress -------------------------------------------------------------------- #
+        def _stress_row(label: str, d: dict) -> list:
+            passed = d.get("passed", float(d.get("stressed_expectancy_r", 0)) > 0)
+            return [
+                label,
+                f"{float(d.get('baseline_expectancy_r', 0)):+.4f}",
+                f"{float(d.get('stressed_expectancy_r', 0)):+.4f}",
+                _status_badge("passed" if passed else "failed"),
+            ]
+
+        stress_card = ""
+        if fee or slip:
+            srows = [_stress_row(n, d) for n, d in (("fee", fee), ("slippage", slip)) if d]
+            stress_card = (
+                '<div class="card"><h2>Cost stress</h2>'
+                + _rows_table(["Stress", "Baseline exp R", "Stressed exp R", "Verdict"], srows, "—")
+                + '<p class="meta">Expectancy re-run under adverse fees/slippage — a real edge '
+                "survives; an edge smaller than costs flips negative.</p></div>"
+            )
+
+        # ---- full backtest report ----------------------------------------------------------- #
+        report_card = ""
+        if report:
+            report_card = _kv_card(
+                "Backtest report (full window)",
+                [
+                    ("trades", report.get("trade_count", "—")),
+                    ("expectancy R", f"{float(report.get('expectancy_r', 0)):+.4f}"),
+                    ("profit factor", f"{float(report.get('profit_factor', 0)):.3f}"),
+                    ("net P&L", f"{float(report.get('net_pnl', 0)):+.2f}"),
+                    ("total return", f"{float(report.get('total_return', 0)):+.4f}"),
+                    ("max drawdown", f"{float(report.get('max_drawdown', 0)):.3f}"),
+                    ("avg win R", report.get("avg_win_r", "—")),
+                    ("avg loss R", report.get("avg_loss_r", "—")),
+                    ("planned RR (median)", report.get("planned_rr", "—")),
+                ],
+            )
+            cost = report.get("cost_breakdown")
+            if isinstance(cost, dict):
+                report_card += (
+                    '<div class="card"><h2>Cost breakdown</h2>'
+                    + _rows_table(["Component", "Value"], [[k, v] for k, v in cost.items()], "—")
+                    + "</div>"
+                )
+            bs = report.get("by_side")
+            if isinstance(bs, dict):
+                brows = [
+                    [
+                        side,
+                        f"{float(d.get('expectancy_r', 0)):+.4f}",
+                        f"{float(d.get('net_pnl', 0)):+.2f}",
+                        f"{float(d.get('profit_factor', 0)):.2f}",
+                    ]
+                    for side, d in bs.items()
+                ]
+                report_card += (
+                    '<div class="card"><h2>By side</h2>'
+                    + _rows_table(["Side", "Expectancy R", "Net P&L", "PF"], brows, "—")
+                    + "</div>"
+                )
+
+        body = (
+            header
+            + reasons_html
+            + wf_card
+            + stress_card
+            + report_card
+            + '<p class="meta"><a href="/dashboard/strategies">← back to strategies</a></p>'
+        )
+        return _page(f"Strategy · {candidate_id}", body)
 
     # ----- ML shadow ------------------------------------------------------- #
     @app.post("/api/shadow/run")
