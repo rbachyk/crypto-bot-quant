@@ -95,12 +95,15 @@ class Settings(BaseSettings):
     # beacon gone for `worker_heartbeat_ttl_sec` as a dead worker and re-queues its in-flight
     # jobs. TTL must exceed the heartbeat interval. `worker_queues` is a comma-separated list of
     # queue classes this worker serves ('' = serve all: ml, rl, backtest, data, gates, default).
-    # TTL is 120s (not 30s): the heartbeat runs in a daemon thread, so a CPU-bound Python stretch
-    # (e.g. building one symbol's features on a fine grid) can starve it of the GIL for tens of
-    # seconds between the build's per-symbol progress calls; a 30s TTL false-reaped those long
-    # builds into an infinite re-queue loop. 120s still detects a genuinely dead worker promptly.
+    # TTL is 600s (not 30s): the heartbeat runs in a daemon thread, so a CPU-bound Python stretch
+    # (building one symbol's 5m features, or one candidate's backtest/walk-forward over a 20-symbol
+    # multi-year 5m universe) can starve it of the GIL for MINUTES between the loop's per-symbol /
+    # per-candidate progress calls. A short TTL false-reaped those long steps into an infinite
+    # re-queue loop. 600s covers a single heavy step; the per-symbol input cache and per-candidate
+    # verdict cache make an interrupted run RESUME rather than restart, so this is the safety net,
+    # not the only defense. Still detects a genuinely dead worker within 10 min.
     worker_heartbeat_sec: int = 10
-    worker_heartbeat_ttl_sec: int = 120
+    worker_heartbeat_ttl_sec: int = 600
     worker_reaper_interval_sec: int = 30
     worker_queues: str = ""
     # How many jobs ONE worker process runs at once (a thread pool over its served queues). 1 = the

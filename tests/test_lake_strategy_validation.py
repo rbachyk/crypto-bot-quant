@@ -72,6 +72,32 @@ def test_validate_all_on_lake_returns_wellformed_verdicts(tmp_path) -> None:
             assert v.shelved_reasons  # a shelve always explains why
 
 
+def test_validate_all_on_lake_resumes_from_candidate_cache(tmp_path, monkeypatch) -> None:
+    """A validation interrupted mid-batch RESUMES from the candidates already validated — each
+    verdict is cached, so a re-run over the SAME inputs loads them and never re-validates (the fix
+    for the 5m run that re-did every candidate after each reap)."""
+    import src.strategies.lake_research as lr
+
+    store = SeriesStore(tmp_path)
+    iv = timeframe_ms(TF)
+    h1 = timeframe_ms("1h")
+    start = (1_700_000_000_000 // h1) * h1
+    end = start + 600 * iv
+    _seed_lake(store, start, end)
+
+    first = validate_all_on_lake(_cfg(start, end), timeframe=TF, symbols=[SYM], store=store)
+    assert first
+    assert (tmp_path / "validation_cache").exists()
+
+    def _boom(*_a, **_k):
+        raise AssertionError("validate_candidate_on_lake must NOT re-run — cache must resume")
+
+    monkeypatch.setattr(lr, "validate_candidate_on_lake", _boom)
+    second = validate_all_on_lake(_cfg(start, end), timeframe=TF, symbols=[SYM], store=store)
+    assert [v.candidate_id for v in second] == [v.candidate_id for v in first]
+    assert [v.status for v in second] == [v.status for v in first]
+
+
 def test_no_edge_candidate_shelves_cleanly_without_misleading_cascade(tmp_path) -> None:
     """When neither side clears the expectancy floor, the candidate is shelved with the SINGLE
     meaningful reason (per-side expectancy) and the downstream gates are skipped — NOT buried

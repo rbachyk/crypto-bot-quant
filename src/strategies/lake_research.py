@@ -16,12 +16,16 @@ Requires a snapshot to be downloaded first (dashboard Data page → Download, or
 
 from __future__ import annotations
 
+import hashlib
+import json
+import pickle
 from collections.abc import Callable
+from pathlib import Path
 
 import structlog
 
 from src.backtest.config import BacktestConfig, load_backtest_config
-from src.backtest.service import build_lake_inputs, run_engine
+from src.backtest.service import _input_cache_enabled, build_lake_inputs, run_engine
 from src.backtest.stress import fee_stress, slippage_stress
 from src.backtest.walkforward import pre_holdout_inputs, run_walk_forward
 from src.config import Settings, get_settings
@@ -183,6 +187,49 @@ def validate_candidate_on_lake(
     )
 
 
+def _validation_cache_dir(store: SeriesStore) -> Path:
+    return store.root.parent / "validation_cache"
+
+
+def _candidate_cache_key(cand, strategy_version: str, engine: str, tf: str, lake_inputs) -> str:
+    """Content key for ONE candidate's verdict: the candidate + strategy/engine version + timeframe
+    + a fingerprint of the exact inputs (per-symbol bar count and first/last ts). Any change to the
+    data, window, config version or engine invalidates it, so a cache HIT is always a verdict on the
+    identical run."""
+    shape = sorted(
+        (s.symbol, len(s.bars),
+         s.bars[0]["ts"] if s.bars else -1, s.bars[-1]["ts"] if s.bars else -1)
+        for s in lake_inputs
+    )
+    sig = {"cand": cand.id, "ver": strategy_version, "eng": engine, "tf": tf, "shape": shape}
+    return hashlib.sha256(
+        json.dumps(sig, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:32]
+
+
+def _load_candidate_cache(store: SeriesStore, key: str) -> CandidateValidation | None:
+    path = _validation_cache_dir(store) / f"{key}.pkl"
+    if not path.exists():
+        return None
+    try:
+        with path.open("rb") as fh:
+            return pickle.load(fh)  # noqa: S301 - our own cache file in our own volume
+    except Exception:  # noqa: BLE001 - corrupt/incompatible → re-validate
+        return None
+
+
+def _save_candidate_cache(store: SeriesStore, key: str, v: CandidateValidation) -> None:
+    try:
+        d = _validation_cache_dir(store)
+        d.mkdir(parents=True, exist_ok=True)
+        tmp = d / f"{key}.pkl.tmp"
+        with tmp.open("wb") as fh:
+            pickle.dump(v, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        tmp.replace(d / f"{key}.pkl")
+    except Exception:  # noqa: BLE001 - cache is best-effort
+        pass
+
+
 def validate_all_on_lake(
     data_cfg: DataConfig,
     *,
@@ -245,22 +292,41 @@ def validate_all_on_lake(
         timeframe=tf,
     )
 
+    from src.backtest.engine import ENGINE_VERSION
+
     candidates = list(strat_cfg.enabled_candidates())
     total = len(candidates)
+    engine = ENGINE_VERSION
+    use_cache = _input_cache_enabled()
     out: list[CandidateValidation] = []
     for i, cand in enumerate(candidates):
+        # Report progress FIRST: the caller wires this to refresh the worker liveness beacon (so a
+        # long per-candidate backtest isn't false-reaped) AND to check cancellation. It may raise to
+        # cancel — every candidate already validated this run is cached, so a re-run resumes.
         if progress is not None:
             progress(i, total, f"validating {cand.id} ({i + 1}/{total})")
         emit(f"[{i + 1}/{total}] validating {cand.id} ({cand.family})")
+        # Per-candidate RESULT cache: a verdict is a pure function of (candidate + versions +
+        # inputs), so a run interrupted mid-batch RESUMES from the candidates already done instead
+        # of re-validating all 6 from scratch — the failure that kept the 5m validation looping.
+        ckey = (
+            _candidate_cache_key(cand, strat_cfg.strategy_version, engine, tf, lake_inputs)
+            if use_cache
+            else None
+        )
+        cached = _load_candidate_cache(store, ckey) if ckey else None
+        if cached is not None:
+            emit(f"[{i + 1}/{total}] {cand.id}: cached verdict ({cached.status})")
+            out.append(cached)
+            continue
         try:
-            out.append(
-                validate_candidate_on_lake(cand, strat_cfg, cfg, meta, lake_inputs, emit=emit)
-            )
+            v = validate_candidate_on_lake(cand, strat_cfg, cfg, meta, lake_inputs, emit=emit)
         except Exception as exc:  # noqa: BLE001 - one bad candidate must not abort the batch
             emit(f"[{i + 1}/{total}] {cand.id} ERRORED: {exc}")
-            out.append(
-                _shelved(cand, strat_cfg.strategy_version, f"real-data validation error: {exc}")
-            )
+            v = _shelved(cand, strat_cfg.strategy_version, f"real-data validation error: {exc}")
+        if ckey:
+            _save_candidate_cache(store, ckey, v)
+        out.append(v)
     if progress is not None:
         progress(total, total, "all candidates validated")
     return out

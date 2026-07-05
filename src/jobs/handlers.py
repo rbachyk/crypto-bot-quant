@@ -784,11 +784,17 @@ def _run_lake_strategy_validation(ctx: JobContext, params: dict) -> dict:
         ctx.progress(done, max(total, 1), f"building inputs {done}/{total}: {symbol}")
         ctx.check_cancelled()
 
+    def _on_candidate(done: int, total: int, msg: str) -> None:
+        # Per-candidate: refresh the beacon (I/O yields the GIL) so a long backtest isn't reaped,
+        # and make Stop work during validation too. A raise resumes from the per-candidate cache.
+        ctx.progress(done, max(total, 1), msg)
+        ctx.check_cancelled()
+
     validations = validate_all_on_lake(
         data_cfg,
         timeframe=timeframe,
         emit=lambda msg: ctx.log(msg),
-        progress=lambda done, total, msg: ctx.progress(done, max(total, 1), msg),
+        progress=_on_candidate,
         on_build_progress=_on_build,
     )
     written = persist_validations(
