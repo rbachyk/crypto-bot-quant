@@ -4065,8 +4065,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         data_source = summary.get("data_source", "")
         timeframe = summary.get("timeframe", "") or "—"
 
+        # Walk-forward folds are rebased to a 0-based origin, so raw ts render as 1970. Recover real
+        # calendar dates: the max fold/hold-out ts maps to the window END (persisted), so the rebase
+        # origin = window_end - max_rebased_ts, and real_ts = rebased_ts + origin.
+        window = summary.get("window") or []
+        _all_hi = [f.get("hi_ts") for f in (wf.get("folds") or []) if f.get("hi_ts") is not None]
+        if wf.get("holdout") and wf["holdout"].get("hi_ts") is not None:
+            _all_hi.append(wf["holdout"]["hi_ts"])
+        _origin = (int(window[1]) - max(_all_hi)) if (len(window) == 2 and _all_hi) else 0
+
         def _d(ts: object) -> str:
-            return ms_to_iso(int(ts))[:16] if ts else "—"
+            return ms_to_iso(int(ts) + _origin)[:16] if ts is not None else "—"
 
         sides = "/".join(x for x, on in (("long", allow_long), ("short", allow_short)) if on) or "—"
         verdict = _status_badge("passed" if promoted else "failed") + (

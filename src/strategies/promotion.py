@@ -51,6 +51,7 @@ def persist_validations(
     *,
     data_source: str = "reference",
     timeframe: str = "",
+    window: list[int] | None = None,
 ) -> int:
     """Upsert a StrategyPromotion row per validation (keyed by candidate + version).
 
@@ -94,6 +95,9 @@ def persist_validations(
                     "side_decision": v.side_decision.to_dict(),
                     "data_source": data_source,
                     "timeframe": timeframe,
+                    # Absolute [start, end] ms of the validation window. WF folds are rebased to a
+                    # 0-based origin, so the dashboard adds this back to show REAL calendar dates.
+                    "window": list(window) if window else None,
                     # Full per-run metrics bundle so a verdict is inspectable after the fact (equity
                     # & drawdown curves, gross P/L, avg win/loss R, planned vs realized RR,
                     # breakdowns by symbol/side/strategy/regime/session, cost split) plus the
