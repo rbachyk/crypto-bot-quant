@@ -18,12 +18,18 @@ from __future__ import annotations
 import math
 import os
 import statistics
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from src.data.schema import OHLCV, SeriesKey
-from src.data.store import SeriesStore
-from src.strategies.config import load_strategies_config
+# Make the repo root importable when run as a plain script (python scripts/x.py adds scripts/ to
+# sys.path, not the repo root), so `import src...` resolves without needing PYTHONPATH / -m.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
+
+from src.data.schema import OHLCV, SeriesKey  # noqa: E402
+from src.data.store import SeriesStore  # noqa: E402
+from src.strategies.config import load_strategies_config  # noqa: E402
 
 TF = "4h"
 SHORT = 12  # rv_short window (configs/features.yaml windows.short)
@@ -49,11 +55,11 @@ def _iso(ms: int) -> str:
 
 
 def _store() -> SeriesStore:
-    # SeriesStore appends "/series" itself, so pass the datalake ROOT (the dir CONTAINING series/).
-    for root in (os.environ.get("DATA_LAKE_PATH"), "var/datalake", "/app/var/datalake"):
-        if root and (Path(root) / "series").exists():
-            return SeriesStore(Path(root))
-    raise SystemExit("no datalake found (set DATA_LAKE_PATH)")
+    # Resolve the lake the way Settings.data_lake_path defaults (env DATA_LAKE_PATH, else
+    # REPO_ROOT/var/datalake) WITHOUT instantiating Settings — the diagnostic must not depend on
+    # dashboard/secret config just to read parquet. SeriesStore appends "/series" to the root.
+    root = os.environ.get("DATA_LAKE_PATH") or str(_REPO_ROOT / "var" / "datalake")
+    return SeriesStore(Path(root))
 
 
 def _closes(store: SeriesStore, sym: str, lo: int, hi: int) -> dict[int, float]:
