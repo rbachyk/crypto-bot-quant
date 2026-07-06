@@ -21,7 +21,7 @@
 version: 1
 
 strategies:
-  strategy_version: strat_0007  # _0006: basis exit OFF; _0007: basis band entry (premium_cap 0.0030, drop repricing tail)
+  strategy_version: strat_0008  # _0007: basis band entry; _0008: lead_lag vol-relative entry gate (leader_ret_vol_mult 2.0)
 
   # Long/short expectancy is computed separately for every candidate; a side whose
   # out-of-sample expectancy_r is at or below this floor is DISABLED before
@@ -44,7 +44,14 @@ strategies:
       # time-stop, NO fixed TP (tp_frac large; the lagged move is the edge).
       exit_profile: momentum
       params:
-        leader_ret_threshold: 0.0025  # leader's last-bar return must exceed this
+        leader_ret_threshold: 0.0025  # absolute FLOOR (cost gate); the real gate is vol-relative
+        # Vol-relative significance: the leader move must also exceed k × the leader's own recent
+        # return volatility (rv_short), i.e. a k-σ move. k=2.0 is the classic 2-sigma significance
+        # prior — NOT fit to pass (a fixed 0.25% threshold is stale across regimes: it fires on
+        # noise when the leader is hot and almost never when it is calm). On 4h/1h the σ term binds
+        # (BTC bar-vol ≫ 0.25%), so entries track "significant" leader moves rather than any tick.
+        # Set to 0.0 to disable and recover the plain fixed-threshold entry.
+        leader_ret_vol_mult: 2.0
         # Position-size scale: this edge is real OOS (hold-out +0.098R, PF 1.19) but HOT — at the
         # account standard (0.5%/trade) its drawdown is ~43%, over the 25% gate. Sized to 0.4× the
         # standard targets ~20% max drawdown (dd is ~linear in size; expectancy_r/PF unchanged).

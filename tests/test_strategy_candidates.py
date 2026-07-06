@@ -104,6 +104,36 @@ def test_momentum_tp_r_mult_sets_a_reachable_target_in_r() -> None:
     assert sig.trail_frac > 0  # trailing stop kept as the backstop
 
 
+def test_lead_lag_entry_is_volatility_relative() -> None:
+    """The lead_lag entry gate is max(abs floor, k × leader recent vol) — a fixed absolute
+    threshold goes stale across regimes. A leader move above the absolute floor but BELOW k σ of
+    the leader's own recent volatility (a hot regime where that move is just noise) must NOT fire;
+    the SAME absolute move in a calm regime (small vol) must fire. With no vol feature the gate
+    falls back to the plain absolute floor (backward-compatible)."""
+    cand, strat = _cand("lead_lag_xasset")
+    leader = str(cand.fixture.values["leader"])
+    follower = "ETH/USDT:USDT"
+    floor = cand.params.extra["leader_ret_threshold"]
+    k = cand.params.extra["leader_ret_vol_mult"]
+    assert k > 0  # the vol-relative gate is configured
+    row = {"atr_pct": 0.02}
+    move = floor * 3  # comfortably above the absolute cost floor
+
+    # HOT regime: k×vol is well above the move → the move is regime-noise → NO entry.
+    hot_vol = (move / k) * 1.5  # k×hot_vol = 1.5×move > move
+    hot = strat.evaluate_portfolio(follower, row, {leader: {"ret_1": move, "rv_short": hot_vol}})
+    assert hot is None
+
+    # CALM regime: same move, small vol → k×vol below the move → a significant move → entry fires.
+    calm_vol = (move / k) * 0.5  # k×calm_vol = 0.5×move < move
+    sig = strat.evaluate_portfolio(follower, row, {leader: {"ret_1": move, "rv_short": calm_vol}})
+    assert sig is not None and sig.side == 1
+
+    # No vol feature present → fall back to the absolute floor (a move just over it still fires).
+    sig_fallback = strat.evaluate_portfolio(follower, row, {leader: {"ret_1": floor * 1.01}})
+    assert sig_fallback is not None
+
+
 def test_basis_band_entry_skips_the_extreme_repricing_tail() -> None:
     """basis fades a dislocation only inside the reversion band [threshold, cap]: a moderate premium
     fires, but an EXTREME one (> premium_cap, i.e. one-way repricing) is skipped — both sides."""

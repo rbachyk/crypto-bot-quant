@@ -241,7 +241,7 @@ class LeadLagStrategy(_BaseCandidate):
             market_condition="impulse/trending leader; adequate follower liquidity",
             edge_source="cross-asset information lag (lead-lag response)",
             data_requirements=("leader OHLCV/returns", "follower OHLCV/returns"),
-            entry="|leader last-bar return| > threshold ⇒ follower in the leader's direction",
+            entry="|leader last-bar return| > max(abs floor, k×leader vol) ⇒ follower follows",
             exit="time-stop after a few bars (capture the lagged burst); no fixed TP; initial SL",
             invalidation="follower fails to follow and hits the initial SL",
             risk_assumptions="explicit initial SL (stop_frac) anchors per-trade sizing",
@@ -270,11 +270,26 @@ class LeadLagStrategy(_BaseCandidate):
         if leader_row is None:
             return None
         leader_ret = float(leader_row.get("ret_1", 0.0))
-        threshold = self.params.extra["leader_ret_threshold"]
-        if abs(leader_ret) < threshold:
+        abs_floor = self.params.extra["leader_ret_threshold"]
+        # Volatility-relative significance gate. A FIXED absolute return threshold goes stale across
+        # vol regimes — too rare to fire when the leader is quiet, and all-noise when it is hot (the
+        # same 0.25% is a 3σ event in a calm week and a coin-flip in a volatile one). So the leader
+        # move must clear BOTH: the absolute floor (economic — must beat round-trip cost) AND
+        # `leader_ret_vol_mult` × the leader's own recent return volatility (statistical — a k-σ
+        # move, significant relative to the current regime). max() lets whichever is binding adapt:
+        # in a hot regime the σ term dominates and rejects noise; in a calm regime the floor holds.
+        # vol_mult = 0 (or no vol feature) ⇒ falls back to the original fixed-threshold behaviour.
+        vol_mult = float(self.params.extra.get("leader_ret_vol_mult", 0.0))
+        leader_vol = float(leader_row.get("rv_short", 0.0))
+        gate = abs_floor
+        if vol_mult > 0.0 and leader_vol > 0.0:
+            gate = max(abs_floor, vol_mult * leader_vol)
+        if abs(leader_ret) < gate:
             return None
         side = 1 if leader_ret > 0 else -1
-        return self._sided(side, f"leader {leader} ret_1={leader_ret:+.5f} ⇒ follow", row)
+        return self._sided(
+            side, f"leader {leader} ret_1={leader_ret:+.5f} (gate {gate:.5f}) ⇒ follow", row
+        )
 
 
 # --------------------------------------------------------------------------- #
