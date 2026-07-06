@@ -503,43 +503,58 @@ class LiveCandidateFeed:
             self.seed()
         last_ts = dict.fromkeys(self.symbols, -1)
         emitted = 0
+        last_advance_ms = int(time.time() * 1000)  # wall clock of the last yielded snapshot
+        last_stall_log_ms = 0  # throttle the stall warning
+        stall_ms = 2 * timeframe_ms(self.timeframe)
         while self.max_groups is None or emitted < self.max_groups:
             if self._should_stop is not None and self._should_stop():
                 return
             self._maybe_refresh_point_in_time()  # keep funding/OI/spread current (funding_z, carry)
             now = int(time.time() * 1000)
             try:
-                halted = self.data_manager is not None and self.data_manager.poll(now).exchange_halt
+                health = self.data_manager.poll(now) if self.data_manager is not None else None
             except Exception:  # noqa: BLE001 - a poll error must not kill the stream
                 _log.warning("live_feed_poll_error", exc_info=True)
                 if self._sleep_or_stop():
                     return
                 continue
-            if halted:
-                if self.poll_sec > 0 and not self._sleep_or_stop():
-                    continue
-                return
             advanced = []
-            for sym in self.symbols:
-                try:
-                    got = self._advance_symbol(sym, last_ts)
-                except Exception:  # noqa: BLE001 - one bad symbol must not end the session
-                    _log.warning("live_feed_symbol_error", symbol=sym, exc_info=True)
-                    continue
-                if got is not None:
-                    advanced.append(got)
+            if not (health is not None and health.exchange_halt):
+                for sym in self.symbols:
+                    try:
+                        got = self._advance_symbol(sym, last_ts)
+                    except Exception:  # noqa: BLE001 - one bad symbol must not end the session
+                        _log.warning("live_feed_symbol_error", symbol=sym, exc_info=True)
+                        continue
+                    if got is not None:
+                        advanced.append(got)
             if advanced:
                 ts = max(int(r["decision_ts"]) for _, _, r in advanced)
                 bars_at = {
                     s: self._reader.ohlcv(s)[-1] for s in self.symbols if self._reader.ohlcv(s)
                 }
                 emitted += 1
+                last_advance_ms = now
                 yield (ts, bars_at, dict(self._latest_rows))
-            elif self.poll_sec > 0:
+                continue
+            # No new closed bar this cycle (halt, or the feed served nothing new). A stalled feed
+            # used to look identical to a hung loop — frozen ticks, no logs — so emit a THROTTLED
+            # warning once the gap exceeds the stale window, naming the reason (disconnect / all
+            # symbols stale / no new bar), so the operator can tell a data-feed stall from a hang.
+            if now - last_advance_ms > stall_ms and now - last_stall_log_ms > 300_000:
+                last_stall_log_ms = now
+                _log.warning(
+                    "live_feed_stalled",
+                    timeframe=self.timeframe,
+                    stalled_minutes=round((now - last_advance_ms) / 60_000, 1),
+                    reason=(health.reason if health else "") or "no new closed bar from the feed",
+                    stale_symbols=len(health.stale) if health else 0,
+                )
+            if self.poll_sec > 0:
                 if self._sleep_or_stop():
                     return
-            else:
-                return
+                continue
+            return
 
     def symbol_inputs(self) -> dict:
         """Per-symbol ``SymbolInput`` (bars + features + funding + spread) from the rolling window —
