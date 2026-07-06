@@ -148,3 +148,43 @@ def test_partial_staleness_does_not_halt_all() -> None:
     h = mgr.poll(2_000_000 + 3 * IV)
     assert h.fresh == ["BTC/USDT:USDT"] and h.stale == ["ETH/USDT:USDT"]
     assert not h.exchange_halt  # some symbols still fresh → no exchange-wide halt
+
+
+def test_poll_bails_mid_cycle_when_should_stop_fires() -> None:
+    """A Stop pressed while the exchange is slow must be honored mid-poll — poll checks should_stop
+    BETWEEN per-symbol fetches, so a many-symbol cycle can't sit through every fetch before the
+    loop's top-level cancel check runs (the freeze that made stuck sessions un-cancellable)."""
+    fetched: list[str] = []
+
+    class RecordingSource(FakeSource):
+        def latest_bar(self, symbol):
+            fetched.append(symbol)
+            return super().latest_bar(symbol)
+
+    src = RecordingSource()
+    for s in SYMS:
+        src.push(s, 1_000_000)
+    mgr = _mgr(src)
+    # Stop is already requested → poll must fetch NO symbols and return immediately.
+    mgr.poll(1_000_000, should_stop=lambda: True)
+    assert fetched == []
+
+
+def test_poll_tolerates_a_symbol_fetch_error_without_killing_the_session() -> None:
+    """A transient per-symbol fetch failure is caught → that symbol goes stale (not fresh) and the
+    exception does NOT propagate, so one bad REST call degrades to a visible halt-and-sleep instead
+    of freezing/killing a live session. Other symbols still update."""
+
+    class FlakySource(FakeSource):
+        def latest_bar(self, symbol):
+            if symbol == "BTC/USDT:USDT":
+                raise TimeoutError("simulated hung fetch")
+            return super().latest_bar(symbol)
+
+    src = FlakySource()
+    src.push("ETH/USDT:USDT", 1_000_000)
+    mgr = _mgr(src)
+    h = mgr.poll(1_000_000)  # must not raise
+    assert "ETH/USDT:USDT" in h.fresh  # healthy symbol still advanced
+    assert "BTC/USDT:USDT" in h.stale  # the failing fetch left BTC stale
+    assert not mgr.is_fresh("BTC/USDT:USDT")

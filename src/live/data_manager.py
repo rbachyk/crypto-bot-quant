@@ -15,9 +15,13 @@ deterministic.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+import structlog
+
+_log = structlog.get_logger("live.data_manager")
 
 
 class FeedSource(Protocol):
@@ -68,15 +72,29 @@ class LiveDataManager:
         self.stale_after_ms = int(stale_after_intervals) * int(interval_ms)
         self.ws_rest_tol_bps = ws_rest_tol_bps
         self._state: dict[str, SymbolFreshness] = {s: SymbolFreshness() for s in self.symbols}
+        self._last_err_log_ms = -1  # throttle per-symbol fetch-error logging
 
     # -- polling --------------------------------------------------------- #
-    def poll(self, now_ms: int) -> DataHealth:
-        """Pull the latest bar per symbol, update freshness, and compute halts."""
+    def poll(self, now_ms: int, *, should_stop: Callable[[], bool] | None = None) -> DataHealth:
+        """Pull the latest bar per symbol, update freshness, and compute halts.
+
+        ``should_stop`` (the live loop's cancel/kill check) is polled BETWEEN per-symbol fetches so
+        a Stop is honored mid-cycle even when the exchange is slow — otherwise a many-symbol poll
+        could sit through several fetch timeouts before the loop's top-level cancel check is reached
+        (the freeze that made stuck basket sessions un-cancellable). A per-symbol fetch that raises
+        is treated as "no fresh bar" (the symbol goes stale) and logged, not propagated — a
+        transient blip degrades to a visible halt-and-sleep instead of killing the session."""
         connected = bool(self.source.connected())
         for sym in self.symbols:
+            if should_stop is not None and should_stop():
+                break  # bail mid-cycle; the loop's top-level check will exit next iteration
             st = self._state[sym]
             if connected:
-                got = self.source.latest_bar(sym)
+                try:
+                    got = self.source.latest_bar(sym)
+                except Exception as exc:  # noqa: BLE001 - transient fetch failure ⇒ symbol stale
+                    got = None
+                    self._log_fetch_error(sym, exc, now_ms)
                 if got is not None:
                     bar_ts, _row = got
                     if bar_ts > st.last_bar_ts:
@@ -108,6 +126,18 @@ class LiveDataManager:
             stale=stale,
             exchange_halt=halt,
             reason=reason,
+        )
+
+    def _log_fetch_error(self, symbol: str, exc: Exception, now_ms: int) -> None:
+        """Surface a live-feed fetch failure at most once per 5 min so a persistent outage is
+        visible (the stall used to be totally silent) without flooding the log every poll."""
+        if self._last_err_log_ms >= 0 and now_ms - self._last_err_log_ms < 300_000:
+            return
+        self._last_err_log_ms = now_ms
+        _log.warning(
+            "live_feed_fetch_error",
+            symbol=symbol,
+            error=f"{type(exc).__name__}: {exc}",
         )
 
     # -- queries (Section 8: prevent feature calc from stale data) ------- #
@@ -172,7 +202,20 @@ class CcxtPollingSource:
     ):
         from src.data.ccxt_source import CcxtDataSource
 
-        self._src = CcxtDataSource(exchange_id, client=client, exchange_env=exchange_env)
+        # Live polling, NOT a download: fail fast. The download source retries 8× with backoff to
+        # 60s (up to ~3min of uninterruptible sleep per call) — appropriate for a multi-year fetch,
+        # fatal for a live poll loop that must stay cancellable. Here a call that fails is retried
+        # by the NEXT poll cycle a few seconds later, so cap retries low, keep the backoff short,
+        # and set a hard socket timeout so one hung fetch can't freeze the session (the 24h freeze).
+        self._src = CcxtDataSource(
+            exchange_id,
+            client=client,
+            exchange_env=exchange_env,
+            max_retries=2,
+            retry_base_sec=0.5,
+            retry_max_sec=2.0,
+            timeout_ms=15_000,
+        )
         self._ex = exchange_id
         self.timeframe = timeframe
 

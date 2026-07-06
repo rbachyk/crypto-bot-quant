@@ -531,7 +531,7 @@ def test_live_loop_halts_on_data_integrity_failure(tmp_path) -> None:
     feed = _feed(tmp_path)
 
     class _HaltingDataManager:
-        def poll(self, now_ms):
+        def poll(self, now_ms, *, should_stop=None):
             return DataHealth(ts=now_ms, connected=False, exchange_halt=True, reason="disconnected")
 
     result = LiveLoop(mode="paper", data_manager=_HaltingDataManager()).run(feed, session_name="t")

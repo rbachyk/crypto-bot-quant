@@ -83,6 +83,7 @@ class CcxtDataSource(DataSource):
         max_retries: int = 8,
         retry_base_sec: float = 1.0,
         retry_max_sec: float = 60.0,
+        timeout_ms: int | None = None,
         exchange_env: str = "live",
     ) -> None:
         self.exchange_id = exchange_id
@@ -101,13 +102,18 @@ class CcxtDataSource(DataSource):
             import ccxt
 
             klass = getattr(ccxt, exchange_id)
-            self._ex = klass(
-                {
-                    "enableRateLimit": enable_rate_limit,
-                    "rateLimit": max(rate_limit_ms, 1),  # ms between requests (conservative)
-                    "options": {"defaultType": "swap"},
-                }
-            )
+            opts = {
+                "enableRateLimit": enable_rate_limit,
+                "rateLimit": max(rate_limit_ms, 1),  # ms between requests (conservative)
+                "options": {"defaultType": "swap"},
+            }
+            # Hard per-request socket timeout. Without it ccxt falls back to its own default, which
+            # did NOT bound a dead-socket read on the VPS live feed (a basket poll blocked ~24h with
+            # no timeout firing). The live feed passes a short timeout so a hung fetch fails fast
+            # and the poll loop stays responsive to Stop; downloads leave it None (ccxt default).
+            if timeout_ms is not None:
+                opts["timeout"] = int(timeout_ms)
+            self._ex = klass(opts)
             # Route market data to the right environment for TESTNET (its klines must match the
             # testnet venue the orders hit). demo + live deliberately read MAINNET data — Bybit's
             # demo endpoint serves no public klines (the silent tick-0 bug), and demo trading is

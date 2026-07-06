@@ -312,7 +312,7 @@ def test_continuous_session_resumes_after_data_integrity_halt() -> None:
         def __init__(self) -> None:
             self.polls = 0
 
-        def poll(self, now_ms):
+        def poll(self, now_ms, *, should_stop=None):
             self.polls += 1
             halted = self.polls <= 3  # down for 3 cycles, then healthy
             return DataHealth(

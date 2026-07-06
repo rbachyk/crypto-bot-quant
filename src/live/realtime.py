@@ -420,7 +420,8 @@ class LiveCandidateFeed:
             now = int(time.time() * 1000)
             try:
                 halted = (
-                    self.data_manager is not None and self.data_manager.poll(now).exchange_halt
+                    self.data_manager is not None
+                    and self.data_manager.poll(now, should_stop=self._should_stop).exchange_halt
                 )
             except Exception:  # noqa: BLE001 - a data-manager poll error must not kill the stream
                 _log.warning("live_feed_poll_error", exc_info=True)
@@ -512,7 +513,11 @@ class LiveCandidateFeed:
             self._maybe_refresh_point_in_time()  # keep funding/OI/spread current (funding_z, carry)
             now = int(time.time() * 1000)
             try:
-                health = self.data_manager.poll(now) if self.data_manager is not None else None
+                health = (
+                    self.data_manager.poll(now, should_stop=self._should_stop)
+                    if self.data_manager is not None
+                    else None
+                )
             except Exception:  # noqa: BLE001 - a poll error must not kill the stream
                 _log.warning("live_feed_poll_error", exc_info=True)
                 if self._sleep_or_stop():
