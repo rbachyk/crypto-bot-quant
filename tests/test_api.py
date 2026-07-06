@@ -242,20 +242,28 @@ def test_open_positions_panel_excludes_real_venue_sessions() -> None:
 
 
 @requires_db
+@requires_redis
 def test_run_basket_rejects_duplicate_session() -> None:
-    """A second Start for a strategy that already has a running basket session is refused (409) —
-    so a strategy can't be double-booked once continuous sessions run concurrently."""
+    """A second Start for a strategy that already has a GENUINELY-ALIVE basket session (its job id
+    in a live worker's processing list) is refused (409) — no double-booking once sessions run."""
     import uuid
 
+    from src.config import get_settings
     from src.db.base import session_scope
     from src.db.models import Job, JobStatus
+    from src.jobs import JobQueue
+    from src.jobs.routing import processing_key, worker_key
 
+    rc = JobQueue(get_settings()).redis
     jid = "test-dup-" + uuid.uuid4().hex[:8]
+    wid = "test-worker-" + uuid.uuid4().hex[:8]
     with session_scope() as s:
         s.add(Job(
             job_id=jid, job_type="run_basket_paper_session", status=JobStatus.RUNNING,
             input_params={"strategy": "funding_carry"},
         ))
+    rc.lpush(processing_key(wid), jid)  # claimed by a worker...
+    rc.set(worker_key(wid), wid, ex=60)  # ...whose liveness beacon is fresh ⇒ genuinely alive
     try:
         r = client.post(
             "/api/paper/run-basket",
@@ -264,10 +272,50 @@ def test_run_basket_rejects_duplicate_session() -> None:
         )
         assert r.status_code == 409
     finally:
+        rc.delete(processing_key(wid))
+        rc.delete(worker_key(wid))
         with session_scope() as s:
             obj = s.get(Job, jid)
             if obj is not None:
                 s.delete(obj)
+
+
+@requires_redis
+def test_orphaned_session_is_auto_cleared_and_does_not_block() -> None:
+    """A RUNNING session row with NO live owner (worker killed before the terminal write) is a
+    ghost: the Start guard self-heals it to FAILED and does NOT block — so a killed session can't
+    silently wedge every future Start."""
+    import uuid
+
+    from src.config import get_settings
+    from src.db.base import session_scope
+    from src.db.models import Job, JobStatus
+    from src.jobs import JobQueue
+
+    q = JobQueue(get_settings())
+    q.redis.delete("qbot:queue:live")  # ensure the ghost isn't sitting in the pending queue
+    jid = "test-ghost-" + uuid.uuid4().hex[:8]
+    with session_scope() as s:
+        s.add(Job(
+            job_id=jid, job_type="run_basket_paper_session", status=JobStatus.RUNNING,
+            input_params={"strategy": "funding_carry"},
+        ))
+    new_id = None
+    try:
+        r = client.post(
+            "/api/paper/run-basket",
+            params={"strategy": "funding_carry", "timeframe": ""},
+            auth=AUTH, headers={"sec-fetch-site": "same-origin"},
+        )
+        assert r.status_code != 409  # the ghost did NOT block the new session
+        with session_scope() as s:
+            assert s.get(Job, jid).status == JobStatus.FAILED  # ghost auto-cleared
+    finally:
+        with session_scope() as s:
+            for _id in (jid, new_id):
+                obj = s.get(Job, _id) if _id else None
+                if obj is not None:
+                    s.delete(obj)
 
 
 @requires_db

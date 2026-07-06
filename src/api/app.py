@@ -674,12 +674,53 @@ def _cross_sectional_candidate_ids() -> list[str]:
     return out
 
 
-def _has_active_job(job_type: str, *, strategy: str | None = None) -> bool:
-    """True if a QUEUED/RUNNING job of this type (optionally pinned to ``strategy``) already exists.
-    Guards a duplicate Start from double-booking the same continuous session (two loops for one
-    strategy would book twice)."""
+def _job_in_list(redis_client: Any, key: str, job_id: str) -> bool:
+    try:
+        return job_id in redis_client.lrange(key, 0, -1)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _session_job_alive(redis_client: Any, job_id: str, job_type: str) -> bool:
+    """Whether a QUEUED/RUNNING session job is GENUINELY alive vs an orphaned ghost. Alive = still
+    pending in its class queue, OR claimed by a worker whose liveness beacon exists. A row that is
+    RUNNING in the DB but in NO queue and NO live worker's processing list is a ghost (the worker
+    died / was SIGKILL'd before the terminal write) — nothing is executing it, yet it wedges the
+    Start guard forever. Fail-safe: if Redis can't be checked, treat as ALIVE (never wrongly permit
+    a double-booked live session on a transient blip)."""
+    if redis_client is None:
+        return True
+    from src.jobs.routing import PROCESSING_PREFIX, queue_class, queue_key, worker_key
+
+    try:
+        if _job_in_list(redis_client, queue_key(queue_class(job_type)), job_id):
+            return True
+        for pkey in redis_client.scan_iter(match=f"{PROCESSING_PREFIX}:*", count=100):
+            worker_id = str(pkey).split(":", 2)[2]
+            if redis_client.exists(worker_key(worker_id)) and _job_in_list(
+                redis_client, str(pkey), job_id
+            ):
+                return True
+    except Exception:  # noqa: BLE001 - Redis unavailable → fail-safe to "alive" (don't double-book)
+        return True
+    return False
+
+
+def _has_active_job(
+    job_type: str, *, strategy: str | None = None, redis_client: Any = None
+) -> bool:
+    """True if a GENUINELY-ALIVE QUEUED/RUNNING job of this type (optionally pinned to ``strategy``)
+    exists. Guards a duplicate Start from double-booking the same continuous session.
+
+    A killed session leaves its row in RUNNING with no live owner — Stop can't clear it (no handler
+    to see the cancel) and it silently blocks every future Start. So any active row that is NOT
+    genuinely alive (:func:`_session_job_alive`) is SELF-HEALED to FAILED here and does not block,
+    turning the operator's next Start into the thing that clears the ghost."""
+    import structlog
+
     from src.db.models import JobStatus
 
+    alive = False
     with session_scope() as session:
         rows = (
             session.execute(
@@ -691,9 +732,18 @@ def _has_active_job(job_type: str, *, strategy: str | None = None) -> bool:
             .scalars()
             .all()
         )
-    if strategy is None:
-        return bool(rows)
-    return any((j.input_params or {}).get("strategy") == strategy for j in rows)
+        for j in rows:
+            if strategy is not None and (j.input_params or {}).get("strategy") != strategy:
+                continue
+            if _session_job_alive(redis_client, j.job_id, job_type):
+                alive = True
+            else:
+                j.status = JobStatus.FAILED
+                j.failure_reason = "orphaned session (no live owner) — auto-cleared by Start guard"
+                structlog.get_logger("api").warning(
+                    "orphaned_session_job_auto_failed", job_id=j.job_id, job_type=job_type
+                )
+    return alive
 
 
 def _enqueue_exclusive(
@@ -715,7 +765,7 @@ def _enqueue_exclusive(
     if not queue.redis.set(lock_key, requested_by, nx=True, ex=15):
         raise HTTPException(status_code=409, detail=conflict_detail)
     try:
-        if _has_active_job(job_type, strategy=strategy):
+        if _has_active_job(job_type, strategy=strategy, redis_client=queue.redis):
             raise HTTPException(status_code=409, detail=conflict_detail)
         return queue.enqueue(job_type, params, requested_by=requested_by)
     finally:
@@ -1659,8 +1709,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             job_rows = []
             active_ids = []
+            try:
+                import redis as _redis
+
+                _rc = _redis.Redis.from_url(settings.redis_url, decode_responses=True)
+            except Exception:  # noqa: BLE001 - no Redis → _session_job_alive fails safe to alive
+                _rc = None
             for j in jobs:
                 active = j.status in (JobStatus.QUEUED, JobStatus.RUNNING)
+                # A ghost (RUNNING in the DB but no live owner) must NOT show as running — it would
+                # disable the Start button and wedge the operator out. Self-heal it to FAILED so the
+                # page reflects reality and Start is available again.
+                if active and not _session_job_alive(_rc, j.job_id, "run_live_session"):
+                    j.status = JobStatus.FAILED
+                    j.failure_reason = "orphaned session (no live owner) — auto-cleared"
+                    active = False
                 if active:
                     active_ids.append(j.job_id)
                 prog = f"{j.progress_current}/{j.progress_total}" if j.progress_total else "-"
