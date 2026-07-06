@@ -89,6 +89,30 @@ def test_open_position_rows_excluded_from_trading_stats() -> None:
             s.query(PaperTradeRecord).filter_by(strategy=strat).delete()
 
 
+def test_environment_summary_counts_orphaned_open_positions() -> None:
+    """REGRESSION: a crashed session can leave OpenPosition legs with ZERO closed trades. The env
+    summary must report them as open_positions so the Overview still offers Reset — otherwise the
+    legs render on the paper page with no way to clear them. Delta-based (shared DB)."""
+    from src.api.stats import get_environment_summary
+    from src.db.models import OpenPosition
+
+    sid = f"paper:basket:orphan_{uuid.uuid4().hex[:6]}:v:4h:1"
+    with session_scope() as s:
+        s.query(OpenPosition).filter_by(session_id=sid).delete()
+    before = {e["env"]: e for e in get_environment_summary()}["paper"]
+    with session_scope() as s:
+        s.add(OpenPosition(
+            session_id=sid, strategy="funding_carry", symbol="ETH/USDT:USDT", side=-1,
+        ))
+    try:
+        after = {e["env"]: e for e in get_environment_summary()}["paper"]
+        assert after["open_positions"] == before.get("open_positions", 0) + 1
+        assert after["trades"] == before["trades"]  # an open leg is not a closed trade
+    finally:
+        with session_scope() as s:
+            s.query(OpenPosition).filter_by(session_id=sid).delete()
+
+
 def test_environment_summary_excludes_selftest_from_paper_row() -> None:
     """The Overview env-summary 'paper' row must exclude self-test trades (the else_='paper' bucket
     used to catch them), matching the headline KPI definition — otherwise the two paper numbers on

@@ -1162,18 +1162,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 else f"Zero all {env_name} statistics? This cannot be undone."
             )
             btn_label = "Request reset" if env_name == "live" else "Reset"
+            # Offer Reset when there is ANY resettable state — closed trades OR orphaned open
+            # positions. A crashed session can leave open legs with zero closed trades; gating only
+            # on trades left those legs stuck on the paper page with no way to clear them.
             reset_btn = (
                 f'<form method="post" action="/api/live/reset?env={env_name}&confirm=true" '
                 f"style=\"display:inline\" onsubmit=\"return confirm('{confirm_msg}');\">"
                 '<button class="btn btn-danger" type="submit" '
                 f'style="padding:2px 10px;font-size:11px">{btn_label}</button></form>'
-                if e["trades"]
+                if (e["trades"] or e.get("open_positions"))
                 else "—"
             )
+            trades_cell = str(e["trades"])
+            if e.get("open_positions"):
+                trades_cell += f' <span class="meta">(+{e["open_positions"]} open)</span>'
             rows.append(
                 [
                     (f"<b>{_esc(env_name)}</b>" if here else _esc(env_name)),
-                    e["trades"],
+                    trades_cell,
                     _money(e["net_pnl"]),
                     f'{e["win_rate"] * 100:.1f}%',
                     reset_btn,

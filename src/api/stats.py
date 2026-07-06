@@ -22,6 +22,7 @@ from src.db.models import (
     GateStatus,
     Job,
     JobStatus,
+    OpenPosition,
     PaperTradeRecord,
     RemediationAction,
     RemediationStatus,
@@ -599,7 +600,22 @@ def get_environment_summary() -> list[dict[str, Any]]:
             .where(PaperTradeRecord.exit_reason != "open")
             .group_by(env_expr)
         ).all()
+        # Open positions are separate resettable state (a crashed session leaves orphaned legs with
+        # ZERO closed trades). Count them per env so the Overview can offer Reset even when the only
+        # leftover is open legs — else those legs render on the paper page with no way to clear.
+        op_env = case(
+            (OpenPosition.session_id.like("demo:%"), "demo"),
+            (OpenPosition.session_id.like("testnet:%"), "testnet"),
+            (OpenPosition.session_id.like("live:%"), "live"),
+            else_="paper",
+        ).label("env")
+        op_rows = session.execute(
+            select(op_env, func.count().label("n"))
+            .where(~OpenPosition.session_id.like(f"{_SELFTEST_PREFIX}%"))
+            .group_by(op_env)
+        ).all()
     by_env = {r.env: r for r in rows}
+    op_by_env = {r.env: int(r.n) for r in op_rows}
     out: list[dict[str, Any]] = []
     for env in ENVIRONMENTS:
         r = by_env.get(env)
@@ -608,6 +624,7 @@ def get_environment_summary() -> list[dict[str, Any]]:
             {
                 "env": env,
                 "trades": trades,
+                "open_positions": op_by_env.get(env, 0),
                 "net_pnl": round(float(r.net_pnl), 2) if r else 0.0,
                 "win_rate": round(int(r.wins) / trades, 4) if r and trades else 0.0,
             }
