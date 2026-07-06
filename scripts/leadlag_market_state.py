@@ -96,11 +96,18 @@ def _pstdev(xs: list[float]) -> float:
 
 
 def main() -> None:
+    from src.data.config import load_data_config
+
     store = _store()
     sc = load_strategies_config()
     cand = sc.candidate("lead_lag_xasset")
     leader = str(cand.fixture.values["leader"])
-    followers = list(cand.fixture.values["followers"])
+    # The REAL lake validation trades EVERY non-leader universe symbol as a follower (the fixture's
+    # `followers` list is only for the synthetic 5m fixture), so analyse all of them, not just 2.
+    # Load the SAME config the validation uses (configs/data.bybit.yaml, 20 symbols) — NOT the
+    # default configs/data.yaml (the 3-symbol skeleton), or this would silently see only ETH/SOL.
+    universe = load_data_config("configs/data.bybit.yaml").active_symbols()
+    followers = [s for s in universe if s != leader]
     lo, hi = _ms(FOLD_EDGES_ISO[0]), _ms(FOLD_EDGES_ISO[-1])
 
     lc = _closes(store, leader, lo, hi)
