@@ -17,12 +17,33 @@ harness disables a structurally-losing side before promotion.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from collections import deque
+from dataclasses import dataclass, field
 
 from src.backtest.strategy import ExitDecision, PositionView, Signal
 from src.regime.detector import NO_TRADE_REGIMES, detect_regime
 from src.strategies.base import StrategyHypothesis
 from src.strategies.config import CandidateConfig, StrategyParams
+
+_CORR_MIN_SAMPLES = 8  # trailing-corr gate abstains below this many pairs (warmup)
+
+
+def _lag_corr(pairs: deque[tuple[float, float]]) -> float:
+    """Pearson correlation of (leader prior-bar return, follower current-bar return) pairs; NaN
+    below _CORR_MIN_SAMPLES or on a degenerate (zero-variance) window."""
+    n = len(pairs)
+    if n < _CORR_MIN_SAMPLES:
+        return float("nan")
+    xs = [p[0] for p in pairs]
+    ys = [p[1] for p in pairs]
+    mx, my = sum(xs) / n, sum(ys) / n
+    sxx = sum((x - mx) ** 2 for x in xs)
+    syy = sum((y - my) ** 2 for y in ys)
+    if sxx <= 0 or syy <= 0:
+        return float("nan")
+    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True))
+    return sxy / math.sqrt(sxx * syy)
 
 
 @dataclass(slots=True)
@@ -229,6 +250,17 @@ class LeadLagStrategy(_BaseCandidate):
     response. The leader itself is not traded by this candidate.
     """
 
+    # Rolling per-follower buffers for the trailing lead-lag correlation gate (strat_0009). Each
+    # entry: {"prev": leader ret_1 from the previous bar, "pairs": deque of (leader_ret[t-1],
+    # follower_ret[t])}. init=False keeps build_strategy's (candidate, version, params) ctor
+    # unchanged; the engine calls reset() before every run so folds/hold-out warm up independently.
+    _corr_state: dict = field(default_factory=dict, init=False, repr=False)
+
+    def reset(self) -> None:
+        """Clear the rolling correlation buffers (engine calls this per run — one instance is reused
+        across the promoted backtest, every fold, the hold-out, and the stress runs)."""
+        self._corr_state.clear()
+
     @property
     def hypothesis(self) -> StrategyHypothesis:
         return StrategyHypothesis(
@@ -241,7 +273,7 @@ class LeadLagStrategy(_BaseCandidate):
             market_condition="impulse/trending leader; adequate follower liquidity",
             edge_source="cross-asset information lag (lead-lag response)",
             data_requirements=("leader OHLCV/returns", "follower OHLCV/returns"),
-            entry="|leader last-bar return| > max(abs floor, k×leader vol) ⇒ follower follows",
+            entry="|leader ret| > max(abs floor, k×vol) AND trailing lead-lag corr ≥ min ⇒ follow",
             exit="time-stop after a few bars (capture the lagged burst); no fixed TP; initial SL",
             invalidation="follower fails to follow and hits the initial SL",
             risk_assumptions="explicit initial SL (stop_frac) anchors per-trade sizing",
@@ -270,6 +302,30 @@ class LeadLagStrategy(_BaseCandidate):
         if leader_row is None:
             return None
         leader_ret = float(leader_row.get("ret_1", 0.0))
+
+        # Trailing lead-lag CORRELATION gate (strat_0009). The lead-lag edge is regime-conditional —
+        # the BTC->alt relationship decays (measured: corr halved/collapsed in 2026), so a fixed
+        # always-on entry trades a dead signal. Update this follower's rolling buffer EVERY bar (not
+        # just trigger bars): pair the leader's PRIOR-bar return with the follower's current-bar
+        # return — exactly the lagged relationship monetised — then require the recent correlation
+        # to clear `leader_ret_corr_min` (a-priori: > 0, "relationship present"). All buffered
+        # pairs are known at decision time (no lookahead). Warmup (< _CORR_MIN_SAMPLES pairs) or a
+        # degenerate window ⇒ the gate abstains; the base vol-relative entry stands (conservative).
+        corr_min = self.params.extra.get("leader_ret_corr_min")
+        corr_ok = True
+        if corr_min is not None:
+            window = int(self.params.extra.get("leader_ret_corr_window", 60))
+            st = self._corr_state.get(symbol)
+            if st is None:
+                st = {"prev": None, "pairs": deque(maxlen=window)}
+                self._corr_state[symbol] = st
+            if st["prev"] is not None:
+                st["pairs"].append((st["prev"], float(row.get("ret_1", 0.0))))
+            st["prev"] = leader_ret
+            c = _lag_corr(st["pairs"])
+            if not math.isnan(c):
+                corr_ok = c >= float(corr_min)
+
         abs_floor = self.params.extra["leader_ret_threshold"]
         # Volatility-relative significance gate. A FIXED absolute return threshold goes stale across
         # vol regimes — too rare to fire when the leader is quiet, and all-noise when it is hot (the
@@ -285,6 +341,8 @@ class LeadLagStrategy(_BaseCandidate):
         if vol_mult > 0.0 and leader_vol > 0.0:
             gate = max(abs_floor, vol_mult * leader_vol)
         if abs(leader_ret) < gate:
+            return None
+        if not corr_ok:  # trailing lead-lag correlation below the gate → the relationship is absent
             return None
         side = 1 if leader_ret > 0 else -1
         return self._sided(

@@ -4,7 +4,7 @@ Priority Stack (Section 1) resolves every conflict. Never enable live trading.
 Per-phase tasks come from the orchestrator (phase prompts) + Appendix D acceptance criteria.
 
 As-built implementation state is kept in AGENTS.md inline, marked **Implemented** in the relevant
-sections (current `STRATEGY_VERSION strat_0008`): the Universe Manager + its known gap — no
+sections (current `STRATEGY_VERSION strat_0009`): the Universe Manager + its known gap — no
 liquidity-ranked rotation yet, validation runs a hardcoded 20-symbol list (Section 9); the
 per-strategy execution model (Section 12),
 the refined walk-forward gate — directional folds + economic hold-out + deflated-Sharpe floor

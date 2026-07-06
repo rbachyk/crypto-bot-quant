@@ -258,6 +258,14 @@ class BacktestEngine:
         if not inputs:
             return result
 
+        # Reset any per-run strategy state (e.g. a rolling correlation buffer) so each engine run is
+        # independent — the walk-forward reuses ONE strategy instance across the promoted backtest,
+        # every fold, the hold-out, and the fee/slip stress runs, so a stateful strategy must start
+        # each run clean or state bleeds across folds. No-op for stateless strategies.
+        reset = getattr(self.strategy, "reset", None)
+        if callable(reset):
+            reset()
+
         # Walk the shared timeline by EPOCH TIME, not by bar index. Time is the one coordinate
         # every symbol shares: at each timestamp a symbol either has a bar or it does not, looked
         # up directly by ``ts``. This is robust as the universe grows and symbols list/delist on

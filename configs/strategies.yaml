@@ -21,7 +21,7 @@
 version: 1
 
 strategies:
-  strategy_version: strat_0008  # _0007: basis band entry; _0008: lead_lag vol-relative entry gate (leader_ret_vol_mult 2.0)
+  strategy_version: strat_0009  # _0008: lead_lag vol-relative entry; _0009: lead_lag trailing lead-lag corr gate (leader_ret_corr_min 0.0)
 
   # Long/short expectancy is computed separately for every candidate; a side whose
   # out-of-sample expectancy_r is at or below this floor is DISABLED before
@@ -52,6 +52,16 @@ strategies:
         # (BTC bar-vol ≫ 0.25%), so entries track "significant" leader moves rather than any tick.
         # Set to 0.0 to disable and recover the plain fixed-threshold entry.
         leader_ret_vol_mult: 2.0
+        # Trailing lead-lag CORRELATION gate (strat_0009). Fire only when the RECENT correlation
+        # between the leader's prior-bar return and the follower's next-bar return clears
+        # leader_ret_corr_min — i.e. the lead-lag relationship is actually PRESENT, not decayed.
+        # corr_min = 0.0 is an a-priori gate ("require a positive relationship"), NOT tuned to the
+        # recent window (a corr-filter diagnostic showed corr predicts the edge in-regime but the
+        # BTC->alt relationship has decayed; this gates entries on it live). Window = 60 bars is the
+        # estimation lookback; warmup (< a few pairs) falls back to the vol-relative entry.
+        # Remove/null leader_ret_corr_min to disable the gate entirely.
+        leader_ret_corr_min: 0.0
+        leader_ret_corr_window: 60
         # Position-size scale: this edge is real OOS (hold-out +0.098R, PF 1.19) but HOT — at the
         # account standard (0.5%/trade) its drawdown is ~43%, over the 25% gate. Sized to 0.4× the
         # standard targets ~20% max drawdown (dd is ~linear in size; expectancy_r/PF unchanged).

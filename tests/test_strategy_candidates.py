@@ -134,6 +134,41 @@ def test_lead_lag_entry_is_volatility_relative() -> None:
     assert sig_fallback is not None
 
 
+def test_lead_lag_trailing_correlation_gate() -> None:
+    """strat_0009: the entry fires only when the RECENT leader→follower LAGGED correlation clears
+    leader_ret_corr_min. A run of bars with a NEGATIVE lead-lag correlation blocks an otherwise
+    valid short trigger; the SAME trigger fires after a POSITIVE-correlation run. reset() clears the
+    per-follower buffer so each run is independent (the engine calls it before every run)."""
+    cand, strat = _cand("lead_lag_xasset")
+    leader = str(cand.fixture.values["leader"])
+    follower = "ETH/USDT:USDT"
+    assert cand.params.extra["leader_ret_corr_min"] == 0.0  # gate configured: require corr >= 0
+
+    def feed(lead_ret: float, foll_ret: float):
+        # rv_short=0 → the vol gate is just the absolute floor, so only |lead_ret| triggers.
+        peers = {leader: {"ret_1": lead_ret, "rv_short": 0.0, "atr_pct": 0.02}}
+        return strat.evaluate_portfolio(follower, {"ret_1": foll_ret, "atr_pct": 0.02}, peers)
+
+    lead_seq = [0.02, -0.02] * 6  # alternating leader returns give the pairs variance for a corr
+
+    # NEGATIVE lead-lag run: follower moves OPPOSITE the leader's prior bar → trailing corr < 0.
+    strat.reset()
+    prev = None
+    for lr in lead_seq:
+        feed(lr, (-0.5 * prev) if prev is not None else 0.0)
+        prev = lr
+    assert feed(-0.05, +0.025) is None  # valid down trigger, but relationship absent → blocked
+
+    # POSITIVE lead-lag run: follower TRACKS the leader's prior bar → trailing corr > 0 → fires.
+    strat.reset()
+    prev = None
+    for lr in lead_seq:
+        feed(lr, (0.5 * prev) if prev is not None else 0.0)
+        prev = lr
+    sig = feed(-0.05, -0.025)
+    assert sig is not None and sig.side == -1
+
+
 def test_basis_band_entry_skips_the_extreme_repricing_tail() -> None:
     """basis fades a dislocation only inside the reversion band [threshold, cap]: a moderate premium
     fires, but an EXTREME one (> premium_cap, i.e. one-way repricing) is skipped — both sides."""
