@@ -134,7 +134,7 @@ class BasketPaperLoop:
                     f = float(sc)
                     if f == f and abs(f) != float("inf"):  # finite
                         scores[sym] = f
-            if len(scores) >= eng.min_universe:
+            if eng.can_rebalance(scores):
                 bars_by_ts = {s: {ts: b} for s, b in bars_at.items()}
                 rows_by_ts = {s: {ts: r} for s, r in rows_at.items()}
                 before = len(self._result.trades)
@@ -149,10 +149,19 @@ class BasketPaperLoop:
                         f"{len(self._result.trades) - before} closed, equity={self._equity:.2f}"
                     )
             elif self.on_event is not None:
-                self.on_event(
-                    f"rebalance skipped: only {len(scores)}/{eng.min_universe} symbols scored "
-                    "(need more history for the feature window)"
-                )
+                if len(scores) < eng.min_universe:
+                    self.on_event(
+                        f"rebalance skipped: only {len(scores)}/{eng.min_universe} symbols scored "
+                        "(need more history for the feature window)"
+                    )
+                else:
+                    # Dispersion gate: held legs stay untouched, no turnover paid. Visible so a
+                    # quiet market is distinguishable from a broken feed.
+                    self.on_event(
+                        f"rebalance skipped: score gap {eng.score_gap(scores):.5f} < "
+                        f"min_score_gap {eng.min_score_gap:.5f} (too little cross-sectional "
+                        "dispersion to pay for the turnover) — holding existing legs"
+                    )
         self._flush()
         if self.on_positions is not None:
             self.on_positions(self._open_positions(bars_at))

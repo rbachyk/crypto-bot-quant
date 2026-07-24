@@ -102,6 +102,18 @@ class CrossSectionalEngine:
         # Why residual, not raw, returns: in crypto the common factor dominates raw dispersion, so
         # plain cross-sectional reversion just bets against the market beta (it was tested — dead);
         # removing β·r_mkt isolates the idiosyncratic component that can actually mean-revert.
+        # Minimum cross-sectional SIGNAL required to rebalance at all (0 = off, the default and
+        # the behaviour every existing validated config keeps). A basket's edge is the score GAP
+        # between the long and short sides; the cost of forming it — fees + spread on every leg —
+        # is the same whatever that gap is. So when dispersion collapses the basket is paying full
+        # freight to harvest almost nothing, which is the structural reason a carry/factor basket
+        # bleeds in quiet, low-dispersion markets. Gating on the gap suppresses exactly those
+        # rebalances, at the PORTFOLIO level (never dropping individual legs, which would break
+        # dollar-neutrality and leave the rest naked). Units are the strategy's OWN score units —
+        # −funding_z is O(1), a residual-return sum is O(0.01) — so the threshold is
+        # strategy-specific and must be chosen from measured data, not guessed:
+        # `scripts/basket_dispersion_diagnostic.py` prints the gap→P&L relationship per bucket.
+        self.min_score_gap = max(0.0, float(ex.get("min_score_gap", 0.0) or 0.0))
         self.score_mode = str(ex.get("score_mode", ""))
         self.signal_window = max(2, int(ex.get("signal_window", 12)))
         self._residual = self.score_mode in ("residual_reversion", "residual_momentum")
@@ -177,7 +189,7 @@ class CrossSectionalEngine:
                     )
                     if sc is not None and math.isfinite(float(sc)):
                         scores[s.symbol] = float(sc)
-                if len(scores) >= self.min_universe:
+                if self.can_rebalance(scores):
                     equity = self._rebalance(
                         holdings, scores, bars_by_ts, rows_by_ts, by_symbol, ts, equity, result
                     )
@@ -197,6 +209,29 @@ class CrossSectionalEngine:
         if result.equity_curve:
             result.equity_curve[-1] = equity
         return result
+
+    # -- rebalance gating ------------------------------------------------ #
+    def score_gap(self, scores: dict[str, float]) -> float:
+        """The cross-sectional signal the basket would actually harvest this rebalance: mean score
+        of the prospective LONG side minus mean score of the prospective SHORT side, over the same
+        top/bottom ``basket_frac`` the rebalance itself uses. Larger = more dispersion to trade."""
+        if not scores:
+            return 0.0
+        ranked = sorted(scores.values(), reverse=True)
+        k = max(1, int(len(ranked) * self.basket_frac))
+        top, bottom = ranked[:k], ranked[-k:]
+        return (sum(top) / len(top)) - (sum(bottom) / len(bottom))
+
+    def can_rebalance(self, scores: dict[str, float]) -> bool:
+        """Whether to form/refresh the basket now: enough names scored AND (when configured)
+        enough cross-sectional dispersion to be worth the turnover.
+
+        A False here HOLDS the existing legs untouched — it does not flatten them. Skipping costs
+        nothing and keeps the hedge intact; the next bar re-checks (the same convention the
+        ``min_universe`` skip already uses, so the cadence semantics are unchanged)."""
+        if len(scores) < self.min_universe:
+            return False
+        return self.min_score_gap <= 0.0 or self.score_gap(scores) >= self.min_score_gap
 
     # -- rebalance ------------------------------------------------------- #
     def _rebalance(self, holdings, scores, bars_by_ts, rows_by_ts, by_symbol, ts, equity, result):

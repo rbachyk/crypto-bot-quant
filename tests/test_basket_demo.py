@@ -727,3 +727,80 @@ def test_demo_endpoint_rejects_a_non_basket_strategy() -> None:
 def test_demo_endpoint_rejects_an_empty_selection() -> None:
     res = _dashboard("demo").post("/api/paper/run-basket-demo?strategies=", follow_redirects=False)
     assert res.status_code == 400
+
+
+# -- the dispersion gate (min_score_gap) -------------------------------- #
+def _engine(**extra):
+    import dataclasses
+
+    from src.backtest.portfolio import CrossSectionalEngine
+
+    sc = load_strategies_config()
+    cand = sc.candidate("funding_carry")
+    params = dataclasses.replace(cand.params, extra={**cand.params.extra, **extra})
+    return CrossSectionalEngine(
+        load_backtest_config(), load_metadata_config(),
+        build_strategy(cand, sc.strategy_version, params=params),
+    )
+
+
+def test_dispersion_gate_is_off_by_default() -> None:
+    """Every validated config keeps its behaviour: the gate must be opt-in, or adding it would
+    silently invalidate the walk-forward verdicts already on record."""
+    eng = _engine()
+    assert eng.min_score_gap == 0.0
+    # A dead-flat cross-section still rebalances, exactly as before.
+    assert eng.can_rebalance(dict.fromkeys([f"S{i}" for i in range(10)], 0.0))
+
+
+def test_score_gap_is_the_long_side_minus_short_side_mean() -> None:
+    eng = _engine()
+    scores = {f"S{i}": float(i) for i in range(10)}  # 0..9, basket_frac 0.2 → k=2
+    # top 2 = {9,8} mean 8.5; bottom 2 = {0,1} mean 0.5
+    assert eng.score_gap(scores) == pytest.approx(8.0)
+
+
+def test_gate_blocks_a_rebalance_when_dispersion_is_below_the_threshold() -> None:
+    eng = _engine(min_score_gap=5.0)
+    tight = {f"S{i}": 0.001 * i for i in range(10)}  # gap ≈ 0.008
+    wide = {f"S{i}": float(i) for i in range(10)}  # gap = 8.0
+
+    assert not eng.can_rebalance(tight)
+    assert eng.can_rebalance(wide)
+
+
+def test_min_universe_still_gates_independently_of_dispersion() -> None:
+    """A wide gap on too few names is still not a basket."""
+    eng = _engine(min_score_gap=0.1)
+    assert not eng.can_rebalance({"A": 10.0, "B": -10.0})  # min_universe is 8
+
+
+def test_a_skipped_rebalance_holds_legs_rather_than_flattening_them() -> None:
+    """Skipping must cost nothing: the existing basket stays on, hedge intact. Flattening on a
+    quiet tick would pay full exit costs precisely when the edge is too thin to pay them."""
+    import dataclasses
+
+    sc = load_strategies_config()
+    cand = sc.candidate("funding_carry")
+    by_symbol, snaps = _fixture()
+
+    # Run until legs exist, then raise the bar so high that no rebalance can clear it.
+    params = dataclasses.replace(cand.params, extra={**cand.params.extra, "min_score_gap": 0.0})
+    loop = BasketPaperLoop(
+        load_backtest_config(), load_metadata_config(),
+        build_strategy(cand, sc.strategy_version, params=params),
+        bar_interval_ms=IV, session=PaperSession(session_id="t"),
+    )
+    snap_list = list(snaps)
+    for ts, bars, rows in snap_list[:30]:
+        loop.step(ts, bars, rows, by_symbol)
+    held = dict(loop._holdings)
+    assert held, "need open legs for this test to mean anything"
+
+    loop.engine.min_score_gap = 1e9  # nothing will ever clear this
+    booked_before = len(loop.session.trades)
+    for ts, bars, rows in snap_list[30:]:
+        loop.step(ts, bars, rows, by_symbol)
+
+    assert set(loop._holdings) == set(held), "a skipped rebalance must not close legs"
+    assert len(loop.session.trades) == booked_before, "…and must book no exits"
