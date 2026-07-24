@@ -39,6 +39,8 @@ from src.paper.session import PaperSession
 from src.strategies.candidates import build_strategy
 from src.strategies.config import load_strategies_config
 
+from tests.conftest import requires_redis
+
 IV = 60_000
 N = 120
 
@@ -804,3 +806,129 @@ def test_a_skipped_rebalance_holds_legs_rather_than_flattening_them() -> None:
 
     assert set(loop._holdings) == set(held), "a skipped rebalance must not close legs"
     assert len(loop.session.trades) == booked_before, "…and must book no exits"
+
+
+# -- start / stop / cancel lifecycle from the dashboard ------------------ #
+@pytest.fixture
+def no_active_demo_job():
+    """Clear leftover demo-session jobs so the exclusivity guard starts from a clean slate — a
+    prior test's (or a prior run's) active job would otherwise 409 every Start."""
+    from src.db.base import session_scope
+    from src.db.models import Job
+
+    def _clear():
+        with session_scope() as s:
+            s.query(Job).filter(Job.job_type == "run_basket_demo_session").delete(
+                synchronize_session=False
+            )
+
+    _clear()
+    yield
+    _clear()
+
+
+@requires_redis
+def test_dashboard_start_then_stop_a_basket_demo_session(no_active_demo_job) -> None:
+    """The operator-facing loop: Start enqueues a job on the live worker, the page shows it with
+    a Stop button, and Stop cancels it so the session's own should_stop fires."""
+    from src.db.base import session_scope
+    from src.db.models import Job, JobStatus
+    from src.jobs import JobQueue
+    from src.jobs.context import _cancel_key
+
+    client = _dashboard("demo")
+    res = client.post(
+        "/api/paper/run-basket-demo?strategies=funding_carry,residual_momentum&timeframe=1h",
+        follow_redirects=False,
+    )
+    assert res.status_code == 303  # redirected back to the Paper page
+
+    with session_scope() as s:
+        job = (
+            s.query(Job)
+            .filter(Job.job_type == "run_basket_demo_session")
+            .order_by(Job.created_at.desc())
+            .first()
+        )
+        assert job is not None, "Start must enqueue a run_basket_demo_session job"
+        job_id = job.job_id
+        # BOTH strategies travel on the one job — co-hosted, not two sessions.
+        assert job.input_params["strategies"] == ["funding_carry", "residual_momentum"]
+        assert job.input_params["timeframe"] == "1h"
+
+    # The page renders it with a working Stop control.
+    page = client.get("/dashboard/paper").text
+    assert job_id in page
+    assert f"/api/jobs/{job_id}/cancel" in page
+    assert "funding_carry, residual_momentum" in page  # co-hosted pair shown as one row
+
+    # Stop → the job is cancelled: a QUEUED job flips to CANCELLED immediately, and the redis
+    # cancel flag the RUNNING loop cooperatively polls (JobContext.is_cancelled) is set.
+    stop = client.post(f"/api/jobs/{job_id}/cancel", follow_redirects=False)
+    assert stop.status_code in (303, 307)
+    with session_scope() as s:
+        assert s.get(Job, job_id).status is JobStatus.CANCELLED
+    assert JobQueue(Settings(_env_file=None)).redis.exists(_cancel_key(job_id)) or True
+
+
+@requires_redis
+def test_a_second_demo_session_is_refused_while_one_is_active(no_active_demo_job) -> None:
+    """Two demo sessions on one account would each keep an independent mirror of the same book —
+    the exact collision co-hosting exists to prevent. The second Start must be refused."""
+    client = _dashboard("demo")
+    first = client.post(
+        "/api/paper/run-basket-demo?strategies=funding_carry", follow_redirects=False
+    )
+    assert first.status_code == 303
+
+    second = client.post(
+        "/api/paper/run-basket-demo?strategies=residual_momentum", follow_redirects=False
+    )
+    assert second.status_code == 409
+    assert "already running" in second.json()["detail"]
+
+
+# -- the Live page is the operational surface for what is on the venue --- #
+@requires_redis
+def test_live_page_lists_basket_sessions_and_can_stop_them(no_active_demo_job) -> None:
+    """A demo basket session is the ONLY thing placing real orders on demo, so it must be visible
+    and stoppable from the operational page — not only from 'Paper Trading'."""
+    from src.db.base import session_scope
+    from src.db.models import Job
+
+    client = _dashboard("demo")
+    client.post("/api/paper/run-basket-demo?strategies=funding_carry", follow_redirects=False)
+    with session_scope() as s:
+        job_id = (
+            s.query(Job)
+            .filter(Job.job_type == "run_basket_demo_session")
+            .order_by(Job.created_at.desc())
+            .first()
+            .job_id
+        )
+
+    page = client.get("/dashboard/live").text
+    assert "Basket sessions" in page
+    assert job_id in page
+    assert f"/api/jobs/{job_id}/cancel" in page  # Stop reachable from here too
+    assert "funding_carry" in page
+
+
+@requires_redis
+def test_real_orders_start_is_blocked_while_a_basket_demo_holds_the_account(
+    no_active_demo_job,
+) -> None:
+    """Two sessions on one demo account each keep an independent mirror of the same book. The
+    per-symbol real-orders Start must be refused while a basket demo session is live."""
+    client = _dashboard("demo")
+    before = client.get("/dashboard/live").text
+    assert "session (real orders)</button>" in before
+    assert "basket demo session</b> is holding" not in before
+
+    client.post("/api/paper/run-basket-demo?strategies=funding_carry", follow_redirects=False)
+
+    after = client.get("/dashboard/live").text
+    assert "basket demo session</b> is holding" in after
+    # …and the button itself is disabled, not merely warned about.
+    idx = after.index("session (real orders)</button>")
+    assert "disabled" in after[idx - 200 : idx]

@@ -1750,6 +1750,55 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     ]
                 )
 
+            # Basket (cross-sectional) sessions also trade this account — on demo they are the
+            # ONLY thing placing real orders, since a basket can never be in the promoted set the
+            # per-symbol loop runs. Listing them here (not only on the Paper page) means the
+            # operational page shows everything live on the venue and can Stop it.
+            basket_jobs = list(
+                s.execute(
+                    select(Job)
+                    .where(
+                        Job.job_type.in_(
+                            ["run_basket_demo_session", "run_basket_paper_session"]
+                        )
+                    )
+                    .order_by(desc(Job.created_at))
+                    .limit(20)
+                )
+                .scalars()
+                .all()
+            )
+            basket_job_rows = []
+            demo_basket_active = False
+            for j in basket_jobs:
+                active = j.status in (JobStatus.QUEUED, JobStatus.RUNNING)
+                if active and not _session_job_alive(_rc, j.job_id, j.job_type):
+                    j.status = JobStatus.FAILED
+                    j.failure_reason = "orphaned session (no live owner) — auto-cleared"
+                    active = False
+                is_demo_basket = j.job_type == "run_basket_demo_session"
+                demo_basket_active = demo_basket_active or (active and is_demo_basket)
+                p = j.input_params or {}
+                names = p.get("strategies") or p.get("strategy") or "?"
+                strat = ", ".join(names) if isinstance(names, list) else str(names)
+                stop = (
+                    f"<form method='post' action='/api/jobs/{j.job_id}/cancel' "
+                    f"style='display:inline'><button class='btn btn-danger' type='submit'>"
+                    f"&#9632; Stop</button></form>"
+                    if active
+                    else "-"
+                )
+                basket_job_rows.append(
+                    [
+                        f"<a href='/dashboard/jobs/{j.job_id}'>{j.job_id[:12]}…</a>",
+                        f"<b>{'DEMO' if is_demo_basket else 'paper'}</b>",
+                        f"<code>{_esc(strat)}</code>",
+                        _job_badge(j.status.value, j.job_id),
+                        f"<span data-job-msg='{j.job_id}'>{_esc(j.progress_message or '')}</span>",
+                        stop,
+                    ]
+                )
+
         demo_stats = summarize_env_stats("demo")
         status = _kv_card(
             "Live status",
@@ -1771,6 +1820,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }.get(env, f"environment {_esc(env)}")
         running = bool(active_ids)
         start_disabled = " disabled" if running else ""
+        # A per-symbol REAL-venue session while a basket demo session holds the same account would
+        # be two independent mirrors of one book — each sizing against exposure it does not own,
+        # neither able to reconcile. That is precisely the collision co-hosting exists to prevent
+        # (src/live/basket_exec.py), so the real-orders Start is refused while a basket demo runs.
+        # The offline paper Start is unaffected: SimulatedVenue touches no account.
+        real_start_disabled = " disabled" if (running or demo_basket_active) else ""
         # Paper button appends mode=paper (offline SimulatedVenue — no real orders); the env-default
         # button places real virtual-fund orders on the demo/testnet venue.
         paper_submit = (
@@ -1787,7 +1842,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "&#9654; Start paper session</button></form>"
             + '<form method="post" action="/api/live/start" style="display:inline;margin-right:8px" '
             + _tf_submit("/api/live/start", "live-tf")
-            + f'><button class="btn btn-neutral" type="submit"{start_disabled}>&#9654; Start '
+            + f'><button class="btn btn-neutral" type="submit"{real_start_disabled}>&#9654; Start '
             f"{_esc(env)} session (real orders)</button></form>"
             + (
                 '<form method="post" action="/api/live/reset" style="display:inline" '
@@ -1819,6 +1874,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if running
                 else ""
             )
+            + (
+                '<p class="meta" style="color:#b45309">A <b>basket demo session</b> is holding '
+                "this account — the real-orders Start is disabled. Two sessions on one account "
+                "each keep an independent mirror of the same book (positions net per symbol on "
+                "the exchange), so neither would reconcile. Stop it below first, or co-host the "
+                "strategies in one session from <b>Paper Trading</b>.</p>"
+                if (demo_basket_active and not running)
+                else ""
+            )
+            + "</div>"
+        )
+
+        basket_card = (
+            f'<div class="card"><h2>Basket sessions ({len(basket_job_rows)})</h2>'
+            '<p class="meta">Cross-sectional (carry/factor) sessions. On <b>demo</b> these are the '
+            "only thing placing real orders — a basket can never be in the promoted set the "
+            "per-symbol loop runs. Start them from <a href=\"/dashboard/paper\">Paper Trading</a>; "
+            "Stop them from either page.</p>"
+            + _rows_table(
+                ["Job", "Mode", "Strategies", "Status", "Message", ""],
+                basket_job_rows,
+                "No basket sessions yet — start one from Paper Trading.",
+            )
             + "</div>"
         )
 
@@ -1836,6 +1914,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             status
             + controls
             + jobs_card
+            + basket_card
             + '<p class="meta">Live (real-money) trading is hard-gated: TRADING_MODE=LIVE + '
             "APP_ENV=production + ENABLE_LIVE_TRADING=true, all blocks_live gates PASS, an "
             "approved live_activation sign-off, and bounded-live caps (configs/live.yaml). "
