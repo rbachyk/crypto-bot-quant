@@ -932,3 +932,19 @@ def test_real_orders_start_is_blocked_while_a_basket_demo_holds_the_account(
     # …and the button itself is disabled, not merely warned about.
     idx = after.index("session (real orders)</button>")
     assert "disabled" in after[idx - 200 : idx]
+
+
+def test_checkboxes_keep_native_appearance_despite_the_global_input_reset() -> None:
+    """REGRESSION: the global `select,input,textarea{appearance:none}` reset (built for text inputs
+    and selects) strips a checkbox's tick and pads it into an unclickable-looking blank — the demo
+    strategy checkboxes read as 'can't select'. A targeted override must restore the native control,
+    and its selector must out-specify the reset so it actually wins."""
+    page = _dashboard("demo").get("/dashboard/paper").text
+    # the override exists and restores the native rendering
+    assert "input[type=checkbox],input[type=radio]{appearance:auto" in page
+    # and it comes AFTER the reset (later rule of equal-or-higher specificity wins)
+    reset_at = page.index("select,input,textarea{appearance:none")
+    override_at = page.index("input[type=checkbox],input[type=radio]{appearance:auto")
+    assert override_at > reset_at
+    # the checkboxes the fix is for are actually on the page
+    assert page.count('type="checkbox" class="demo-basket-strat"') >= 2

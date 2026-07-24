@@ -129,6 +129,14 @@ code{font-family:var(--mono);font-size:12px;background:var(--surface-2);padding:
 select,input,textarea{appearance:none;-webkit-appearance:none;background:var(--surface-2);
   color:var(--text);border:1px solid var(--border);padding:8px 12px;border-radius:9px;
   font-family:var(--ui);font-size:13px;transition:.12s}
+/* Checkboxes/radios must KEEP their native rendering — the rule above (built for text inputs and
+   selects) strips the tick and pads the box into an unclickable-looking blank, so a bare checkbox
+   reads as broken. Restore the native control, on-brand via accent-color. */
+input[type=checkbox],input[type=radio]{appearance:auto;-webkit-appearance:auto;
+  width:15px;height:15px;padding:0;margin:0;border-radius:4px;vertical-align:middle;
+  cursor:pointer;accent-color:var(--accent)}
+label:has(input[type=checkbox]),label:has(input[type=radio]){cursor:pointer;
+  display:inline-flex;align-items:center;gap:6px}
 select{padding-right:34px;cursor:pointer;
   background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2379849a' stroke-width='2.4' stroke-linecap='round'><path d='M6 9l6 6 6-6'/></svg>");
   background-repeat:no-repeat;background-position:right 12px center}
