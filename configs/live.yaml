@@ -16,3 +16,17 @@ live:
   max_open_positions: 2          # concurrent live positions
   max_order_notional_pct: 0.05   # ≤ 5% of equity notional per order
   account_equity: 10000.0        # reference equity for notional caps until a live balance is read
+
+# basket_demo — the cross-sectional (carry/factor) DEMO path (src/live/basket_exec.py).
+#
+# A basket runs dollar-neutral and exits on the rebalance cadence, so it deliberately carries NO
+# protective stop between rebalances (a stop knifes the hedge and leaves the other legs naked).
+# On a REAL venue that collides with Section 2.2 (a position must never sit unprotected), so each
+# leg gets a deliberately-WIDE disaster stop instead: far outside normal basket behaviour, but it
+# bounds the loss if this process dies with legs open. These caps apply to demo/testnet only —
+# real-money live is authorised by the LiveActivationGuard above and nothing here loosens it.
+basket_demo:
+  disaster_stop_frac: 0.25       # exchange-resident stop this far adverse per leg (0 = none)
+  max_gross_pct: 0.50            # basket gross notional ≤ 50% of REAL account equity
+  min_account_equity: 100.0      # refuse to start below this demo balance (dust legs)
+  require_flat_book: true        # refuse to start unless the demo account is flat (Section 7)

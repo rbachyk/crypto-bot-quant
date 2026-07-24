@@ -83,7 +83,12 @@ class OrderPlan:
     side: int
     qty: float
     entry: Order
-    stop: Order
+    # Optional ONLY for the cross-sectional (basket) demo path, where a leg is hedged rather
+    # than stopped (src/live/basket_exec.py explains the trade-off and attaches a wide disaster
+    # stop instead). Every directional entry the OrderBuilder produces carries one — and both
+    # venues already branch on ``stop is not None``, so this annotation is catching up with the
+    # behaviour, not loosening it.
+    stop: Order | None
     take_profit: Order | None = None
     trailing: Order | None = None
     # The resolved entry style (Section 18) — the live venue reads it to decide the

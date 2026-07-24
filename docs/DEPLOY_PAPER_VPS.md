@@ -115,6 +115,92 @@ All three drive the same `CrossSectionalEngine` rebalance / leg / funding math a
 Parity Rule). The loop math is offline-proven (`tests/test_basket_paper.py`); the live REST feed is
 network-dependent and VPS-validated. PAPER only — simulated fills, no real orders/funds.
 
+## Basket DEMO trading (real orders, virtual funds)
+
+Paper books **simulated** fills, so it can tell you whether the *edge* is there but never whether
+the **cost model** is. `qbot demo-basket` runs the identical basket math against the Bybit
+**demo** account: every leg open/close is a real order, booked at the **observed** fill.
+
+```
+docker compose exec worker-live python -m src.cli.main \
+  demo-readiness --strategy funding_carry          # pre-flight; places nothing
+
+# BOTH strategies on the ONE demo account — repeat --strategy:
+docker compose exec worker-live python -m src.cli.main \
+  demo-basket --strategy funding_carry --strategy residual_momentum \
+              --timeframe 1h --poll-sec 60
+```
+
+Or from the dashboard: the `run_basket_demo_session` job (same `live` worker, same Stop button),
+which takes a `strategies` list. Sessions are tagged `demo:basket:<strategy>:…` — one per
+strategy, so their statistics stay separate from each other AND from `paper:` history.
+
+### One account, several baskets
+
+An exchange holds **one position per symbol**. Two baskets that both trade BTC share it whether
+or not they know — so running them as two independent processes gives each a private mirror of a
+book they actually share: each sizes against exposure it does not own, and a whole-symbol close
+by one silently flattens the other's leg.
+
+Co-hosting solves it. Naming several strategies in one `demo-basket` run puts them behind a
+shared **`NetPositionManager`** (`src/live/basket_exec.py`): each strategy states its own desired
+position, the manager owns the aggregate and sends only the position **delta** needed to keep
+`Σ(strategy intents) == exchange position`. So:
+
+- a long from one basket and a short from another **net**, exactly as the exchange nets them;
+- a close is this strategy's own delta, never a whole-symbol flatten — nobody can close anybody
+  else's leg;
+- reduce-only is set only for a strict reduction (an order crossing zero would be rejected);
+- reconciliation compares the **aggregate** against the real book each tick. A leg that vanished
+  (disaster stop, liquidation, manual close) is booked at its observed exit and un-mirrored;
+  exposure *larger* than our intent is reported as CRITICAL and never adopted;
+- the account equity is **split** across the strategies, so the aggregate gross still respects
+  `basket_demo.max_gross_pct`. This is the shared capital allocator Section 17 requires before
+  several strategies trade one account — without it, N strategies each sizing off the full
+  balance is N× the intended exposure.
+
+Per-strategy accounting is unchanged: each keeps its own engine, equity slice and PaperSession,
+so the dashboard still shows funding_carry and residual_momentum separately.
+
+`basket_demo.require_flat_book` still refuses to START on a non-flat account: a leftover position
+cannot be attributed to any strategy in the new session, so adopting it would corrupt the
+aggregate from tick 1. Start the strategies **together**; don't add a second process later.
+
+**Known limitation — no intra-tick coalescing.** Each strategy's rebalance is sent as its own
+order, in sequence. When two strategies trade the same symbol in the same tick, that is two
+orders (and two spreads) where a batched implementation would net them into one. The resulting
+position is always correct; only the cost is higher than optimal. Since each order is the
+strategy's own turnover, per-strategy costs stay directly comparable to its backtest.
+
+**It refuses to start unless all of these hold** — each is a deliberate refusal, not a warning:
+
+| Requirement | Why |
+|---|---|
+| `EXCHANGE_ENV=demo` or `testnet` + API keys | `live` is refused outright — this path never reaches real money |
+| `demo-readiness --strategy <id>` PASSes | verified metadata, ownership prefix, risk caps, clean book |
+| **every** named candidate is **lake-validated** | Section 13 — a synthetic/reference-only edge never touches an account. It need NOT be *promoted*: a basket is structurally excluded from the promoted ensemble, and measuring execution is the point |
+| the demo account is **FLAT** | see *One account, several baskets* below |
+| the balance is readable and ≥ `min_account_equity` | a basket sizes its whole book off equity; guessing it is not acceptable |
+
+**Legs carry a wide disaster stop, not a normal one.** A basket holds delta-neutral and exits on
+the rebalance cadence — a per-leg stop would knife the hedge and leave the other legs naked. But
+an unprotected position on a real venue is what Section 2.2 forbids. The compromise
+(`configs/live.yaml` → `basket_demo.disaster_stop_frac`, default 25%) is an exchange-resident stop
+far outside normal basket behaviour: invisible in operation, but it bounds the loss if this
+process dies with legs open. Set it to `0` to place bare legs — a deliberate, logged deviation.
+If a disaster stop *does* fire, the next tick books that leg at its observed exit (it is a real
+exit) and drops it from the mirror.
+
+**Do not mix in a separate process.** The netting only works for strategies co-hosted in one
+session. `paper-live` (per-symbol, e.g. lead_lag) against the SAME demo account is a second
+independent mirror and would reintroduce exactly the collision described above — run it on its
+own demo account, or leave it in paper.
+
+**What a demo run is for.** It answers one question paper cannot: does the backtest's fee/slippage
+model survive a real book? The session logs an execution summary (fill rate, average entry
+slippage, maker rate, total fees, rejects) — compare it against the backtest's assumed costs
+before any of this is considered for real money. It is **not** a promotion, and grants nothing.
+
 ## Risk & position management across the parallel strategies
 
 The three strategies run as **three separate processes**, each with its **own** equity pool

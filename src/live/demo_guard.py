@@ -89,10 +89,16 @@ class DemoReadinessGuard:
         *,
         kill_switch: Any | None = None,
         venue: Any | None = None,
+        basket_candidate_id: str | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self._kill_switch = kill_switch
         self._venue = venue
+        # A basket (cross-sectional) demo run names ONE strategy explicitly and cannot use the
+        # promoted ensemble at all — the per-symbol engine refuses cross-sectional strategies
+        # (src/paper/lake.py). Its eligibility check is therefore about THAT candidate, not the
+        # promoted set; see :meth:`_check_basket_eligibility`.
+        self.basket_candidate_id = basket_candidate_id
         self.environment = self.settings.exchange_env
 
     def evaluate(self) -> DemoReadinessReport:
@@ -103,7 +109,11 @@ class DemoReadinessGuard:
             self._check_risk_caps(),
             self._check_metadata(),
             self._check_tp_sl_capability(),
-            self._check_strategy_eligibility(),
+            (
+                self._check_basket_eligibility(self.basket_candidate_id)
+                if self.basket_candidate_id
+                else self._check_strategy_eligibility()
+            ),
             self._check_reconciliation(),
         ]
         verdict = _worst([c.status for c in checks])
@@ -246,6 +256,66 @@ class DemoReadinessGuard:
         return ReadinessCheck(
             "strategy_eligibility", BLOCKED,
             "no promoted strategy is active — validate + promote at least one on real lake data",
+        )
+
+    def _check_basket_eligibility(self, candidate_id: str) -> ReadinessCheck:
+        """Eligibility for a named cross-sectional (basket) demo run.
+
+        The promoted-ensemble check does not apply here and cannot: a basket is structurally
+        excluded from the promoted active set (``resolve_active_strategies`` filters
+        ``cross_sectional`` out, because the per-symbol engine would crash on it). What this
+        gate requires instead is that the named candidate has been VALIDATED ON REAL LAKE DATA —
+        the Section 13 rule that a real account never sees a synthetic/reference-only edge.
+
+        A lake-validated but SHELVED candidate is allowed through with a loud note: that is the
+        intended demo case (funding_carry / residual_momentum sit short of the promotion bar, and
+        the point of a demo run is to measure their EXECUTION on virtual funds, not to bless the
+        edge). Promotion remains the gate for anything with real money behind it."""
+        from src.strategies.config import load_strategies_config
+        from src.strategies.promotion import validation_verdict
+
+        sc = load_strategies_config()
+        cand = sc.candidate(candidate_id)
+        if cand is None:
+            return ReadinessCheck(
+                "strategy_eligibility", FAIL,
+                f"{candidate_id!r} is not defined in configs/strategies.yaml",
+            )
+        from src.strategies.candidates import build_strategy
+
+        built = build_strategy(cand, sc.strategy_version)
+        if not getattr(built, "cross_sectional", False):
+            return ReadinessCheck(
+                "strategy_eligibility", FAIL,
+                f"{candidate_id!r} is not a cross-sectional (basket) strategy — run it through "
+                "the per-symbol live session instead",
+            )
+        ver = self.settings.strategy_version
+        row = validation_verdict(candidate_id, ver)
+        if row is None:
+            return ReadinessCheck(
+                "strategy_eligibility", BLOCKED,
+                f"{candidate_id!r} has no validation verdict for strategy_version {ver!r} — run "
+                f"`qbot promote-lake` on real downloaded data first (Section 13). NOTE: verdicts "
+                "are keyed by strategy_version; if configs/strategies.yaml has moved on from the "
+                "STRATEGY_VERSION in your .env, they will never match.",
+            )
+        if not row.real_data:
+            return ReadinessCheck(
+                "strategy_eligibility", BLOCKED,
+                f"{candidate_id!r} was validated on reference/synthetic data only — re-validate "
+                "on real lake data before it touches an exchange account (Section 13)",
+            )
+        if not row.promoted:
+            return ReadinessCheck(
+                "strategy_eligibility", PASS,
+                f"{candidate_id!r} is lake-validated but NOT promoted (expectancy "
+                f"{row.expectancy_r:+.4f}R) — allowed on virtual funds to measure EXECUTION only. "
+                "This is not a promotion and grants nothing on a real-money account.",
+            )
+        return ReadinessCheck(
+            "strategy_eligibility", PASS,
+            f"{candidate_id!r} promoted on real lake data (expectancy {row.expectancy_r:+.4f}R)",
         )
 
     def _check_reconciliation(self) -> ReadinessCheck:

@@ -232,6 +232,56 @@ def promoted_strategy_details(strategy_version: str | None = None) -> list[Promo
 REAL_DATA_SOURCE = "lake"
 
 
+@dataclass(frozen=True, slots=True)
+class ValidationVerdict:
+    """One candidate's latest validation verdict — promoted OR shelved.
+
+    :func:`promoted_strategy_details` deliberately returns only promotions (it feeds the live
+    engine's active set). The basket demo path needs the shelved case too: a cross-sectional
+    strategy is structurally excluded from the promoted set, so its demo eligibility is decided
+    by *provenance* (was this validated on real market data?) rather than by promotion."""
+
+    candidate_id: str
+    strategy_version: str
+    promoted: bool
+    status: str
+    expectancy_r: float
+    data_source: str
+    shelved_reasons: tuple[str, ...] = ()
+
+    @property
+    def real_data(self) -> bool:
+        return self.data_source == REAL_DATA_SOURCE
+
+
+def validation_verdict(
+    candidate_id: str, strategy_version: str | None = None
+) -> ValidationVerdict | None:
+    """The latest validation verdict for ``candidate_id`` (promoted or shelved), or None if the
+    candidate has never been validated under ``strategy_version`` + the current engine version."""
+    with session_scope() as session:
+        q = select(StrategyPromotion).where(
+            StrategyPromotion.candidate_id == candidate_id,
+            StrategyPromotion.engine_version == _engine_version(),
+        )
+        if strategy_version:
+            q = q.where(StrategyPromotion.strategy_version == strategy_version)
+        row = (
+            session.execute(q.order_by(desc(StrategyPromotion.validated_at))).scalars().first()
+        )
+        if row is None:
+            return None
+        return ValidationVerdict(
+            candidate_id=row.candidate_id,
+            strategy_version=row.strategy_version,
+            promoted=bool(row.promoted),
+            status=str(row.status),
+            expectancy_r=float(row.expectancy_r),
+            data_source=str((row.summary or {}).get("data_source", "reference")),
+            shelved_reasons=tuple(row.shelved_reasons or ()),
+        )
+
+
 def active_strategy_ids(
     strategy_version: str | None = None,
     *,

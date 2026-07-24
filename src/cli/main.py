@@ -591,6 +591,47 @@ def paper_basket(
     typer.echo(json.dumps({"strategy": strategy, "paper_trades": n}, indent=2))
 
 
+@app.command(name="demo-basket")
+def demo_basket(
+    strategy: list[str] = typer.Option(
+        ..., "--strategy", help="cross-sectional candidate id (repeat to co-host several)"
+    ),
+    config_path: str = typer.Option("configs/data.bybit.yaml", "--config"),
+    timeframe: str = typer.Option("", "--timeframe"),
+    poll_sec: float = typer.Option(60.0, "--poll-sec", help=">0 = continuous (waits for new bars)"),
+    max_ticks: int = typer.Option(0, "--max-ticks", help="0 = run until stopped"),
+) -> None:
+    """DEMO session for basket strategies — REAL orders on the virtual-funds demo account.
+
+    The same basket math as `paper-basket`, but each leg is actually placed on Bybit
+    demo/testnet and booked at the OBSERVED fill — which is what tells you whether the
+    backtest's fee/slippage model survives a real book (a simulated-fill paper run cannot).
+
+    Repeat `--strategy` to run several baskets on the SAME account:
+
+        qbot demo-basket --strategy funding_carry --strategy residual_momentum
+
+    They are co-hosted in one process behind a shared net-position manager, so their legs net
+    per symbol (an exchange holds one position per symbol, whatever the strategies think) and the
+    account equity is split between them. Starting them as two separate processes would instead
+    give each an independent mirror of a book they actually share — which is why a non-flat
+    account is refused.
+
+    Requires EXCHANGE_ENV=demo (or testnet) + API keys, a PASSing `demo-readiness` for EVERY
+    named strategy, and a FLAT demo account. Never places a real-money order: EXCHANGE_ENV=live
+    is refused outright. Ctrl-C / the kill switch flattens every leg before exiting.
+    """
+    from src.data.config import load_data_config
+    from src.live.basket import run_multi_basket_demo_session
+
+    data_cfg = load_data_config(config_path or None)
+    n = run_multi_basket_demo_session(
+        list(strategy), data_cfg=data_cfg, timeframe=timeframe or None,
+        poll_sec=poll_sec, max_ticks=max_ticks or None,
+    )
+    typer.echo(json.dumps({"strategies": list(strategy), "demo_legs": n}, indent=2))
+
+
 @app.command()
 def reports(
     name: str = typer.Option("", "--name", help="one report name ('' = all standard reports)"),
@@ -605,7 +646,11 @@ def reports(
 
 
 @app.command(name="demo-readiness")
-def demo_readiness() -> None:
+def demo_readiness(
+    strategy: str = typer.Option(
+        "", "--strategy", help="cross-sectional candidate id — check BASKET demo eligibility"
+    ),
+) -> None:
     """Pre-flight demo readiness gate — PASS / FAIL / BLOCKED with per-check detail.
 
     Composes the demo-safety controls (kill switch, ownership, risk caps, verified exchange
@@ -614,7 +659,11 @@ def demo_readiness() -> None:
 
     When demo/testnet credentials are configured it connects a (read-only) venue so the
     reconciliation check runs against the REAL exchange book and can PASS; without credentials
-    that one check stays BLOCKED (it cannot confirm a clean book up front)."""
+    that one check stays BLOCKED (it cannot confirm a clean book up front).
+
+    ``--strategy <basket id>`` checks eligibility for a BASKET demo run instead (`demo-basket`):
+    a cross-sectional strategy is structurally excluded from the promoted ensemble, so what is
+    required there is a real-lake validation verdict for that candidate, not promotion."""
     from src.live.demo_guard import DemoReadinessGuard
 
     settings = get_settings()
@@ -632,7 +681,9 @@ def demo_readiness() -> None:
         except Exception as exc:  # noqa: BLE001 - no creds / no network → recon stays BLOCKED
             typer.echo(f"(reconciliation will stay BLOCKED — could not connect venue: {exc})")
 
-    report = DemoReadinessGuard(settings, venue=venue).evaluate()
+    report = DemoReadinessGuard(
+        settings, venue=venue, basket_candidate_id=strategy or None
+    ).evaluate()
     typer.echo(report.report())
     typer.echo(json.dumps(report.to_dict(), indent=2))
     if not report.ok:

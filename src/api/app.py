@@ -3789,6 +3789,59 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return RedirectResponse(url="/dashboard/paper", status_code=303)
 
+    @app.post("/api/paper/run-basket-demo")
+    def run_basket_demo(
+        strategies: str = "", timeframe: str = "", user: str = Depends(require_dashboard_auth)
+    ) -> RedirectResponse:
+        """Start a basket DEMO session — REAL orders on the virtual-funds demo account.
+
+        ``strategies`` is a comma-separated list: naming several CO-HOSTS them in one process
+        behind a shared net-position manager, which is what makes one demo account correct for
+        more than one basket (an exchange holds one position per symbol). The session refuses to
+        start unless EXCHANGE_ENV is demo/testnet, demo-readiness PASSes for every named
+        strategy, and the account is flat — those refusals live in the session itself, so the job
+        fails loudly with the reason rather than half-starting."""
+        from src.jobs import JobQueue
+
+        if settings.exchange_env not in ("demo", "testnet"):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"EXCHANGE_ENV={settings.exchange_env!r} — a basket demo session needs a "
+                    "virtual-funds environment (set EXCHANGE_ENV=demo). Real-money live is never "
+                    "started from here."
+                ),
+            )
+        wanted = [s.strip() for s in strategies.split(",") if s.strip()]
+        known = _cross_sectional_candidate_ids()
+        unknown = [s for s in wanted if s not in known]
+        if not wanted or unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"not basket strategies: {unknown or 'none selected'} (known: {known})",
+            )
+        params: dict = {"strategies": wanted, "requested_by": user}
+        if _valid_timeframe(timeframe):
+            params["timeframe"] = timeframe
+        # ONE demo session at a time, whatever it holds: a second process would keep its own
+        # independent mirror of the same shared account. Not keyed by strategy (unlike the paper
+        # path) precisely because co-hosted strategies share one book.
+        _enqueue_exclusive(
+            JobQueue(settings),
+            "run_basket_demo_session",
+            params,
+            requested_by=user,
+            conflict_detail=(
+                "a basket demo session is already running; stop it first (co-host strategies in "
+                "ONE session rather than starting a second against the same account)"
+            ),
+        )
+        _audit(
+            "run_basket_demo_session", target=",".join(wanted), actor=user,
+            detail={"timeframe": timeframe, "exchange_env": settings.exchange_env},
+        )
+        return RedirectResponse(url="/dashboard/paper", status_code=303)
+
     @app.get("/api/open-positions", response_class=HTMLResponse)
     def open_positions_fragment(user: str = Depends(require_dashboard_auth)) -> str:
         """The Open-positions panel's refreshable inner HTML — polled by the Paper page so the
@@ -3830,11 +3883,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 .scalars()
                 .all()
             )
-            basket_rows = []
-            for j in basket_jobs:
+            demo_jobs = list(
+                session.execute(
+                    select(Job)
+                    .where(Job.job_type == "run_basket_demo_session")
+                    .order_by(desc(Job.created_at))
+                    .limit(20)
+                )
+                .scalars()
+                .all()
+            )
+
+            def _session_row(j: Job) -> str:
                 active = j.status in (JobStatus.QUEUED, JobStatus.RUNNING)
-                strat = str((j.input_params or {}).get("strategy", "?"))
-                tf = str((j.input_params or {}).get("timeframe", "base"))
+                p = j.input_params or {}
+                # The demo path carries a LIST (co-hosted strategies); the paper path one id.
+                names = p.get("strategies") or p.get("strategy") or "?"
+                strat = ", ".join(names) if isinstance(names, list) else str(names)
+                tf = str(p.get("timeframe", "base"))
                 stop = (
                     f"<form method='post' action='/api/jobs/{j.job_id}/cancel' "
                     f"style='display:inline'><button class='btn btn-danger' type='submit'>"
@@ -3843,14 +3909,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     else "-"
                 )
                 status_val = str(j.status.value if hasattr(j.status, "value") else j.status)
-                basket_rows.append(
+                return (
                     f"<tr><td><code>{_esc(strat)}</code></td><td>{_esc(tf)}</td>"
-                    # SSE-updatable badge (data-job) so a basket session's queued→running→done
+                    # SSE-updatable badge (data-job) so a session's queued→running→done
                     # transition + its Stop button update in place, like the Live page — not stuck
                     # until a manual reload (the primary state indicator for a multi-day session).
                     f"<td>{_job_badge(status_val, j.job_id)}</td>"
                     f"<td>{j.created_at.strftime('%Y-%m-%d %H:%M')}</td><td>{stop}</td></tr>"
                 )
+
+            basket_rows = [_session_row(j) for j in basket_jobs]
+            demo_rows = [_session_row(j) for j in demo_jobs]
 
         body_rows = "".join(
             f"<tr><td><code>{_esc(sid)}</code></td><td>{created}</td><td>{ex}</td><td>{rej}</td>"
@@ -3881,6 +3950,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         basket_table = "".join(basket_rows) or (
             "<tr><td colspan='5' class='meta'>No basket sessions yet.</td></tr>"
         )
+        demo_table = "".join(demo_rows) or (
+            "<tr><td colspan='5' class='meta'>No demo sessions yet.</td></tr>"
+        )
+        # ----- basket DEMO (real orders, virtual funds) -------------------- #
+        # Only rendered on a virtual-funds environment: on EXCHANGE_ENV=live there is no safe
+        # action here at all, so the control is absent rather than present-and-refusing.
+        demo_env = settings.exchange_env in ("demo", "testnet")
+        demo_checks = "".join(
+            f'<label style="margin-right:12px"><input type="checkbox" class="demo-basket-strat" '
+            f'value="{_esc(s)}"> <code>{_esc(s)}</code></label>'
+            for s in basket_ids
+        )
+        # POST params travel as QUERY params (the app's convention); onsubmit collects the ticked
+        # strategies into one comma-separated list so they are CO-HOSTED in a single session.
+        demo_submit = (
+            "onsubmit=\"var v=[].slice.call("
+            "document.querySelectorAll('.demo-basket-strat:checked')).map(function(c){return "
+            "c.value});if(!v.length){alert('Pick at least one basket strategy.');return false;}"
+            "this.action='/api/paper/run-basket-demo?strategies='+encodeURIComponent(v.join(','))"
+            "+'&timeframe='+document.getElementById('demo-basket-tf').value;"
+            "return confirm('Start a DEMO basket session? This places REAL orders on the "
+            "virtual-funds '+'demo account (no real money). Selected: '+v.join(', '));\""
+        )
+        demo_card = (
+            f"""
+<div class="card">
+  <h2>Basket DEMO session <span class="badge">{_esc(settings.exchange_env)}</span></h2>
+  <p class="meta"><b>REAL orders on the virtual-funds demo account</b> — the same basket math as
+     the paper sessions above, but each leg is actually placed and booked at the <b>observed</b>
+     fill. That is what tells you whether the backtest's fee/slippage model survives a real book;
+     simulated paper fills structurally cannot.</p>
+  <p class="meta">Tick <b>several</b> strategies to run them on the <b>one</b> account: they are
+     co-hosted behind a shared net-position manager, so their legs net per symbol (an exchange
+     holds one position per symbol) and the account equity is split between them. Requires a
+     PASSing <code>demo-readiness</code> for every strategy and a <b>flat</b> account; the job
+     fails with the reason if not. Sessions are tagged <code>{_esc(settings.exchange_env)}:basket:…</code>
+     and never mix with paper statistics.</p>
+  <form method="post" action="/api/paper/run-basket-demo" style="margin:8px 0" {demo_submit}>
+    <div style="margin-bottom:8px">{demo_checks}</div>
+    <select id="demo-basket-tf" name="timeframe">{tf_opts}</select>
+    <button class="btn btn-danger" type="submit">&#9654; Start basket DEMO session</button>
+  </form>
+  <table>
+    <tr><th>Strategies</th><th>TF</th><th>Status</th><th>Started</th><th></th></tr>
+    {demo_table}
+  </table>
+</div>"""
+            if (demo_env and basket_ids)
+            else ""
+        )
         body = f"""
 <div class="card">
   <h2>Paper Trading ({len(rows)})</h2>
@@ -3910,7 +4029,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     <tr><th>Strategy</th><th>TF</th><th>Status</th><th>Started</th><th></th></tr>
     {basket_table}
   </table>
-</div>"""
+</div>
+{demo_card}"""
         return _page("Paper Trading", body)
 
     # ----- Strategies (sourcing, validation, active promoted set) ---------- #

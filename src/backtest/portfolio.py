@@ -21,6 +21,7 @@ from __future__ import annotations
 import bisect
 import math
 from dataclasses import dataclass
+from typing import Any
 
 import structlog
 
@@ -117,6 +118,13 @@ class CrossSectionalEngine:
         self.stop_frac = float(getattr(params, "stop_frac", 0.02)) or 0.02
         self.risk_scale = min(1.0, max(0.0, float(getattr(strategy, "risk_scale", 1.0))))
         self.name = str(getattr(strategy, "name", "cross_sectional"))
+        # Optional REAL-venue execution (the demo path, src/live/basket_exec.py). None — the
+        # default, and always the case in backtest/paper — keeps every fill modelled from the bar,
+        # so this engine's backtest behaviour is unchanged. When set, the leg is placed on the
+        # venue and booked at the OBSERVED fill instead (the modelled price becomes the order's
+        # reference only). Nothing else about the basket math changes: same scores, same cadence,
+        # same sizing — which is what makes a demo run comparable to its backtest.
+        self.executor: Any | None = None
         self._grid_iv = 1
         self._sym_rets: dict[str, tuple[list[int], list[float]]] = {}
         self._mkt_ret: dict[int, float] = {}
@@ -182,7 +190,9 @@ class CrossSectionalEngine:
         # that bar is at-or-before last_ts by construction, never a future price).
         for sym, leg in list(holdings.items()):
             bar = bars_by_ts[sym].get(last_ts) or by_symbol[sym].bars[-1]
-            equity += self._close_leg(leg, bar, "end_of_data", result, by_symbol[sym])
+            # Backtest path: executor is None, so this never returns None (`or 0.0` is only a
+            # type-level guard, not a silent swallow of a real failed close — `run()` is offline).
+            equity += self._close_leg(leg, bar, "end_of_data", result, by_symbol[sym]) or 0.0
         holdings.clear()
         if result.equity_curve:
             result.equity_curve[-1] = equity
@@ -201,7 +211,13 @@ class CrossSectionalEngine:
             if target.get(sym) != leg.side:
                 bar = bars_by_ts[sym].get(ts)
                 if bar is not None:
-                    equity += self._close_leg(leg, bar, "rebalance", result, by_symbol[sym])
+                    pnl = self._close_leg(leg, bar, "rebalance", result, by_symbol[sym])
+                    if pnl is None:
+                        # Real-venue close failed — the exchange still holds this leg. Keep it in
+                        # holdings (so the mirror stays honest and the next cadence retries) and
+                        # do NOT open a replacement for the symbol this rebalance.
+                        continue
+                    equity += pnl
                     del holdings[sym]
                     continue
                 # No bar at this rebalance (symbol halted/delisted/feed gap over a multi-day
@@ -217,7 +233,10 @@ class CrossSectionalEngine:
                     )
                     del holdings[sym]
                     continue
-                equity += self._close_leg(leg, prior, "gap_close", result, sym_in)
+                gap_pnl = self._close_leg(leg, prior, "gap_close", result, sym_in)
+                if gap_pnl is None:
+                    continue  # real close failed — keep the leg, retry next cadence
+                equity += gap_pnl
                 del holdings[sym]
         # Open new legs (stable same-side members are kept — no churn). Per-leg target notional is
         # divided over the FULL target basket (all longs+shorts, kept + new), so each new leg is the
@@ -309,6 +328,35 @@ class CrossSectionalEngine:
             qty = int(qty / qty_step) * qty_step
         if qty <= 0 or qty < min_order_size or qty * ref_price < min_notional:
             return None  # unexecutable leg — don't book a fill the venue would reject
+        if self.executor is not None:
+            # REAL placement (demo). The order's reference is the bar CLOSE, not the open: in the
+            # live loop `bar` is the last CLOSED bar, so its open is up to one full timeframe stale
+            # and would size/price the order off an old print. A rejected or unfilled leg returns
+            # None here and simply doesn't open — the basket carries the tilt, tracked by the
+            # net-directional warning below, rather than booking a fill that never happened.
+            live_ref = float(bar["close"]) or ref_price
+            placed = self.executor.open_leg(
+                symbol=sym, side=side, qty=qty, ref_price=live_ref, ts=ts
+            )
+            if placed is None or placed.qty <= 0:
+                return None
+            real_notional = placed.qty * placed.price
+            return _Leg(
+                symbol=sym,
+                side=side,
+                qty=placed.qty,
+                entry_ts=ts,
+                entry_price=placed.price,
+                notional=real_notional,
+                risk_amount=real_notional * self.stop_frac,
+                entry_fee=placed.fee,
+                funding=0.0,
+                slippage_cost=placed.slippage_cost,
+                regime=_regime_of(row, spread_bps),
+                session=int(row.get("session_code", 0)),
+                last_funding_ts=ts,
+                last_mark=placed.price,
+            )
         filled_maker = False
         if self.maker:
             # Passive limit posted inside the rebalance bar's open; fills ONLY if the bar trades
@@ -361,9 +409,17 @@ class CrossSectionalEngine:
 
     def _close_leg(
         self, leg: _Leg, bar: dict, reason: str, result: BacktestResult, sym_in: SymbolInput
-    ) -> float:
+    ) -> float | None:
+        """Book the leg's exit and return its realized P&L.
+
+        Returns ``None`` ONLY on the real-venue (demo) path when the close did not go through —
+        the caller must then KEEP the leg and retry on the next cadence (M15: a failed close is a
+        failed close, never a mirror silently dropped while the exchange position runs on). In
+        backtest/paper (``executor is None``) this always returns a float."""
         exit_ts = int(bar["ts"])
         spread_bps = float(sym_in.spread_bps_at(exit_ts))  # per-symbol modelled spread, both ways
+        if self.executor is not None:
+            return self._close_leg_live(leg, bar, reason, result, exit_ts)
         filled_maker = False
         exit_price = 0.0
         exit_fee = 0.0
@@ -419,6 +475,46 @@ class CrossSectionalEngine:
                 slippage_cost=leg.slippage_cost + exit_slip_cost,
                 pnl=pnl,
                 pnl_r=pnl_r,
+                regime=leg.regime,
+                session=leg.session,
+                bars_held=int((exit_ts - leg.entry_ts) // self._grid_iv),
+            )
+        )
+        return pnl
+
+    def _close_leg_live(
+        self, leg: _Leg, bar: dict, reason: str, result: BacktestResult, exit_ts: int
+    ) -> float | None:
+        """Close one leg on the REAL venue and book it at the OBSERVED exit (demo path)."""
+        ref_price = float(bar["close"])
+        closed = self.executor.close_leg(  # type: ignore[union-attr]
+            symbol=leg.symbol, side=leg.side, qty=leg.qty,
+            ref_price=ref_price, entry_ts=leg.entry_ts,
+        )
+        if closed is None:
+            return None  # the exchange still holds it — keep the leg, retry next cadence
+        exit_price = closed.price
+        gross = leg.side * (exit_price - leg.entry_price) * leg.qty
+        total_fee = leg.entry_fee + closed.fee
+        pnl = gross - total_fee - leg.funding
+        result.trades.append(
+            Trade(
+                symbol=leg.symbol,
+                strategy=self.name,
+                side=leg.side,
+                qty=leg.qty,
+                entry_ts=leg.entry_ts,
+                entry_price=leg.entry_price,
+                exit_ts=exit_ts,
+                exit_price=exit_price,
+                exit_reason=reason,
+                notional=leg.notional,
+                risk_amount=leg.risk_amount,
+                fee=total_fee,
+                funding=leg.funding,
+                slippage_cost=leg.slippage_cost + closed.slippage_cost,
+                pnl=pnl,
+                pnl_r=pnl / leg.risk_amount if leg.risk_amount > 0 else 0.0,
                 regime=leg.regime,
                 session=leg.session,
                 bars_held=int((exit_ts - leg.entry_ts) // self._grid_iv),

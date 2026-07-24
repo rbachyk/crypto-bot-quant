@@ -203,6 +203,29 @@ candidate pool itself is human-authored in `configs/strategies.yaml` (a hypothes
 there is no random strategy search, by design); the button re-sources and re-ranks that pool. With
 nothing promoted yet, a demo/live run simply trades nothing — faithful to live.
 
+**Basket (cross-sectional) demo trading.** A live/demo run through `qbot live` is a **per-symbol**
+loop and cannot drive a basket strategy — `funding_carry` / `residual_momentum` are filtered out of
+the promoted active set by construction. Their demo path is **`qbot demo-basket`**: the same
+`CrossSectionalEngine` math, but every leg open/close is a REAL order on the virtual-funds demo
+account, booked at the **observed** fill. That is the one question simulated paper fills cannot
+answer — does the backtest's fee/slippage model survive a real book? It refuses to start unless
+`demo-readiness --strategy <id>` PASSes and the candidate is **lake-validated** (promotion is not
+required — a basket can never be in the promoted set — but synthetic/reference-only is refused).
+Legs carry a deliberately-wide *disaster stop* rather than a normal one (a real stop would knife
+the hedge; no stop at all would leave a live position unprotected). `EXCHANGE_ENV=live` is
+refused outright.
+
+**Several baskets, one demo account.** Repeat `--strategy` (`qbot demo-basket --strategy
+funding_carry --strategy residual_momentum`) to co-host them in one session. An exchange holds
+**one position per symbol**, so independent per-strategy mirrors would collide — each sizing
+against exposure it does not own, and a whole-symbol close by one flattening the other's leg.
+Co-hosted strategies instead share a **`NetPositionManager`**: each states its desired position,
+the manager owns the aggregate and sends only the position **delta**, so
+`Σ(strategy intents) == exchange position` holds every tick, and the account equity is split so
+aggregate gross stays within `basket_demo.max_gross_pct` — the shared capital allocator Section
+17 requires before several strategies trade one account. Per-strategy sessions/statistics stay
+separate. Details: [`docs/DEPLOY_PAPER_VPS.md`](docs/DEPLOY_PAPER_VPS.md).
+
 End-to-end research flow: **research promotes candidates → `strategy_promotions` registry →
 paper sources promoted strategies → `paper_trades` → dashboard**. Alerts deliver to the log/
 dashboard sink plus optional Telegram/email transports (`ALERT_TELEGRAM_*` / `ALERT_EMAIL_*`).

@@ -917,6 +917,61 @@ def _run_basket_paper_session(ctx: JobContext, params: dict) -> dict:
     }
 
 
+@job_handler("run_basket_demo_session")
+def _run_basket_demo_session(ctx: JobContext, params: dict) -> dict:
+    """Run + persist a continuous basket DEMO session — REAL orders on virtual funds.
+
+    Same shape as ``run_basket_paper_session``, but legs are placed on the Bybit demo/testnet
+    venue and booked at the observed fill (Section 18/35). Refuses to start unless EXCHANGE_ENV
+    is demo/testnet, the demo readiness gate PASSes for this strategy, and the account is flat —
+    a refusal is a clean, logged non-start, never a partial run. Stop flattens every leg."""
+    from src.config import get_settings
+    from src.data.config import load_data_config
+    from src.live.basket import run_multi_basket_demo_session
+
+    settings = get_settings()
+    raw = params.get("strategies") or params.get("strategy") or params.get("candidate_id") or ""
+    strategies = [s.strip() for s in (raw if isinstance(raw, list) else [raw]) if str(s).strip()]
+    if not strategies:
+        raise ValueError(
+            "run_basket_demo_session requires 'strategy' (or a 'strategies' list of "
+            "cross-sectional ids to co-host on the one demo account)"
+        )
+    strategy = ", ".join(strategies)
+    config_path = str(params.get("config_path") or "configs/data.bybit.yaml")
+    data_cfg = load_data_config(config_path)
+    timeframe = params.get("timeframe") or None
+    poll_sec = float(params.get("poll_sec") or 60.0)
+    max_ticks = int(params["max_ticks"]) if params.get("max_ticks") else None
+
+    ctx.log(
+        f"starting basket DEMO session (REAL orders, virtual funds): strategy={strategy} "
+        f"env={settings.exchange_env} timeframe={timeframe or data_cfg.base_timeframe} "
+        f"poll_sec={poll_sec} max_ticks={'continuous' if max_ticks is None else max_ticks}",
+        level="WARNING",
+    )
+    ctx.progress(0, max_ticks or 0, "pre-flight: demo readiness + book reconciliation")
+
+    n_trades = run_multi_basket_demo_session(
+        strategies,
+        data_cfg=data_cfg,
+        timeframe=timeframe,
+        poll_sec=poll_sec,
+        max_ticks=max_ticks,
+        settings=settings,
+        should_stop=lambda: ctx.is_cancelled() or not ctx.still_owns(),
+        on_event=ctx.log,
+        on_tick=lambda i, msg: ctx.progress(i, max_ticks or 0, msg),
+    )
+    ctx.progress(max_ticks or 0, max_ticks or 0, f"stopped: {n_trades} demo legs booked")
+    return {
+        "message": f"basket demo session ({strategy}): {n_trades} legs booked",
+        "strategy": strategy,
+        "strategies": strategies,
+        "trades": n_trades,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Live / demo trading loop (dashboard-triggered; runs on the dedicated `live`  #
 # queue). Lets the operator start, watch, stop, and restart a demo/testnet run #

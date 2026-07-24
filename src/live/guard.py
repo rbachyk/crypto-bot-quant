@@ -39,6 +39,31 @@ class LiveLimits:
     account_equity: float = 10_000.0
 
 
+@dataclass(frozen=True, slots=True)
+class BasketDemoLimits:
+    """Caps for the cross-sectional DEMO path (``configs/live.yaml`` → ``basket_demo``).
+
+    Demo/testnet only — virtual funds. These do NOT authorise anything on a real-money account;
+    live placement still goes through :class:`LiveActivationGuard`."""
+
+    disaster_stop_frac: float = 0.25
+    max_gross_pct: float = 0.50
+    min_account_equity: float = 100.0
+    require_flat_book: bool = True
+
+
+@lru_cache
+def load_basket_demo_limits(path: str | None = None) -> BasketDemoLimits:
+    yaml_path = Path(path) if path else LIVE_YAML
+    data = (yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}).get("basket_demo", {})
+    return BasketDemoLimits(
+        disaster_stop_frac=max(0.0, float(data.get("disaster_stop_frac", 0.25))),
+        max_gross_pct=max(0.0, float(data.get("max_gross_pct", 0.50))),
+        min_account_equity=max(0.0, float(data.get("min_account_equity", 100.0))),
+        require_flat_book=bool(data.get("require_flat_book", True)),
+    )
+
+
 @lru_cache
 def load_live_limits(path: str | None = None) -> LiveLimits:
     yaml_path = Path(path) if path else LIVE_YAML
