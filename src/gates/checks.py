@@ -241,6 +241,36 @@ def _check_killswitch_independent(settings: Settings) -> Criterion:
 # --------------------------------------------------------------------------- #
 # DB                                                                           #
 # --------------------------------------------------------------------------- #
+def _check_schema_at_head(engine: object) -> Criterion:
+    """Compare the DB's stamped alembic revision against the migration head on disk.
+
+    Best-effort: if alembic's own config/scripts can't be read (a packaging layout without the
+    migrations directory), this reports OK rather than failing a gate on a check it could not
+    perform — the criterion exists to catch a real drift, not to invent one."""
+    try:
+        from alembic.config import Config
+        from alembic.script import ScriptDirectory
+
+        cfg = Config(str(REPO_ROOT / "alembic.ini"))
+        cfg.set_main_option("script_location", str(REPO_ROOT / "migrations"))
+        heads = set(ScriptDirectory.from_config(cfg).get_heads())
+        with engine.connect() as conn:  # type: ignore[attr-defined]
+            current = {
+                r[0] for r in conn.execute(text("SELECT version_num FROM alembic_version"))
+            }
+    except Exception as exc:  # noqa: BLE001 - can't determine → don't fail on our own blind spot
+        return Criterion.ok("schema_at_head", f"not determinable ({type(exc).__name__})")
+    if not heads:
+        return Criterion.ok("schema_at_head", "no migrations defined")
+    if current == heads:
+        return Criterion.ok("schema_at_head", f"at head {sorted(heads)}")
+    return Criterion.fail(
+        "schema_at_head",
+        f"database at {sorted(current) or ['<unstamped>']}, code expects {sorted(heads)} — "
+        "run `make migrate` (pages will 500 on columns the DB does not have)",
+    )
+
+
 def check_db(settings: Settings) -> list[Criterion]:
     out: list[Criterion] = []
     try:
@@ -259,6 +289,13 @@ def check_db(settings: Settings) -> list[Criterion]:
         if "alembic_version" in tables
         else Criterion.fail("alembic_applied", "run `make migrate`")
     )
+
+    # …and AT HEAD, not merely stamped. A deploy that ships new code without running the
+    # migrations leaves the DB behind the ORM, and the only symptom is dashboard pages rendering
+    # the generic error shell while "column X does not exist" sits in the logs. The presence of
+    # the alembic_version table said nothing about that.
+    if "alembic_version" in tables:
+        out.append(_check_schema_at_head(engine))
 
     missing = REQUIRED_TABLES - tables
     out.append(

@@ -1040,6 +1040,21 @@ def _breakdown_table(title: str, rows: list[dict], group_header: str) -> str:
     )
 
 
+def _latest_gate_results(session: Any) -> dict[str, Any]:
+    """The most recent :class:`GateResult` per gate — one row per gate, resolved in SQL.
+
+    Four views want exactly this, and each of them used to fetch the ENTIRE gate-result history as
+    ORM entities (every row carrying its JSON criteria/details) only to keep the first per gate_id
+    in Python. Profiling a Road-to-Live render showed the cost plainly: ~104k ORM instances and
+    ~208k JSON decodes per page view, growing with every gate run ever recorded. ``max(id) GROUP BY
+    gate_id`` is precisely the "latest" that the id-descending ordering encoded."""
+    latest_ids = select(func.max(GateResult.id)).group_by(GateResult.gate_id)
+    rows = (
+        session.execute(select(GateResult).where(GateResult.id.in_(latest_ids))).scalars().all()
+    )
+    return {r.gate_id: r for r in rows}
+
+
 def _gate_status_line(g: Any) -> str:
     """Compact persistent gate widget (Section 25 'Gate Status Widget')."""
     score = g.live_readiness_score
@@ -2089,14 +2104,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Realized trades only — exclude still-open entry rows so this card's count / maker% /
             # exchange-side-stop% / fees match the KPI row above it (which goes through
             # compute_trading_stats), instead of being diluted by held positions' entry rows.
-            q = _apply_env(select(PaperTradeRecord), env_scope).where(
-                PaperTradeRecord.exit_reason != "open"
-            )
+            # Five columns, not the mapped entity: this page counts and averages, and an ORM
+            # object per closed trade was most of its render time.
+            q = _apply_env(
+                select(
+                    PaperTradeRecord.execution_route,
+                    PaperTradeRecord.has_exchange_side_stop,
+                    PaperTradeRecord.slippage_cost,
+                    PaperTradeRecord.fee,
+                    PaperTradeRecord.funding,
+                    PaperTradeRecord.exit_reason,
+                ),
+                env_scope,
+            ).where(PaperTradeRecord.exit_reason != "open")
             if window.start:
                 q = q.where(PaperTradeRecord.created_at >= window.start)
             if window.end:
                 q = q.where(PaperTradeRecord.created_at <= window.end)
-            trades = list(s.execute(q).scalars().all())
+            trades = list(s.execute(q).all())
         n = len(trades)
         maker = sum(1 for t in trades if t.execution_route == "maker")
         with_stop = sum(1 for t in trades if t.has_exchange_side_stop)
@@ -2877,20 +2902,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/gates")
     def list_gates(user: str = Depends(require_dashboard_auth)) -> list[dict]:
         with session_scope() as session:
-            rows = (
-                session.execute(
-                    select(GateResult).order_by(GateResult.gate_id, desc(GateResult.id))
-                )
-                .scalars()
-                .all()
-            )
-            # Only latest result per gate.
-            seen: set[str] = set()
             out = []
-            for r in rows:
-                if r.gate_id in seen:
-                    continue
-                seen.add(r.gate_id)
+            for _gid, r in sorted(_latest_gate_results(session).items()):
                 out.append(
                     {
                         "gate_id": r.gate_id,
@@ -2910,17 +2923,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         catalog = load_catalog()
         with session_scope() as session:
-            rows = (
-                session.execute(
-                    select(GateResult).order_by(GateResult.gate_id, desc(GateResult.id))
-                )
-                .scalars()
-                .all()
-            )
-            latest_by_gate: dict[str, GateResult] = {}
-            for r in rows:
-                if r.gate_id not in latest_by_gate:
-                    latest_by_gate[r.gate_id] = r
+            latest_by_gate: dict[str, GateResult] = _latest_gate_results(session)
 
             gates_out = []
             critical_total = 0
@@ -3086,17 +3089,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         catalog = load_catalog()
         with session_scope() as session:
-            rows = (
-                session.execute(
-                    select(GateResult).order_by(GateResult.gate_id, desc(GateResult.id))
-                )
-                .scalars()
-                .all()
-            )
-            latest: dict[str, GateResult | None] = {}
-            for r in rows:
-                if r.gate_id not in latest:
-                    latest[r.gate_id] = r
+            latest: dict[str, GateResult | None] = dict(_latest_gate_results(session))
 
         table_rows = ""
         for gate_id, spec in catalog.items():
@@ -3213,17 +3206,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         catalog = load_catalog()
         with session_scope() as session:
-            rows = (
-                session.execute(
-                    select(GateResult).order_by(GateResult.gate_id, desc(GateResult.id))
-                )
-                .scalars()
-                .all()
-            )
-            latest: dict[str, GateResult | None] = {}
-            for r in rows:
-                if r.gate_id not in latest:
-                    latest[r.gate_id] = r
+            latest: dict[str, GateResult | None] = dict(_latest_gate_results(session))
 
         critical_total = sum(1 for s in catalog.values() if s.blocks_live_resolved())
         critical_passed = sum(

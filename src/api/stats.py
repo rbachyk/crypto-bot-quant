@@ -295,7 +295,21 @@ def compute_trading_stats(
         # exit_reason="open" row (pnl = -entry_fee) and updated in place when it closes; counting
         # it here would treat every still-open position as a losing trade and double-count its live
         # OpenPosition row. Closed trades carry stop/take_profit/time_stop/end_of_data.
-        q = select(PaperTradeRecord).where(PaperTradeRecord.exit_reason != "open")
+        # Only the COLUMNS the statistics actually read — not full ORM entities. The equity curve
+        # and per-trade series genuinely need every closed trade (so this stays a row scan, see the
+        # open finding on session-scoped aggregation), but instantiating a mapped object per trade
+        # was the single largest cost in a dashboard render and buys nothing here.
+        q = select(
+            PaperTradeRecord.created_at,
+            PaperTradeRecord.symbol,
+            PaperTradeRecord.strategy,
+            PaperTradeRecord.regime,
+            PaperTradeRecord.fee,
+            PaperTradeRecord.slippage_cost,
+            PaperTradeRecord.funding,
+            PaperTradeRecord.pnl,
+            PaperTradeRecord.pnl_r,
+        ).where(PaperTradeRecord.exit_reason != "open")
         if window.start:
             q = q.where(PaperTradeRecord.created_at >= window.start)
         if window.end:
@@ -311,9 +325,7 @@ def compute_trading_stats(
         # SAME bar share a timestamp — order by insert id too so the equity curve / drawdown are
         # deterministic (insert order ≈ close order) rather than DB-dependent.
         rows = list(
-            session.execute(
-                q.order_by(PaperTradeRecord.created_at, PaperTradeRecord.id)
-            ).scalars().all()
+            session.execute(q.order_by(PaperTradeRecord.created_at, PaperTradeRecord.id)).all()
         )
 
     st.total_trades = len(rows)
@@ -438,17 +450,26 @@ def compute_gate_stats(window: TimeWindow) -> GateStats:
     catalog = load_catalog()
 
     with session_scope() as session:
-        # For each gate, find its latest result.
-        latest_by_gate: dict[str, GateStatus] = {}
-        q = select(GateResult).order_by(GateResult.gate_id, GateResult.id.desc())
+        # For each gate, find its latest result — as ONE row per gate, not the whole history.
+        # This used to materialise every GateResult ever written (full ORM entities, each with its
+        # JSON criteria/details payload) just to keep the first row per gate_id. The Overview and
+        # Stats pages both render this on every load, so the cost was paid twice per page view and
+        # grew with every gate run. ``max(id)`` reproduces the previous "order by id desc, keep
+        # first" exactly, and the two-column select never builds an ORM object.
+        latest_ids = select(func.max(GateResult.id)).group_by(GateResult.gate_id)
         if window.start:
-            q = q.where(GateResult.started_at >= window.start)
+            latest_ids = latest_ids.where(GateResult.started_at >= window.start)
         if window.end:
-            q = q.where(GateResult.started_at <= window.end)
-        rows = session.execute(q).scalars().all()
-        for row in rows:
-            if row.gate_id not in latest_by_gate:
-                latest_by_gate[row.gate_id] = row.status
+            latest_ids = latest_ids.where(GateResult.started_at <= window.end)
+        latest_by_gate: dict[str, GateStatus] = dict(
+            session.execute(
+                select(GateResult.gate_id, GateResult.status).where(
+                    GateResult.id.in_(latest_ids)
+                )
+            )
+            .tuples()
+            .all()
+        )
 
         for gate_id in catalog:
             status = latest_by_gate.get(gate_id, GateStatus.NOT_RUN)
@@ -488,26 +509,31 @@ def compute_gate_stats(window: TimeWindow) -> GateStats:
 
 
 def compute_job_stats(window: TimeWindow) -> JobStats:
+    """Job counts by status — aggregated in SQL.
+
+    Counting these in Python meant loading every Job row in the window as a full ORM entity,
+    including its JSON ``params`` / ``result`` / ``related_versions`` payloads, on every render of
+    the Overview and Stats pages. Profiling a dashboard render showed exactly that: ~55k ORM
+    instances and ~73k JSON decodes per page, dominating a ~1.3s render. The database can count."""
     stats = JobStats()
+    by_status = {
+        JobStatus.SUCCEEDED: "succeeded",
+        JobStatus.FAILED: "failed",
+        JobStatus.RUNNING: "running",
+        JobStatus.QUEUED: "queued",
+        JobStatus.CANCELLED: "cancelled",
+    }
     with session_scope() as session:
-        q = select(Job)
+        q = select(Job.status, func.count()).group_by(Job.status)
         if window.start:
             q = q.where(Job.created_at >= window.start)
         if window.end:
             q = q.where(Job.created_at <= window.end)
-        jobs = session.execute(q).scalars().all()
-        stats.total = len(jobs)
-        for j in jobs:
-            if j.status is JobStatus.SUCCEEDED:
-                stats.succeeded += 1
-            elif j.status is JobStatus.FAILED:
-                stats.failed += 1
-            elif j.status is JobStatus.RUNNING:
-                stats.running += 1
-            elif j.status is JobStatus.QUEUED:
-                stats.queued += 1
-            elif j.status is JobStatus.CANCELLED:
-                stats.cancelled += 1
+        for status, count in session.execute(q).all():
+            stats.total += int(count)
+            field = by_status.get(status)
+            if field is not None:
+                setattr(stats, field, getattr(stats, field) + int(count))
     return stats
 
 
@@ -519,17 +545,16 @@ def compute_universe_stats() -> UniverseStats:
         ).scalar_one_or_none()
         if latest_version:
             stats.universe_version = latest_version.version
-            members = (
-                session.execute(
-                    select(UniverseMember).where(
-                        UniverseMember.universe_version == latest_version.version
-                    )
-                )
-                .scalars()
-                .all()
+            # Two counts, not a materialised membership list (same reason as the job counts).
+            rows = session.execute(
+                select(UniverseMember.status, func.count())
+                .where(UniverseMember.universe_version == latest_version.version)
+                .group_by(UniverseMember.status)
+            ).all()
+            stats.total_symbols = sum(int(n) for _s, n in rows)
+            stats.active_symbols = sum(
+                int(n) for s, n in rows if getattr(s, "value", s) == "active"
             )
-            stats.total_symbols = len(members)
-            stats.active_symbols = sum(1 for m in members if m.status.value == "active")
     return stats
 
 

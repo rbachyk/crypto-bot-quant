@@ -81,23 +81,43 @@ class RiskStateStore:
             _log.warning("risk_state_write_failed", path=str(self._path), exc_info=True)
 
     # ------------------------------------------------------------------ #
+    def _refresh(self) -> dict[str, Any]:
+        """Re-read the FILE — it, not this object, is the authority.
+
+        The in-memory dict is a cache, and a stale cache broke the one procedure this store
+        exists to serve. ``qbot risk-reset`` runs in a SEPARATE process: it cleared the file
+        while a running session held the old dict, so the session kept refusing every entry
+        (``risk_halt_pending_manual_reset``) as if nothing had happened, and its next routine
+        persist wrote the whole stale dict back — RESURRECTING the halt the operator had just
+        cleared, on disk, where the next restart would find it again. Nothing surfaced any of
+        this: the CLI printed "cleared". Re-reading also makes two sessions sharing one
+        environment (account partitioning) see each other's trips instead of overwriting them.
+        """
+        self._state = self._read()
+        return self._state
+
     def load(self) -> dict[str, Any]:
-        """The current persisted state (in-memory copy)."""
-        return dict(self._state)
+        """The current persisted state (re-read from disk)."""
+        return dict(self._refresh())
 
     def get(self, key: str, default: Any = None) -> Any:
-        return self._state.get(key, default)
+        return self._refresh().get(key, default)
 
     def update(self, **fields: Any) -> None:
-        """Merge ``fields`` into the state and persist atomically."""
-        self._state.update(fields)
+        """Merge ``fields`` into the persisted state atomically.
+
+        Read-modify-write against the file, so a routine persist only ever moves the fields it
+        was actually given — it can never carry a stale copy of somebody else's key (a cleared
+        halt, another session's trip) back to disk."""
+        self._refresh().update(fields)
         self._write()
 
     # ------------------------------------------------------------------ #
     def trip(self, reason: str, *, ts_ms: int | None = None) -> None:
         """Record a manual-reset halt. The FIRST trip wins (a later re-evaluation must not
-        overwrite the original cause); idempotent while tripped."""
-        if self._state.get("tripped_reason"):
+        overwrite the original cause) — across processes too, hence the re-read; idempotent
+        while tripped."""
+        if self._refresh().get("tripped_reason"):
             return
         self._state["tripped_reason"] = str(reason)
         if ts_ms is not None:
@@ -106,15 +126,16 @@ class RiskStateStore:
         _log.warning("risk_halt_tripped", env=self.env, reason=reason)
 
     def tripped_reason(self) -> str | None:
-        r = self._state.get("tripped_reason")
+        r = self._refresh().get("tripped_reason")
         return str(r) if r else None
 
     def reset(self, *, actor: str = "cli") -> dict[str, Any]:
         """MANUAL reset (the only path that clears a tripped halt / refills the order budget).
 
         Clears the tripped flag, the loss-window anchors and the bounded-live budget; returns
-        the state that was cleared so the operator sees what they reset."""
-        cleared = dict(self._state)
+        the state that was cleared so the operator sees what they reset. A session running
+        against this environment picks the reset up on its next read — no restart required."""
+        cleared = dict(self._refresh())
         self._state = {}
         self._write()
         _log.warning("risk_state_reset", env=self.env, actor=actor, cleared=cleared)

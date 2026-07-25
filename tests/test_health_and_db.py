@@ -71,3 +71,37 @@ def test_readiness_probe_covers_db_and_redis() -> None:
     report = check_readiness()
     assert {c.name for c in report.components} == {"database", "redis"}
     assert report.healthy is True, report.to_dict()
+
+
+@requires_db
+def test_infra_gate_notices_a_database_behind_the_migration_head() -> None:
+    """A deploy that ships new code without running migrations leaves the DB behind the ORM, and
+    the only symptom is dashboard pages rendering the generic error shell while "column X does not
+    exist" sits in the logs. The INFRA gate only checked that the alembic_version TABLE existed,
+    which says nothing about the revision — so drift passed the gate."""
+    from src.config import Settings
+    from src.gates.checks import _check_schema_at_head, check_db
+
+    criteria = {c.id: c for c in check_db(Settings(_env_file=None))}
+    assert "schema_at_head" in criteria
+    assert criteria["schema_at_head"].status == "PASS"  # the test DB is migrated to head
+
+    class _StaleDB:
+        """An engine stamped at an ancient revision."""
+
+        def connect(self):
+            class _Conn:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def execute(self, *_a, **_k):
+                    return [("0001",)]
+
+            return _Conn()
+
+    stale = _check_schema_at_head(_StaleDB())
+    assert stale.status == "FAIL"
+    assert "0001" in stale.detail and "make migrate" in stale.detail
