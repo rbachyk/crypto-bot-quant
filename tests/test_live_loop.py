@@ -591,3 +591,54 @@ def test_unpartitioned_reconcile_still_halts_on_foreign() -> None:
     session = loop.engine.new_session("t")
     assert loop._reconcile_live(session) is True
     assert session.foreign_order_halt_triggered
+
+
+def test_unpartitioned_reconcile_keeps_our_own_position_on_bybit() -> None:
+    """REGRESSION (the default, unpartitioned path — no strategy declares live_symbols today).
+
+    Bybit's position read echoes no clientOrderId, so `owned` is False for EVERY real position,
+    including the one this session just opened. Keyed off that flag alone the session declared its
+    own position foreign on every tick — a permanent CRITICAL with entries halted — and, worse,
+    treated it as ABSENT: after the debounce it retired the mirror position and booked a fabricated
+    exchange-side exit for a position that was still open, freeing the concurrency slot and leaving
+    a live position running with only its resident stop."""
+    from src.execution.venue import VenuePosition
+
+    settings = _testnet_settings()
+    fake = FakeCcxt(positions=[
+        # Still open on the exchange, and owned=False exactly as Bybit reports it.
+        {"symbol": "BTC/USDT:USDT", "side": "long", "contracts": 0.01, "entryPrice": 50_000.0,
+         "info": {}},
+    ])
+    venue = CcxtLiveVenue(load_metadata_config(), settings, client=fake)
+    venue.positions["BTC/USDT:USDT"] = VenuePosition(  # what place_bracket left in the mirror
+        symbol="BTC/USDT:USDT", side=1, qty=0.01, entry_price=50_000.0, owned=True
+    )
+    loop = LiveLoop(mode="testnet", venue=venue, settings=settings)  # no scope
+    session = loop.engine.new_session("t")
+
+    for _ in range(4):  # well past _ABSENT_DROP_TICKS
+        assert loop._reconcile_live(session) is False, "our own open position is not foreign"
+    assert not session.foreign_order_halt_triggered
+    assert "BTC/USDT:USDT" in venue.positions, "a position still ON THE BOOK must not be retired"
+    assert not [t for t in session.trades if t.exit_reason == "exchange_exit"]
+
+
+def test_unpartitioned_reconcile_still_drops_a_position_that_really_closed() -> None:
+    """The debounce must still fire when the position is genuinely gone from the book — the fix
+    above must not turn 'still listed' into 'never drop'."""
+    from src.execution.venue import VenuePosition
+
+    settings = _testnet_settings()
+    fake = FakeCcxt()  # exchange lists NO positions: the SL/TP closed it
+    venue = CcxtLiveVenue(load_metadata_config(), settings, client=fake)
+    venue.positions["BTC/USDT:USDT"] = VenuePosition(
+        symbol="BTC/USDT:USDT", side=1, qty=0.01, entry_price=50_000.0, owned=True
+    )
+    loop = LiveLoop(mode="testnet", venue=venue, settings=settings)
+    session = loop.engine.new_session("t")
+
+    loop._reconcile_live(session)
+    assert "BTC/USDT:USDT" in venue.positions  # debounced on the first absent tick
+    loop._reconcile_live(session)
+    assert "BTC/USDT:USDT" not in venue.positions  # retired once genuinely absent

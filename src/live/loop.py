@@ -255,8 +255,18 @@ class LiveLoop:
             if in_scope(v.symbol) and not own.is_own(v.client_id)
         )
         if scope is None:
-            foreign_positions = sorted(s for s, p in exch_positions.items() if not p.owned)
-            owned_now = {s for s, p in exch_positions.items() if p.owned}
+            # The `owned` flag CANNOT be the sole discriminator here either: Bybit's position read
+            # echoes no clientOrderId, so it is False for every real position — including the one
+            # this session opened seconds ago. Keyed off it alone, an unpartitioned session on Bybit
+            # (the default — no strategy declares live_symbols) declared its OWN positions foreign
+            # every tick: a permanent CRITICAL, entries halted, and — because `owned_now` was then
+            # empty — the debounced drop below retired each still-open position after two ticks and
+            # booked a fabricated exchange-side exit for it, freeing the slot and abandoning a live
+            # position with only its resident stop. A position we already track in the mirror is
+            # ours (place_bracket put it there, or startup reconciliation adopted it); anything else
+            # on the book that carries no ownership marker is genuinely foreign and still halts.
+            owned_now = {s for s, p in exch_positions.items() if p.owned or s in known_before}
+            foreign_positions = sorted(set(exch_positions) - owned_now)
         else:
             # In-scope positions are ours; out-of-scope are another strategy's (ignored).
             foreign_positions = []
@@ -286,7 +296,10 @@ class LiveLoop:
             if not p.has_exchange_side_stop():
                 # Log (not alert) so a multi-day loop can't flood the alert sink every tick.
                 _log.warning("live_owned_position_unprotected", symbol=sym)
-        # DEBOUNCED drop of closed positions: a mirror position the exchange no longer lists is
+        # DEBOUNCED drop of closed positions. ``owned_now`` includes every mirror position the
+        # exchange still lists (under both models), so "not in owned_now" means GONE FROM THE BOOK
+        # — never merely "unattributable". Booking an exit for a position that is still open is the
+        # one thing this branch must never do. A mirror position the exchange no longer lists is
         # retired only after it's been absent for _ABSENT_DROP_TICKS consecutive reconciliations —
         # so a just-placed position lagging in fetch_positions is NOT false-dropped, but a real
         # exchange-side SL/TP close frees its concurrency slot (the bounded-live cap counts the
