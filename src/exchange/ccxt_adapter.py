@@ -84,7 +84,17 @@ class CcxtExchangeAdapter(ExchangeAdapter):
         tick_size, price_precision = self._increment_and_decimals(prec.get("price"))
         step_size, _ = self._increment_and_decimals(prec.get("amount"))
         lev_max = (limits.get("leverage") or {}).get("max")
-        funding_min = (m.get("info") or {}).get("fundingInterval")
+        info = m.get("info") or {}
+        funding_min = info.get("fundingInterval")
+        # ccxt does not map Bybit's min notional into limits.cost.min (it stays None); the raw
+        # instruments-info lotSizeFilter carries it, so read it there as the authoritative source.
+        min_notional = (limits.get("cost") or {}).get("min")
+        if min_notional is None:
+            raw_mn = (info.get("lotSizeFilter") or {}).get("minNotionalValue")
+            try:
+                min_notional = float(raw_mn) if raw_mn else None
+            except (TypeError, ValueError):
+                min_notional = None
         return SymbolMetadata(
             symbol=symbol,
             tick_size=tick_size,
@@ -92,7 +102,7 @@ class CcxtExchangeAdapter(ExchangeAdapter):
             qty_step=step_size,
             price_precision=price_precision,
             min_order_size=(limits.get("amount") or {}).get("min"),
-            min_notional=(limits.get("cost") or {}).get("min"),
+            min_notional=min_notional,
             max_leverage=int(lev_max) if lev_max else None,
             maker_fee=m.get("maker"),
             taker_fee=m.get("taker"),
