@@ -17,13 +17,22 @@ database, a broken migration — fails loudly and holds the stack, which is the 
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
-from alembic import command
-from alembic.config import Config
-from alembic.script import ScriptDirectory
-from sqlalchemy import text
-from src.config.settings import REPO_ROOT
-from src.db.base import get_engine
+# Run as a PATH (`python scripts/migrate.py`) and Python puts /app/scripts on sys.path — not /app —
+# so `import src` fails. It resolves anyway on a host where the project is installed into the venv,
+# which is precisely how this shipped broken: verified on the host, then ModuleNotFoundError in the
+# container. compose runs it as `python -m scripts.migrate`; this makes the direct invocation an
+# operator might reach for work too.
+if __package__ in (None, ""):  # noqa: SIM108 - explicit: only the path-invocation needs the fix
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from alembic import command  # noqa: E402 - must follow the sys.path repair above
+from alembic.config import Config  # noqa: E402
+from alembic.script import ScriptDirectory  # noqa: E402
+from sqlalchemy import text  # noqa: E402
+from src.config.settings import REPO_ROOT  # noqa: E402
+from src.db.base import get_engine  # noqa: E402
 
 
 def _config() -> Config:

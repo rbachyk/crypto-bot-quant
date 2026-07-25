@@ -392,6 +392,11 @@ class TestDeploy:
         services = yaml.safe_load((repo_root / "docker-compose.yml").read_text())["services"]
 
         assert "migrate" in services, "the one-shot migration service must exist"
+        # `python -m scripts.migrate`, never `python scripts/migrate.py`: the path form puts
+        # /app/scripts on sys.path instead of /app, so `import src` fails in the container. It
+        # resolves on a host where the project is installed into the venv — which is exactly how
+        # the broken form passed a host check and then failed on deploy.
+        assert services["migrate"]["command"] == ["python", "-m", "scripts.migrate"]
         # Quoted "no": bare `no` is YAML false, which the auto-restart criterion reads as
         # "declares no restart policy".
         assert services["migrate"]["restart"] == "no"

@@ -137,7 +137,10 @@ services:
     environment:
       <<: *app-env
       SERVICE_NAME: migrate
-    command: ["python", "scripts/migrate.py"]
+    # `python -m`, not `python scripts/migrate.py`: the latter puts /app/scripts on sys.path
+    # instead of /app, so `import src` fails inside the container (it resolves on a host where
+    # the project is installed into the venv — which is exactly how this got shipped untested).
+    command: ["python", "-m", "scripts.migrate"]
     depends_on:
       postgres:
         condition: service_healthy

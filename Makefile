@@ -43,7 +43,7 @@ docker-down:
 # Same entrypoint the compose `migrate` service runs, so a hand-run migration and a deploy behave
 # identically (including the "database is ahead of this code" warning).
 migrate:
-	$(RUN) python scripts/migrate.py
+	$(RUN) python -m scripts.migrate
 
 seed-dev:
 	$(RUN) python -m src.cli.main enqueue sync_exchange_metadata
