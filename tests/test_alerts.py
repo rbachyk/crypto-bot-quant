@@ -81,3 +81,34 @@ def test_get_alert_sink_is_composite_with_recent() -> None:
         assert any(a.title == "t" for a in sink.recent())
     finally:
         reset_alert_sink()
+
+
+def test_a_repeating_condition_is_pushed_once_per_cooldown_but_always_logged() -> None:
+    """The conditions that alert here are PERSISTENT — a foreign position stays foreign until an
+    operator acts — and the per-tick reconciler re-raises them every tick. Unthrottled that is one
+    blocking HTTP POST or SMTP session per tick, on the trading loop, forever. The log sink (which
+    the dashboard alert center and the Monitoring gate read) must still see every one."""
+    log = LogAlertSink()
+    rec = _Recorder()
+    sink = CompositeAlertSink(log, [rec])
+
+    for _ in range(50):  # the same condition, tick after tick
+        assert sink.send(_alert()) is True
+
+    assert len(rec.sent) == 1, "the transport is notified once per cooldown, not once per tick"
+    assert len(sink.recent(limit=100)) == 50, "every alert is still recorded locally"
+
+
+def test_a_different_condition_is_not_suppressed_by_the_cooldown() -> None:
+    """Throttling is per condition, not global: a NEW problem must page immediately even while
+    another one is in its cooldown window."""
+    log = LogAlertSink()
+    rec = _Recorder()
+    sink = CompositeAlertSink(log, [rec])
+
+    sink.send(_alert())
+    other = _alert()
+    other.title = "a different problem"
+    sink.send(other)
+
+    assert [a.title for a in rec.sent] == ["t", "a different problem"]

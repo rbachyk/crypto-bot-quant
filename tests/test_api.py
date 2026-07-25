@@ -598,3 +598,48 @@ def test_enqueue_exclusive_is_atomic_under_concurrent_start() -> None:
         q.redis.delete(lock_key)
         with session_scope() as s:
             s.query(Job).filter_by(job_type=job_type).delete()
+
+
+@requires_db
+@requires_redis
+def test_a_basket_demo_is_refused_while_a_live_session_owns_the_account() -> None:
+    """Per-symbol and basket sessions are DIFFERENT job types, so the per-type exclusivity guard
+    cannot see each other — but they share one exchange account, which holds one net position per
+    symbol. With no live_symbols partition declared (the shipped default) both scope to the whole
+    universe, so each would mirror a book they share: a basket rebalance resizes or flattens the
+    per-symbol strategy's stop-managed position, and vice versa."""
+    import uuid
+
+    from src.config import get_settings
+    from src.db.base import session_scope
+    from src.db.models import Job, JobStatus
+    from src.jobs import JobQueue
+    from src.jobs.routing import processing_key, worker_key
+    from src.strategies.config import load_strategies_config
+
+    if load_strategies_config().reserved_symbols():
+        pytest.skip("a live_symbols partition is declared — coexistence is the supported setup")
+
+    rc = JobQueue(get_settings()).redis
+    jid = "test-live-" + uuid.uuid4().hex[:8]
+    wid = "test-worker-" + uuid.uuid4().hex[:8]
+    with session_scope() as s:
+        s.add(Job(job_id=jid, job_type="run_live_session", status=JobStatus.RUNNING,
+                  input_params={}))
+    rc.lpush(processing_key(wid), jid)
+    rc.set(worker_key(wid), wid, ex=60)  # a genuinely-alive live session owns the account
+    try:
+        r = client.post(
+            "/api/paper/run-basket-demo",
+            params={"strategies": "funding_carry", "timeframe": ""},
+            auth=AUTH, headers={"sec-fetch-site": "same-origin"},
+        )
+        assert r.status_code == 409
+        assert "live_symbols" in r.json()["detail"]  # …and says how to make them coexist
+    finally:
+        rc.delete(processing_key(wid))
+        rc.delete(worker_key(wid))
+        with session_scope() as s:
+            obj = s.get(Job, jid)
+            if obj is not None:
+                s.delete(obj)

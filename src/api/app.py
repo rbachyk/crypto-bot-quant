@@ -784,6 +784,43 @@ def _has_active_job(
     return alive
 
 
+#: The two continuous session types that place orders on the SAME exchange account. Each is
+#: exclusive within its own type, but they are different job types — so nothing stopped one of
+#: each from running side by side (see _refuse_unpartitioned_coexistence).
+_ACCOUNT_SESSION_TYPES = ("run_live_session", "run_basket_demo_session")
+
+
+def _refuse_unpartitioned_coexistence(job_type: str, redis_client: Any = None) -> None:
+    """Refuse to start a session type while the OTHER one is running on an unpartitioned account.
+
+    A per-symbol live session and a basket demo session are different job types, so the per-type
+    exclusivity guard cannot see each other — but they share one exchange account, which holds ONE
+    net position per symbol. With no ``live_symbols`` declared anywhere (the shipped default), both
+    sessions scope to the WHOLE universe, so each would keep an independent mirror of a book they
+    share: a basket rebalance resizes or flattens the per-symbol strategy's stop-managed position,
+    and vice versa. That is exactly the hazard account partitioning exists to prevent.
+
+    When partitions ARE declared they are validated disjoint at config load, so coexistence is the
+    supported configuration and this check stands aside."""
+    from src.strategies.config import load_strategies_config
+
+    other = next((t for t in _ACCOUNT_SESSION_TYPES if t != job_type), None)
+    if other is None or job_type not in _ACCOUNT_SESSION_TYPES:
+        return
+    if load_strategies_config().reserved_symbols():  # a partition exists → disjoint by construction
+        return
+    if _has_active_job(other, redis_client=redis_client):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"a {other!r} session is already running on this account and no live_symbols "
+                "partition is declared, so both sessions would trade the whole universe and net "
+                "into each other's positions. Stop it first, or give the strategies disjoint "
+                "`live_symbols` in configs/strategies.yaml so they can coexist."
+            ),
+        )
+
+
 def _enqueue_exclusive(
     queue: Any,
     job_type: str,
@@ -805,6 +842,7 @@ def _enqueue_exclusive(
     try:
         if _has_active_job(job_type, strategy=strategy, redis_client=queue.redis):
             raise HTTPException(status_code=409, detail=conflict_detail)
+        _refuse_unpartitioned_coexistence(job_type, redis_client=queue.redis)
         return queue.enqueue(job_type, params, requested_by=requested_by)
     finally:
         queue.redis.delete(lock_key)

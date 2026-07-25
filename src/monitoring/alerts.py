@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import abc
 import enum
+import time
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -21,6 +22,12 @@ from datetime import UTC, datetime
 import structlog
 
 _log = structlog.get_logger("alerts")
+
+#: How long the same condition (severity+title+component+environment) waits before it is PUSHED
+#: again. The log sink is never throttled — only the outbound transports.
+_PUSH_COOLDOWN_S = 300.0
+#: Upper bound on remembered conditions, so a long-lived process cannot grow the map without end.
+_PUSH_KEY_CAP = 512
 
 
 class AlertSeverity(str, enum.Enum):
@@ -168,9 +175,28 @@ class CompositeAlertSink(AlertSink):
     def __init__(self, log_sink: LogAlertSink, transports: list[AlertSink]) -> None:
         self._log = log_sink
         self._transports = transports
+        self._last_push: dict[tuple[str, str, str, str], float] = {}
 
     def send(self, alert: Alert) -> bool:
+        # The LOG sink always receives every alert: the dashboard alert center, the Monitoring
+        # gate's test-alert check and the audit trail must stay complete.
         ok = self._log.send(alert)
+        # PUSH transports are throttled per distinct condition. The conditions that alert here are
+        # persistent by nature — a foreign position stays foreign until an operator acts — and the
+        # per-tick reconciler re-raises them on every tick. Unthrottled, that is one blocking HTTP
+        # POST (or SMTP session) per tick on the TRADING loop, forever, and Telegram rate-limits
+        # the flood anyway. Re-notifying every _PUSH_COOLDOWN_S is escalation; every tick is noise
+        # that buries the alert it is trying to raise.
+        key = (alert.severity.value, alert.title, alert.component, alert.environment)
+        now = time.monotonic()
+        last = self._last_push.get(key)
+        if last is not None and now - last < _PUSH_COOLDOWN_S:
+            return ok
+        self._last_push[key] = now
+        if len(self._last_push) > _PUSH_KEY_CAP:  # bound the map on a long-lived process
+            for stale, _ts in sorted(self._last_push.items(), key=lambda kv: kv[1])[:_PUSH_KEY_CAP
+                                                                                    // 2]:
+                self._last_push.pop(stale, None)
         for transport in self._transports:
             try:
                 ok = transport.send(alert) and ok
