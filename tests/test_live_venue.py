@@ -34,13 +34,14 @@ def _testnet_settings(**over) -> Settings:
     return Settings(**base)
 
 
-def _plan() -> OrderPlan:
+def _plan(entry_type: OrderType = OrderType.MARKET) -> OrderPlan:
     entry = Order(
         client_id=f"{_PREFIX}entry_1",
         symbol="BTC/USDT:USDT",
         side="buy",
         qty=0.01,
-        order_type=OrderType.MARKET,
+        order_type=entry_type,
+        price=50_000.0 if entry_type is not OrderType.MARKET else None,
         role="entry",
         tags=_TAGS,
     )
@@ -553,7 +554,7 @@ def test_never_fills_cancels_remainder_and_books_nothing() -> None:
     fake = PollingFakeCcxt(status="open", filled=0.0)
     venue = _polling_venue(fake)
     res = venue.place_bracket(
-        _plan(), ref_price=50_000.0, realized_slippage_frac=0.001, latency_ms=5.0
+        _plan(OrderType.LIMIT), ref_price=50_000.0, realized_slippage_frac=0.001, latency_ms=5.0
     )
     assert fake.cancelled == ["oid-1"]  # remainder cancelled on the exchange
     assert res.fill.qty == 0.0 and res.position.qty == 0.0
@@ -569,7 +570,7 @@ def test_partial_fill_books_only_the_filled_part() -> None:
     fake = PollingFakeCcxt(status="open", filled=0.004, average=50_050.0)
     venue = _polling_venue(fake)
     res = venue.place_bracket(
-        _plan(), ref_price=50_000.0, realized_slippage_frac=0.001, latency_ms=5.0
+        _plan(OrderType.LIMIT), ref_price=50_000.0, realized_slippage_frac=0.001, latency_ms=5.0
     )
     assert fake.cancelled == ["oid-1"]
     assert res.fill.qty == pytest.approx(0.004)
@@ -587,7 +588,7 @@ def test_unconfirmed_cancel_keeps_the_entry_tracked() -> None:
     fake = PollingFakeCcxt(status="open", filled=0.0, cancel_raises=True)
     venue = _polling_venue(fake)
     res = venue.place_bracket(
-        _plan(), ref_price=50_000.0, realized_slippage_frac=0.001, latency_ms=5.0
+        _plan(OrderType.LIMIT), ref_price=50_000.0, realized_slippage_frac=0.001, latency_ms=5.0
     )
     assert res.fill.qty == 0.0 and not venue.positions
     assert f"{_PREFIX}entry_1" in venue.open_orders  # still resting on the exchange → tracked
@@ -602,6 +603,108 @@ def test_create_response_with_positive_full_fill_is_trusted_without_polling() ->
         _plan(), ref_price=50_000.0, realized_slippage_frac=0.001, latency_ms=5.0
     )
     assert res.fully_filled and res.position.qty == 0.01
+
+
+# --------------------------------------------------------------------------- #
+# C5b: the status read must actually REACH a Bybit unified/demo account, and a #
+#      market entry we cannot read is never booked as a non-fill               #
+# --------------------------------------------------------------------------- #
+def _bybit_meta():
+    """Skeleton specs relabelled as verified Bybit metadata — lets a test exercise the
+    Bybit-specific order-query params without shipping a verified Bybit spec file."""
+    import dataclasses
+
+    return dataclasses.replace(load_metadata_config(), exchange_id="bybit")
+
+
+class BybitUnifiedFakeCcxt(PollingFakeCcxt):
+    """Mimics ccxt's Bybit UNIFIED-account contract: ``fetch_order`` raises locally unless
+    the caller acknowledges the 500-order lookback, and only ``orderLinkId`` (not
+    ``clientOrderId``) identifies our order. This is what every demo account looks like."""
+
+    def fetch_order(self, oid, symbol, params=None):
+        params = dict(params or {})
+        if not params.get("acknowledged"):
+            raise TypeError(
+                "bybit fetchOrder() can only access an order if it is in last 500 orders "
+                '(of any status). Set params["acknowledged"] = True to hide this warning.'
+            )
+        if not params.get("orderLinkId") and oid != "oid-1":
+            raise LookupError(f"Order {oid} was not found.")
+        return super().fetch_order(oid, symbol, params)
+
+
+def test_bybit_unified_account_order_status_is_readable() -> None:
+    """REGRESSION: on Bybit demo (always a unified account) ccxt refused every status poll
+    before it left the process, so a FILLED market entry was observed as a zero fill — the
+    basket then flattened each leg it had just opened as a 'stray', paying taker fees both
+    ways and never booking a position."""
+    fake = BybitUnifiedFakeCcxt(status="closed", filled=0.01, average=50_100.0)
+    venue = CcxtLiveVenue(
+        _bybit_meta(),
+        _testnet_settings(exchange_id="bybit"),
+        client=fake,
+        fill_timeout_s=0.05,
+        fill_poll_interval_s=0.01,
+    )
+    res = venue.place_bracket(
+        _plan(), ref_price=50_000.0, realized_slippage_frac=0.001, latency_ms=5.0
+    )
+    assert res.fill.qty == 0.01 and res.position.qty == 0.01  # observed, not lost
+    assert fake.fetch_calls[0][2]["acknowledged"] is True
+    assert fake.fetch_calls[0][2]["orderLinkId"] == f"{_PREFIX}entry_1"
+
+
+class UnreadableOrderFakeCcxt(PollingFakeCcxt):
+    """Every order-status read fails, but the account's execution history shows the fill —
+    the venue-side equivalent of 'the order filled, we just could not read it'."""
+
+    def __init__(self, trades: list[dict] | None = None) -> None:
+        super().__init__(status="open", filled=0.0)
+        self.trades = trades if trades is not None else []
+        self.my_trades_calls: list = []
+
+    def fetch_order(self, oid, symbol, params=None):
+        raise ConnectionError("order status unavailable")
+
+    def fetch_my_trades(self, symbol, since=None, limit=None, params=None):
+        self.my_trades_calls.append((symbol, since, limit))
+        return self.trades
+
+
+def test_market_entry_fill_is_recovered_from_the_execution_history() -> None:
+    """An unreadable MARKET entry is NOT a non-fill: the account's own executions decide,
+    so the position gets booked (with its real VWAP and fee) instead of being orphaned."""
+    fake = UnreadableOrderFakeCcxt(
+        trades=[
+            {"order": "oid-1", "amount": 0.006, "price": 50_000.0, "fee": {"cost": 0.2}},
+            {"order": "oid-1", "amount": 0.004, "price": 50_100.0, "fee": {"cost": 0.1}},
+            # A different order in the same symbol — must NOT be booked against this entry.
+            {"order": "other", "amount": 5.0, "price": 49_000.0, "fee": {"cost": 9.9}},
+        ]
+    )
+    venue = _polling_venue(fake)
+    res = venue.place_bracket(
+        _plan(), ref_price=50_000.0, realized_slippage_frac=0.001, latency_ms=5.0
+    )
+    assert res.fill.qty == pytest.approx(0.01)
+    assert res.fill.actual_price == pytest.approx(50_040.0)  # VWAP of the two executions
+    assert res.fill.fee == pytest.approx(0.3)
+    assert venue.positions["BTC/USDT:USDT"].qty == pytest.approx(0.01)
+    assert not fake.cancelled  # a market order has no remainder to cancel
+
+
+def test_unreadable_market_entry_without_executions_is_not_left_resting() -> None:
+    """No status AND no execution: book nothing, but never track a market order as resting
+    (it cannot rest) — the loud log plus reconciliation own the ambiguity from here."""
+    fake = UnreadableOrderFakeCcxt(trades=[])
+    venue = _polling_venue(fake)
+    res = venue.place_bracket(
+        _plan(), ref_price=50_000.0, realized_slippage_frac=0.001, latency_ms=5.0
+    )
+    assert res.fill.qty == 0.0 and not venue.positions
+    assert not venue.open_orders and not res.resting_order_ids
+    assert fake.my_trades_calls  # the execution history WAS consulted before booking zero
 
 
 # --------------------------------------------------------------------------- #

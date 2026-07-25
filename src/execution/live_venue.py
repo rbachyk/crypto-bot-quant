@@ -118,6 +118,11 @@ class CcxtLiveVenue:
         self.positions: dict[str, VenuePosition] = {}
         self.fills: list[Fill] = []
         self.cancelled: set[str] = set()
+        # clientOrderId -> the EXCHANGE's own order id, recorded at placement. Bybit's
+        # order-status and cancel endpoints key on ``orderId`` (a clientOrderId only reaches
+        # them as ``orderLinkId``), so without this map every status read of one of our orders
+        # asks for an order id that does not exist.
+        self._exchange_order_ids: dict[str, str] = {}
 
         if client is not None:
             self._ex = client
@@ -334,6 +339,69 @@ class CcxtLiveVenue:
             return False, "no activation guard configured for a live venue"
         return self._guard.allow_live_order(plan)
 
+    # -- order-status reads ------------------------------------------------ #
+    def _order_query_params(self, client_id: str) -> dict[str, Any]:
+        """Params that make an order-status/cancel read actually reach the exchange.
+
+        Bybit refuses ``fetchOrder`` on a UNIFIED account — and ccxt assumes UTA for every
+        demo-trading account — unless the caller acknowledges its 500-order lookback window:
+        ccxt raises ``ArgumentsRequired`` LOCALLY, before any request is sent. It also keys a
+        client id as ``orderLinkId``; the ccxt-unified ``clientOrderId`` is not translated for
+        these endpoints. Missing both, every status poll of a just-placed order raised, a
+        filled MARKET entry was observed as a zero fill, and the basket then flattened the
+        position it had itself just opened as a 'stray' — an open/close churn that paid taker
+        fees each cadence and never booked a leg."""
+        params: dict[str, Any] = {"clientOrderId": client_id}
+        if self.exchange_id == "bybit":
+            params["acknowledged"] = True
+            params["orderLinkId"] = client_id
+        return params
+
+    def _fetch_order(self, client_id: str, symbol: str, order_id: str | None = None) -> dict:
+        """Read one of OUR orders by its exchange id (falling back to the client id)."""
+        oid = order_id or self._exchange_order_ids.get(client_id) or client_id
+        return self._ex.fetch_order(oid, symbol, self._order_query_params(client_id)) or {}
+
+    def _record_order_id(self, client_id: str, resp: Any) -> str:
+        """Remember the exchange's order id for ``client_id``; returns it (or "")."""
+        oid = str((resp or {}).get("id") or "") if isinstance(resp, dict) else ""
+        if oid:
+            self._exchange_order_ids[client_id] = oid
+        return oid
+
+    def _executions_for_order(
+        self, symbol: str, client_id: str, order_id: str, since_ms: int
+    ) -> tuple[float, float, float] | None:
+        """What the venue's OWN execution history says this order filled — the tiebreaker when
+        the order-status read is unavailable.
+
+        Returns ``(qty, vwap, fee)`` over the executions belonging to this order, or None when
+        none are visible (or the fetch fails). Matching is strict — the exchange order id or our
+        ``orderLinkId`` — so another order's executions can never be booked against this one."""
+        try:
+            trades = self._ex.fetch_my_trades(symbol, since_ms, 100) or []
+        except Exception as exc:  # noqa: BLE001 - no history → the caller books nothing
+            _log.warning("entry_execution_lookup_failed", symbol=symbol, error=str(exc))
+            return None
+        qty = px_qty = fee = 0.0
+        for t in trades:
+            info = t.get("info") or {}
+            same_order = (order_id and str(t.get("order") or "") == order_id) or (
+                str(info.get("orderLinkId") or "") == client_id
+            )
+            if not same_order:
+                continue
+            amt = _num(t.get("amount")) or 0.0
+            px = _num(t.get("price")) or 0.0
+            if amt <= 0 or px <= 0:
+                continue
+            qty += amt
+            px_qty += px * amt
+            fee += _num((t.get("fee") or {}).get("cost")) or 0.0
+        if qty <= 0:
+            return None
+        return qty, px_qty / qty, fee
+
     def _observe_entry_fill(
         self, resp: dict, symbol: str, entry: Order
     ) -> tuple[float, float | None, float, bool]:
@@ -347,20 +415,28 @@ class CcxtLiveVenue:
         cancel is VERIFIED with a final fetch — a race-fill discovered there is still
         booked. ``entry_still_resting`` is True only when the cancel could not be
         confirmed, so the caller keeps tracking the order instead of assuming it died.
+
+        A zero fill is only ever reported when the venue POSITIVELY says so. If the status
+        read never succeeded (or the entry was a MARKET order, which cannot rest), the
+        account's execution history decides — an unreadable order is not an unfilled one,
+        and booking it as unfilled leaves a real position nobody owns.
         """
         qty = float(entry.qty)
         filled = _num(resp.get("filled"))
         avg = _num(resp.get("average")) or _num(resp.get("price"))
         fee = _num((resp.get("fee") or {}).get("cost"))
         status = str(resp.get("status") or "").lower()
+        placed_ms = int(time.time() * 1000) - 60_000  # execution-history window for this order
+        order_id = self._record_order_id(entry.client_id, resp)
         if filled is not None and (filled >= qty - 1e-12 or status in _TERMINAL_STATUSES):
             return min(filled, qty), avg, fee or 0.0, False
 
-        order_id = str(resp.get("id") or "") or entry.client_id
-        fetch_params = {"clientOrderId": entry.client_id}
+        is_market = entry.order_type is OrderType.MARKET
+        observed = False  # did ANY status read come back at all?
 
         def _absorb(o: dict) -> None:
-            nonlocal filled, avg, fee, status
+            nonlocal filled, avg, fee, status, observed
+            observed = True
             f = _num(o.get("filled"))
             if f is not None:
                 filled = f
@@ -372,7 +448,7 @@ class CcxtLiveVenue:
         interval = max(0.01, self.fill_poll_interval_s)
         while True:
             try:
-                _absorb(self._ex.fetch_order(order_id, symbol, fetch_params) or {})
+                _absorb(self._fetch_order(entry.client_id, symbol, order_id))
             except Exception as exc:  # noqa: BLE001 - a poll hiccup: keep polling to the window end
                 _log.warning("entry_fill_poll_failed", symbol=symbol, error=str(exc))
             if status in _TERMINAL_STATUSES or (filled is not None and filled >= qty - 1e-12):
@@ -382,14 +458,43 @@ class CcxtLiveVenue:
             time.sleep(min(interval, max(0.0, deadline - time.monotonic())))
             interval = min(interval * 1.5, 1.0)
 
+        # The status read told us nothing usable. Before treating that as "nothing executed",
+        # ask the venue what it actually executed — a market order that we could not read is
+        # overwhelmingly a FILLED order, and booking it as a non-fill orphans a live position.
+        if (filled or 0.0) <= 0.0 and (is_market or not observed):
+            executed = self._executions_for_order(symbol, entry.client_id, order_id, placed_ms)
+            if executed is not None:
+                exec_qty, exec_px, exec_fee = executed
+                _log.warning(
+                    "entry_fill_recovered_from_executions",
+                    symbol=symbol, client_id=entry.client_id, filled=exec_qty,
+                    requested=qty, status=status or "unreadable",
+                    hint="order status was unreadable but the account DID execute it — "
+                    "booked from the execution history instead of as a non-fill",
+                )
+                return min(exec_qty, qty), exec_px, exec_fee, False
+        if is_market:
+            # A market order never rests, so there is no remainder to cancel and nothing to
+            # keep tracking: the venue neither reported a fill nor shows an execution.
+            _log.error(
+                "market_entry_unobserved",
+                symbol=symbol, client_id=entry.client_id, requested=qty,
+                status=status or "unreadable",
+                hint="no order status and no execution visible for a MARKET entry — booked as "
+                "a non-fill; reconciliation must confirm the book is really flat",
+            )
+            return min(filled or 0.0, qty), avg, fee or 0.0, False
+
         # Window elapsed with the order still working: cancel the remainder, then VERIFY.
         cancel_error: str | None = None
         try:
-            self._ex.cancel_order(order_id, symbol, fetch_params)
+            self._ex.cancel_order(
+                order_id or entry.client_id, symbol, self._order_query_params(entry.client_id)
+            )
         except Exception as exc:  # noqa: BLE001 - verified below; never assume the cancel worked
             cancel_error = str(exc)
         try:
-            _absorb(self._ex.fetch_order(order_id, symbol, fetch_params) or {})
+            _absorb(self._fetch_order(entry.client_id, symbol, order_id))
         except Exception as exc:  # noqa: BLE001
             _log.warning("entry_cancel_verify_failed", symbol=symbol, error=str(exc))
         still_resting = status not in _TERMINAL_STATUSES
@@ -497,7 +602,11 @@ class CcxtLiveVenue:
         if owned_only and not order.tags.get("bot_instance_id"):
             return False
         try:
-            self._ex.cancel_order(client_id, order.symbol, {"clientOrderId": client_id})
+            self._ex.cancel_order(
+                self._exchange_order_ids.get(client_id) or client_id,
+                order.symbol,
+                self._order_query_params(client_id),
+            )
         except Exception as exc:  # noqa: BLE001 - verify below; the order may already be gone
             if not self._order_is_terminal(client_id, order.symbol):
                 _log.error(
@@ -514,7 +623,7 @@ class CcxtLiveVenue:
         positively reports a terminal status (filled/cancelled/rejected/expired). Any fetch
         error → False (assume still live; never drop an order we can't account for)."""
         try:
-            o = self._ex.fetch_order(client_id, symbol, {"clientOrderId": client_id}) or {}
+            o = self._fetch_order(client_id, symbol)
         except Exception:  # noqa: BLE001 - can't verify → treat as still live
             return False
         return str(o.get("status") or "").lower() in _TERMINAL_STATUSES
@@ -577,7 +686,10 @@ class CcxtLiveVenue:
                 params["reduceOnly"] = True
             otype = "limit" if order.order_type in _MAKER_TYPES else "market"
             price = float(order.price) if order.price is not None else None
-        self._ex.create_order(order.symbol, otype, order.side, order.qty, price, params)
+        resp = self._ex.create_order(order.symbol, otype, order.side, order.qty, price, params)
+        # Keep the exchange's own order id: a later cancel/status read of this leg must be able
+        # to name it the way the exchange keys it, not by clientOrderId alone.
+        self._record_order_id(order.client_id, resp)
         self.open_orders[order.client_id] = order
 
     # -- reconciliation -------------------------------------------------- #
