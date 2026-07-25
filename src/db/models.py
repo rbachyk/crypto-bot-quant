@@ -486,6 +486,12 @@ class PaperRun(Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     executed_count: Mapped[int] = mapped_column(Integer, default=0)
     rejected_count: Mapped[int] = mapped_column(Integer, default=0)
+    # Equity this session STARTED with — the paper numeraire for a paper run, the real (sliced)
+    # account equity for a demo/testnet/live one. The dashboard anchors its equity curve and
+    # drawdown % on this; without it every environment was measured against a 10k base that has
+    # nothing to do with a real account. NULL = written before the column existed (readers fall
+    # back to PAPER_BASE_EQUITY, so historical curves are unchanged).
+    initial_equity: Mapped[float | None] = mapped_column(nullable=True)
     net_pnl: Mapped[float] = mapped_column(default=0.0)
     expectancy_r: Mapped[float] = mapped_column(default=0.0)
     win_rate: Mapped[float] = mapped_column(default=0.0)

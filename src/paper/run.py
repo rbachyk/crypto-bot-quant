@@ -137,6 +137,7 @@ def persist_paper_session(
             db.add(run)
         run.started_at = session.started_at
         run.ended_at = session.ended_at
+        run.initial_equity = float(session.initial_equity)
         run.executed_count = session.executed_count
         run.rejected_count = session.rejected_count
         run.net_pnl = net_pnl

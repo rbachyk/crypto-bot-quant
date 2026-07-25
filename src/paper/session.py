@@ -161,6 +161,12 @@ class PaperSession:
     session_id: str
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     ended_at: datetime | None = None
+    # Equity this session STARTED with, persisted so the dashboard can anchor its equity curve and
+    # drawdown on the account that actually traded. PAPER_BASE_EQUITY for a paper run; for a
+    # demo/testnet/live one it is the real account equity (per-strategy slice for co-hosted
+    # baskets). Left None only by callers that predate the field — readers fall back to the paper
+    # base, which is what every environment was silently using before.
+    initial_equity: float = PAPER_BASE_EQUITY
 
     trades: list[PaperTrade] = field(default_factory=list)
     rejected: list[RejectedPaperCandidate] = field(default_factory=list)

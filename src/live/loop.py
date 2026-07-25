@@ -411,6 +411,27 @@ class LiveLoop:
                 }
             )
 
+    def _acquire_account_lock(self) -> Any | None:
+        """Claim the exchange account for this session, or None when no claim applies.
+
+        Offline paper has no shared account. A declared ``live_symbols`` partition makes
+        coexistence safe by construction (disjointness is validated at config load), so the lock
+        stands aside there. Otherwise this raises ``PermissionError`` naming the current holder."""
+        if self.mode == "paper":
+            return None
+        from src.live.account_lock import AccountLock
+        from src.strategies.config import load_strategies_config
+
+        try:
+            partitioned = bool(load_strategies_config().reserved_symbols())
+        except Exception:  # noqa: BLE001 - unreadable config → assume unpartitioned (safe side)
+            partitioned = False
+        if partitioned:
+            return None
+        lock = AccountLock(self.settings, owner=f"live:{self.mode}")
+        lock.acquire()
+        return lock
+
     def reconcile_startup(self) -> StartupReconResult:
         """Reconcile the REAL exchange book against this bot before any tick (Section 7).
 
@@ -594,6 +615,13 @@ class LiveLoop:
             on_session_start(session.session_id)  # e.g. clear a prior crashed run's stale positions
         result = LiveRunResult(session=session, mode=self.mode)
 
+        # ONE session per exchange account. A real-venue run shares a book with any other session
+        # on the same account — a basket rebalance would resize this loop's stop-managed positions
+        # and vice versa — so unless partitions make coexistence safe, the account admits one.
+        # Offline paper has no shared account and takes no lock. Claimed here rather than at the
+        # API because the CLI reaches this path directly. Raises PermissionError naming the holder.
+        account_lock = self._acquire_account_lock()
+
         # Section 7: before ANY tick, reconcile the real exchange book. A foreign/manual
         # order or position means we cannot trust exchange state → halt before trading.
         startup = self.reconcile_startup()
@@ -602,6 +630,8 @@ class LiveLoop:
         if startup.halt_required:
             result.halted = True
             session.foreign_order_halt_triggered = True
+            if account_lock is not None:
+                account_lock.release()
             return result
 
         # H-C M2: warm up the shadow predictor here (paper mode), BEFORE the tick loop, so the
@@ -691,8 +721,12 @@ class LiveLoop:
                 result.ticks.append(tick)
                 if on_tick is not None:
                     on_tick(tick, signal_idx)
+            if account_lock is not None:
+                account_lock.refresh()  # stop refreshing and the account frees itself by TTL
             if result.halted or (max_ticks is not None and signal_idx + 1 >= max_ticks):
                 break
+        if account_lock is not None:
+            account_lock.release()
         return result
 
 

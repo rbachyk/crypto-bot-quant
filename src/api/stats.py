@@ -23,6 +23,7 @@ from src.db.models import (
     Job,
     JobStatus,
     OpenPosition,
+    PaperRun,
     PaperTradeRecord,
     RemediationAction,
     RemediationStatus,
@@ -327,6 +328,7 @@ def compute_trading_stats(
         rows = list(
             session.execute(q.order_by(PaperTradeRecord.created_at, PaperTradeRecord.id)).all()
         )
+        base_equity = _base_equity_for(session, q)
 
     st.total_trades = len(rows)
     if not rows:
@@ -352,8 +354,9 @@ def compute_trading_stats(
     st.largest_loss = round(min((t.pnl for t in rows), default=0.0), 2)
     st.symbols_traded = sorted({t.symbol for t in rows})
 
-    # Equity curve + max drawdown (fraction of running peak).
-    equity = _PAPER_BASE_EQUITY
+    # Equity curve + max drawdown (fraction of running peak), anchored on what the sessions in
+    # scope ACTUALLY started with (see _base_equity_for) rather than the paper numeraire.
+    equity = base_equity
     peak = equity
     max_dd = 0.0
     curve = [round(equity, 2)]
@@ -440,6 +443,41 @@ class AggregateStats:
             },
             "open_remediation_items": self.open_remediation_items,
         }
+
+
+def _base_equity_for(session: Any, trade_query: Any) -> float:
+    """Starting equity of the sessions whose trades ``trade_query`` selects.
+
+    The curve and the drawdown % have to be measured against the capital that actually traded. A
+    demo basket sizes off the real account (a ~1 000 account sliced per strategy), so anchoring on
+    the 10 000 paper numeraire — as every environment did — understated its drawdown roughly
+    tenfold: the one number an operator reads to decide whether to stop a session.
+
+    Sessions in scope are summed, because that is what "these trades' account" means when several
+    are aggregated. A session with no recorded base (written before ``paper_runs.initial_equity``
+    existed) contributes the paper base, so historical curves render exactly as they did."""
+    session_ids = {
+        sid
+        for (sid,) in session.execute(
+            trade_query.with_only_columns(PaperTradeRecord.session_id).distinct().order_by(None)
+        ).all()
+    }
+    if not session_ids:
+        return _PAPER_BASE_EQUITY
+    known = dict(
+        session.execute(
+            select(PaperRun.session_id, PaperRun.initial_equity).where(
+                PaperRun.session_id.in_(session_ids)
+            )
+        )
+        .tuples()
+        .all()
+    )
+    total = 0.0
+    for sid in session_ids:
+        base = known.get(sid)
+        total += float(base) if base else _PAPER_BASE_EQUITY
+    return total or _PAPER_BASE_EQUITY
 
 
 def compute_gate_stats(window: TimeWindow) -> GateStats:

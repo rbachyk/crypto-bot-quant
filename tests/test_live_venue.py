@@ -1053,3 +1053,67 @@ def test_close_position_failure_keeps_the_position_tracked() -> None:
     assert venue.close_position("BTC/USDT:USDT") is False
     assert "BTC/USDT:USDT" in venue.positions  # still open on the exchange → still tracked
     assert stop.client_id in venue.open_orders  # legs untouched (position still needs them)
+
+
+# --------------------------------------------------------------------------- #
+# C7: a close is CONFIRMED against the book, not assumed from placement        #
+# --------------------------------------------------------------------------- #
+class ClosingFakeCcxt(FakeCcxt):
+    """A venue whose reduce-only close may or may not actually move the book."""
+
+    def __init__(self, *, closes: bool = True) -> None:
+        super().__init__()
+        self.closes = closes
+        self._positions = [
+            {"symbol": "BTC/USDT:USDT", "side": "long", "contracts": 0.01,
+             "entryPrice": 50_000.0, "info": {}},
+        ]
+
+    def create_order(self, symbol, type, side, qty, price, params=None):  # noqa: A002
+        out = super().create_order(symbol, type, side, qty, price, params)
+        if self.closes and (params or {}).get("reduceOnly"):
+            self._positions = []  # the close actually filled
+        return out
+
+
+def _closing_venue(fake) -> CcxtLiveVenue:
+    venue = CcxtLiveVenue(load_metadata_config(), _testnet_settings(), client=fake)
+    from src.execution.venue import VenuePosition
+
+    venue.positions["BTC/USDT:USDT"] = VenuePosition(
+        symbol="BTC/USDT:USDT", side=1, qty=0.01, entry_price=50_000.0, owned=True
+    )
+    return venue
+
+
+def test_a_confirmed_close_drops_the_mirror() -> None:
+    fake = ClosingFakeCcxt(closes=True)
+    venue = _closing_venue(fake)
+    assert venue.close_position("BTC/USDT:USDT") is True
+    assert "BTC/USDT:USDT" not in venue.positions
+
+
+def test_a_close_that_does_not_move_the_book_is_a_FAILED_close(monkeypatch) -> None:
+    """REGRESSION: success was reported on PLACEMENT, so the mirror went flat while a real
+    position kept running — the caller then believed it was flat and stopped retrying."""
+    import src.execution.live_venue as lv
+
+    monkeypatch.setattr(lv, "_CLOSE_CONFIRM_S", 0.05)  # don't spend the real window in a test
+    monkeypatch.setattr(lv, "_CLOSE_CONFIRM_POLL_S", 0.01)
+    fake = ClosingFakeCcxt(closes=False)  # the order is accepted but nothing closes
+    venue = _closing_venue(fake)
+
+    assert venue.close_position("BTC/USDT:USDT") is False
+    assert "BTC/USDT:USDT" in venue.positions, "still on the book → must stay tracked for a retry"
+
+
+def test_close_book_position_also_confirms(monkeypatch) -> None:
+    """The basket's stray-flatten path reports the same truth: 'flattened' must mean flattened."""
+    import src.execution.live_venue as lv
+
+    monkeypatch.setattr(lv, "_CLOSE_CONFIRM_S", 0.05)
+    monkeypatch.setattr(lv, "_CLOSE_CONFIRM_POLL_S", 0.01)
+    assert _closing_venue(ClosingFakeCcxt(closes=True)).close_book_position("BTC/USDT:USDT") is True
+    assert (
+        _closing_venue(ClosingFakeCcxt(closes=False)).close_book_position("BTC/USDT:USDT") is False
+    )

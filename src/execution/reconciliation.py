@@ -166,6 +166,14 @@ def reconcile_startup(
     checks see real exposure. A venue without the fetch hooks (the offline SimulatedVenue used
     by paper) is a no-op clean book — there is no real exchange to reconcile against.
 
+    ORDERS carry our ownership prefix, so their classification is exact. POSITIONS do not: Bybit's
+    position read echoes no clientOrderId, so ``owned`` is False for every real position, ours
+    included. Unpartitioned, that means any position present at startup is classified foreign and
+    HALTS — deliberately, because the mirror is empty at startup and nothing can attribute it, and
+    Section 7's posture for an unattributable position is to halt and let an operator resolve it.
+    Do not read the adoption sentence above as applying to positions on Bybit: it does not.
+    ``scope_symbols`` is what makes attribution possible mid-session (see the per-tick reconciler).
+
     ``scope_symbols`` (account partitioning): when set, ONLY these symbols are this session's
     concern — a position/order outside the scope belongs to another of our strategies and is
     ignored (never owned, never foreign, never adopted). An IN-scope position is treated as ours

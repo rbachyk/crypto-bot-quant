@@ -465,6 +465,20 @@ def run_multi_basket_demo_session(
     )
 
 
+def _partitions_declared() -> bool:
+    """Whether ANY strategy reserves symbols (``live_symbols``).
+
+    With a partition declared, scopes are validated disjoint at config load and two sessions can
+    safely coexist on one account — that is the whole point of partitioning. With none declared
+    (the shipped default) both sessions trade the full universe, so the account admits one."""
+    from src.strategies.config import load_strategies_config
+
+    try:
+        return bool(load_strategies_config().reserved_symbols())
+    except Exception:  # noqa: BLE001 - unreadable config → assume unpartitioned (the safe side)
+        return False
+
+
 def _strategy_extra(strategy: object) -> dict:
     """The strategy's ``params.extra`` knobs (portfolio_gross / maker_rebalance / …), as the
     engine reads them. Empty dict when the strategy carries none."""
@@ -667,22 +681,37 @@ def _run_basket_session(
 
     # -- venue + pre-flight (demo only) ---------------------------------- #
     manager = None
+    account_lock = None
     equity = PAPER_BASE_EQUITY  # paper base → equity curve aligns with the other paper sessions
     env_label = "paper"
     if live:
         from src.execution.live_venue import get_venue
+        from src.live.account_lock import AccountLock
         from src.live.basket_exec import NetPositionManager
         from src.live.guard import load_basket_demo_limits
 
-        limits = load_basket_demo_limits()
-        venue = venue if venue is not None else get_venue(meta, settings, live=True)
-        equity = _preflight_demo_basket(ids, settings, venue, limits, data_cfg, syms)
-        env_label = settings.exchange_env
-        manager = NetPositionManager(
-            venue, meta, settings,
-            disaster_stop_frac=limits.disaster_stop_frac, on_event=on_event,
-            scope_symbols=set(syms),  # touch ONLY our partition — never another strategy's symbols
-        )
+        # ONE session per exchange account (unless partitions make coexistence safe). Taken here,
+        # not at the API, because `qbot demo-basket` reaches this function directly.
+        account_lock = AccountLock(settings, owner=f"basket:{','.join(ids)}")
+        if not _partitions_declared():
+            account_lock.acquire()
+        try:
+            limits = load_basket_demo_limits()
+            venue = venue if venue is not None else get_venue(meta, settings, live=True)
+            equity = _preflight_demo_basket(ids, settings, venue, limits, data_cfg, syms)
+            env_label = settings.exchange_env
+            manager = NetPositionManager(
+                venue, meta, settings,
+                disaster_stop_frac=limits.disaster_stop_frac, on_event=on_event,
+                # touch ONLY our partition — never another strategy's symbols
+                scope_symbols=set(syms),
+            )
+        except BaseException:
+            # A refusal in the pre-flight must not leave the account claimed for the lock's whole
+            # TTL — the operator's next attempt (after fixing the blocker) would be refused for a
+            # session that never started.
+            account_lock.release()
+            raise
 
     # -- per-strategy equity slice --------------------------------------- #
     # Co-hosted baskets share ONE balance, so they cannot each size off the whole of it — that is
@@ -701,7 +730,11 @@ def _run_basket_session(
         # delete-then-insert history-wipe). The env prefix (paper: / demo: / testnet:) keeps env
         # classification + per-strategy grouping intact, so demo stats never mix with paper.
         session = PaperSession(
-            session_id=f"{env_label}:basket:{cid}:{data_cfg.data_version}:{tf}:{stamp}"
+            session_id=f"{env_label}:basket:{cid}:{data_cfg.data_version}:{tf}:{stamp}",
+            # THIS strategy's slice of the account, which is what its P&L is measured against —
+            # the dashboard's drawdown % is meaningless anchored on anything else (a demo account
+            # of ~1000 showed a 10% drawdown as ~1% against the 10k paper base).
+            initial_equity=equities[cid],
         )
         _clear_orphan_open_positions(session.session_id)  # drop a prior crashed run's stale legs
         loop = BasketPaperLoop(
@@ -751,6 +784,8 @@ def _run_basket_session(
                     persisted[cid] = len(sessions[cid].trades)
             if manager is not None:
                 _reconcile_tick(manager, loops, on_event)
+            if account_lock is not None:
+                account_lock.refresh()  # a session that stops refreshing frees the account by TTL
             if on_tick is not None:
                 booked = sum(len(s.trades) for s in sessions.values())
                 on_tick(ticks, f"tick {ticks}: {booked} legs, {len(bars_at)} symbols")
@@ -771,6 +806,8 @@ def _run_basket_session(
             # the remainder. This is the guarantee the SOL orphan violated: a session never EXITS
             # leaving a position open.
             _flatten_book_if_dirty(venue, manager, failed, on_event)
+        if account_lock is not None:
+            account_lock.release()  # released AFTER the book is flat, never before
     if manager is not None and on_event is not None:
         on_event(f"execution quality: {manager.execution_summary()}")
     return sum(len(s.trades) for s in sessions.values())

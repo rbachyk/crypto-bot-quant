@@ -46,6 +46,11 @@ _TRIGGER_TYPES = (OrderType.STOP_MARKET, OrderType.STOP_LIMIT, OrderType.TAKE_PR
 # ccxt order statuses after which an order can no longer fill.
 _TERMINAL_STATUSES = frozenset({"closed", "canceled", "cancelled", "rejected", "expired"})
 
+# How long a reduce-only close is given to show up as gone on the position endpoint, which lags
+# the fill. Short: the caller retries next tick, so this only has to outlast propagation.
+_CLOSE_CONFIRM_S = 2.0
+_CLOSE_CONFIRM_POLL_S = 0.25
+
 VALID_EXCHANGE_ENVS = ("live", "testnet", "demo")
 
 
@@ -814,6 +819,35 @@ class CcxtLiveVenue:
             return None
         return px_qty / qty_sum, fee_sum
 
+    def _confirm_closed(self, symbol: str, qty_before: float) -> bool:
+        """Did the position actually go away (or shrink)? Re-read the book, briefly.
+
+        A reduce-only market close is *placed* synchronously but the position endpoint lags the
+        fill, so one immediate read is not evidence either way: a bare "still listed" would make
+        every close look failed and drive a retry storm. We poll a short window and accept the
+        first read that shows the position gone or smaller — a partial reduce is progress, and the
+        caller's next tick finishes it. An unchanged position after the window is a FAILED close
+        and is reported as one, which is the whole point: reporting success on placement alone
+        let the mirror go flat while a real position kept running."""
+        deadline = time.monotonic() + _CLOSE_CONFIRM_S
+        while True:
+            try:
+                live = self.fetch_exchange_positions().get(symbol)
+            except Exception as exc:  # noqa: BLE001 - cannot verify → treat as unconfirmed
+                _log.warning("close_confirm_read_failed", symbol=symbol, error=str(exc))
+                return False
+            if live is None or live.qty <= 0 or live.qty < qty_before - 1e-12:
+                return True
+            if time.monotonic() >= deadline:
+                _log.error(
+                    "close_not_confirmed", symbol=symbol, qty_before=qty_before,
+                    qty_now=live.qty,
+                    hint="reduce-only close placed but the position is unchanged on the book — "
+                    "keeping it tracked so the caller retries",
+                )
+                return False
+            time.sleep(_CLOSE_CONFIRM_POLL_S)
+
     def close_position(self, symbol: str) -> bool:
         """Reduce-only market close of ONE owned position (bot-side time-stop) + cancel its legs.
 
@@ -828,6 +862,10 @@ class CcxtLiveVenue:
             self._ex.create_order(symbol, "market", close_side, pos.qty, None, {"reduceOnly": True})
         except Exception as exc:  # noqa: BLE001 - surface + keep tracking; never fake success
             _log.error("close_position_failed", symbol=symbol, error=str(exc))
+            return False
+        # A placed order is not a closed position: confirm against the book before the mirror is
+        # allowed to go flat (M15 — a failed close is a FAILED close).
+        if not self._confirm_closed(symbol, pos.qty):
             return False
         for cid in [c for c, o in self.open_orders.items() if o.symbol == symbol]:
             # Verified cancel: an unconfirmed leg cancel keeps the order tracked (Section 7).
@@ -858,6 +896,8 @@ class CcxtLiveVenue:
         except Exception as exc:  # noqa: BLE001 - surface; the caller retries next tick
             _log.error("close_book_position_failed", symbol=symbol, error=str(exc))
             return False
+        if not self._confirm_closed(symbol, live.qty):
+            return False  # still on the book → the next reconcile retries it
         self.positions.pop(symbol, None)
         return True
 

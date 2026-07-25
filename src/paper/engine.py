@@ -640,6 +640,10 @@ class PaperTradingEngine:
                 self._account_equity = eq
                 if self._session_start_equity is None:
                     self._session_start_equity = eq
+                    # Anchor the session's persisted equity base on the REAL account, not the
+                    # paper numeraire: the dashboard's curve and drawdown % are computed from it,
+                    # and a 10k base under a smaller real account understates every drawdown.
+                    session.initial_equity = float(eq)
                 self._peak_equity = max(self._peak_equity, eq)
         for inp in inputs:
             self._process_one(inp, session)
