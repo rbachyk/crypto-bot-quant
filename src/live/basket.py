@@ -172,7 +172,16 @@ class BasketPaperLoop:
         out: list[dict] = []
         for sym, leg in self._holdings.items():
             bar = bars_at.get(sym)
-            mark = float(bar["close"]) if bar is not None else leg.entry_price
+            if bar is not None:
+                # Carry the last observed close on the leg (the L5 convention the backtest's
+                # _unrealized already follows). Nothing in the LIVE loop was updating it, so
+                # ``leg.last_mark`` never moved off the entry price — which quietly made two
+                # things wrong: a gapped symbol's leg showed an unrealized P&L of just its fees,
+                # and _reconcile_tick's fallback exit price for a leg closed EXCHANGE-side with no
+                # visible execution ("leg.last_mark or leg.entry_price") booked it at ENTRY. A
+                # disaster stop firing 25% away would have been booked as roughly break-even.
+                leg.last_mark = float(bar["close"])
+            mark = leg.last_mark or leg.entry_price
             unreal = leg.side * (mark - leg.entry_price) * leg.qty - leg.entry_fee - leg.funding
             out.append({
                 "symbol": sym, "strategy": self.engine.name, "side": leg.side, "qty": leg.qty,

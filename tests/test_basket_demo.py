@@ -1222,3 +1222,39 @@ def test_scoped_session_end_backstop_flattens_only_our_symbols() -> None:
 
     assert "BTC/USDT:USDT" not in venue.positions  # our scope flattened
     assert venue.net("SOL/USDT:USDT") == pytest.approx(0.5)  # the other partition untouched
+
+
+def test_a_leg_closed_exchange_side_books_at_the_LAST_mark_not_the_entry() -> None:
+    """REGRESSION. Nothing in the live loop updated ``leg.last_mark``, so it stayed at the entry
+    price for the leg's whole life. _reconcile_tick's fallback for a leg the exchange closed with
+    no visible execution is ``leg.last_mark or leg.entry_price`` — so a disaster stop firing 25%
+    away, or a liquidation, was booked at the ENTRY price: a large realized loss recorded as
+    roughly break-even (just fees), in the session P&L and every statistic built on it."""
+    venue = FakeVenue()
+    mgr = _manager(venue)
+    loop = _loop("funding_carry", manager=mgr)
+    by_symbol, snaps = _fixture()
+    for i, (ts, bars, rows) in enumerate(snaps):
+        loop.step(ts, bars, rows, by_symbol)
+        if loop._holdings and i > 2:
+            break
+    victim = sorted(loop._holdings)[0]
+    leg = loop._holdings[victim]
+    assert leg.last_mark == pytest.approx(leg.entry_price)  # only the open has set it so far
+
+    # The market moves away from entry, and the loop marks positions on its next step.
+    moved = {s: {"ts": (N + 1) * IV, "open": 80.0, "high": 80.0, "low": 80.0, "close": 80.0,
+                 "volume": 1e6} for s in by_symbol}
+    loop._open_positions(moved)
+    assert leg.last_mark == pytest.approx(80.0), "the last observed close must ride on the leg"
+
+    venue.positions.pop(victim)  # stopped out / liquidated
+    venue.fetch_exit_fill = lambda *a, **k: None  # …with no execution visible to book from
+    booked_before = len(loop.session.trades)
+
+    _reconcile_tick(mgr, {"funding_carry": loop}, None)
+
+    assert len(loop.session.trades) == booked_before + 1
+    booked = loop.session.trades[-1]
+    assert booked.exit_price == pytest.approx(80.0), "booked at the last mark, not the entry"
+    assert booked.pnl < 0, "a 20% adverse move must book as a loss, not break-even"

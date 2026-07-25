@@ -535,12 +535,23 @@ class LiveCandidateFeed:
                         advanced.append(got)
             if advanced:
                 ts = max(int(r["decision_ts"]) for _, _, r in advanced)
+                # STALE symbols are excluded from the cross-section. Their last bar sits in the
+                # rolling reader indefinitely, and the basket relabels every bar in this snapshot
+                # with the CURRENT ts — so a symbol whose feed died kept being scored, ranked and
+                # (if it entered the basket) ORDERED against a frozen price, with nothing marking
+                # it as old. Dropping it means the rebalance simply sees fewer symbols, which
+                # min_universe already handles and logs. is_fresh() is the same freshness the loop
+                # uses to decide whether a symbol may advance at all.
+                fresh = getattr(self.data_manager, "is_fresh", None)
                 bars_at = {
-                    s: self._reader.ohlcv(s)[-1] for s in self.symbols if self._reader.ohlcv(s)
+                    s: self._reader.ohlcv(s)[-1]
+                    for s in self.symbols
+                    if self._reader.ohlcv(s) and (fresh is None or fresh(s))
                 }
+                rows_at = {s: r for s, r in self._latest_rows.items() if s in bars_at}
                 emitted += 1
                 last_advance_ms = now
-                yield (ts, bars_at, dict(self._latest_rows))
+                yield (ts, bars_at, rows_at)
                 continue
             # No new closed bar this cycle (halt, or the feed served nothing new). A stalled feed
             # used to look identical to a hung loop — frozen ticks, no logs — so emit a THROTTLED

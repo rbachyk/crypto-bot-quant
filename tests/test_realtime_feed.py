@@ -425,3 +425,35 @@ def test_shadow_producer_logs_fresh_executed_paper_candidates_only() -> None:
     loop3._shadow_predictor = spy3
     loop3._maybe_shadow_log([_pin(now)], now, [_trade(now)])
     assert spy3.calls == []
+
+
+def test_a_stale_symbol_is_dropped_from_the_cross_section() -> None:
+    """REGRESSION: the basket relabels every bar in a snapshot with the CURRENT decision ts, and
+    the snapshot was built from each symbol's last bar in the rolling reader — including symbols
+    whose feed had died. A dead symbol therefore kept being scored, ranked and (if it made the
+    basket) ORDERED against a frozen price, with nothing marking it as old. `is_fresh` is the same
+    freshness the loop already uses to decide whether a symbol may advance at all."""
+    syms = [SYM, "ETH/USDT:USDT"]
+
+    class _Manager:
+        """ETH's feed is dead; BTC keeps streaming."""
+
+        def poll(self, *_a, **_k):
+            from src.live.data_manager import DataHealth
+
+            return DataHealth(ts=0, connected=True, fresh=[SYM], stale=["ETH/USDT:USDT"])
+
+        def is_fresh(self, symbol: str) -> bool:
+            return symbol == SYM
+
+    feed = LiveCandidateFeed(
+        _cfg(), feed_source=ScriptedFeedSource(_new_bars()), rest_source=DeterministicSource(EX),
+        timeframe=TF, symbols=syms, seed_end_ms=SEED_END, data_manager=_Manager(), max_groups=1,
+    )
+
+    snapshots = list(feed.snapshots())
+
+    assert snapshots, "the fresh symbol must still produce a cross-section"
+    _ts, bars_at, rows_at = snapshots[0]
+    assert set(bars_at) == {SYM}, "the stale symbol must not be priced into the cross-section"
+    assert set(rows_at) <= {SYM}, "…nor scored from its frozen feature row"
