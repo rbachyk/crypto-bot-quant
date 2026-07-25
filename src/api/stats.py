@@ -732,14 +732,26 @@ def get_trade_scopes(env: str | None = None) -> dict[str, list[str]]:
         strategies = sorted(
             {s for (s,) in session.execute(sq) if s and (not known or s in known)}
         )
-        ssq = _apply_env(select(PaperTradeRecord.session_id).distinct(), env)
+        # The 50 MOST RECENT sessions, by their latest trade. Ordering by session_id descending
+        # ranked by string, so the env prefix dominated: with 50+ `testnet:` sessions on record no
+        # `demo:` or `paper:` session could ever appear in the selector, however recent. The limit
+        # is applied in SQL rather than by slicing the full list.
+        ssq = _apply_env(
+            select(
+                PaperTradeRecord.session_id,
+                func.max(PaperTradeRecord.created_at).label("last_trade"),
+            ).group_by(PaperTradeRecord.session_id),
+            env,
+        )
         if known:
             ssq = ssq.where(PaperTradeRecord.strategy.in_(known))
         sessions = [
             sid
-            for (sid,) in session.execute(ssq.order_by(PaperTradeRecord.session_id.desc()))
+            for sid, _last in session.execute(
+                ssq.order_by(func.max(PaperTradeRecord.created_at).desc()).limit(50)
+            ).all()
             if sid
-        ][:50]
+        ]
     return {"strategies": strategies, "sessions": sessions}
 
 
