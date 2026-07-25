@@ -51,6 +51,37 @@ def _check_database() -> ComponentHealth:
         return ComponentHealth("database", False, f"unreachable: {exc}")
 
 
+def _check_schema() -> ComponentHealth:
+    """Is the database at the migration head this code expects?
+
+    Nothing in the deploy path runs ``alembic upgrade`` — it is a manual ``make migrate`` — so new
+    code can meet an old database. The symptom is brutal to diagnose from the outside: only the
+    pages that touch the changed table break, rendering the generic error shell while the real
+    cause (``column X does not exist``) sits in the logs. Reporting it here puts drift on /health,
+    where the operator and any monitor already look."""
+    try:
+        from alembic.config import Config
+        from alembic.script import ScriptDirectory
+
+        from src.config.settings import REPO_ROOT
+
+        cfg = Config(str(REPO_ROOT / "alembic.ini"))
+        cfg.set_main_option("script_location", str(REPO_ROOT / "migrations"))
+        heads = set(ScriptDirectory.from_config(cfg).get_heads())
+        with get_engine().connect() as conn:
+            current = {r[0] for r in conn.execute(text("SELECT version_num FROM alembic_version"))}
+    except Exception as exc:  # noqa: BLE001 - can't determine → don't fail health on a blind spot
+        return ComponentHealth("schema", True, f"not determinable ({type(exc).__name__})")
+    if not heads or current == heads:
+        return ComponentHealth("schema", True, f"at head {sorted(heads) or ['none']}")
+    return ComponentHealth(
+        "schema",
+        False,
+        f"database at {sorted(current) or ['<unstamped>']}, code expects {sorted(heads)} — "
+        "run `make migrate` (pages touching changed tables will error until you do)",
+    )
+
+
 def _check_redis(settings: Settings) -> ComponentHealth:
     try:
         # Both timeouts matter: connect_timeout bounds a dead host, socket_timeout bounds a
@@ -90,6 +121,7 @@ def check_health(
     service = service or settings.service_name
     components = [
         _check_database(),
+        _check_schema(),
         _check_redis(settings),
         _check_storage(settings),
     ]
