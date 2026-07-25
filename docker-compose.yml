@@ -69,6 +69,14 @@ x-app-build: &app-build
   volumes:
     - lakedata:/app/var
     - reportsdata:/app/reports
+    # Operator-editable configs (metadata, strategies, universe, …) mounted READ-ONLY from the
+    # host over the image's baked copy. Without this, `COPY . .` bakes configs into the image, so
+    # every edit — including flipping metadata `verified: true` after review — would need a full
+    # `docker compose build`. With it, an edit takes effect on a plain container restart
+    # (`docker compose up -d`), which is what the Section-6 verification workflow needs. Read-only:
+    # nothing in src/ writes to configs/ (config_freeze writes under reports/), so the app can't
+    # mutate operator-reviewed config, and the host git checkout stays the single source of truth.
+    - ./configs:/app/configs:ro
   # Auto-restart on crash/OOM (DEPLOY gate). Merged into every app service via <<: *app-build.
   restart: unless-stopped
 
