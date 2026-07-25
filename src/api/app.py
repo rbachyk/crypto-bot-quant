@@ -797,24 +797,64 @@ def _has_active_job(
 _ACCOUNT_SESSION_TYPES = ("run_live_session", "run_basket_demo_session")
 
 
-def _refuse_unpartitioned_coexistence(job_type: str, redis_client: Any = None) -> None:
-    """Refuse to start a session type while the OTHER one is running on an unpartitioned account.
+def _account_scopes_overlap(
+    basket_strategies: list[str] | None = None, live_strategies: list[str] | None = None
+) -> bool:
+    """Would a basket session and a per-symbol live session trade any of the SAME symbols?
+
+    "Some strategy declares live_symbols" is NOT the question, and treating it as one was wrong:
+    reserving symbols for `basis_reversion` leaves every OTHER strategy unrestricted, and two
+    unrestricted strategies both resolve to ``universe − reserved`` — the same set. A partition
+    only separates two sessions when the symbols each will actually trade are disjoint, so that is
+    what gets computed here: the basket strategies' scopes against the live session's active
+    (promoted) strategies' scopes, exactly as each session computes its own."""
+    from src.data.config import load_data_config
+    from src.strategies.config import load_strategies_config
+
+    try:
+        sc = load_strategies_config()
+        universe = load_data_config("configs/data.bybit.yaml").active_symbols()
+    except Exception:  # noqa: BLE001 - can't resolve the scopes → assume they overlap (safe side)
+        return True
+    baskets = basket_strategies or [
+        c.id for c in sc.candidates if getattr(c, "enabled", False)
+    ]
+    if live_strategies is not None:
+        live_ids = list(live_strategies)
+    else:
+        try:
+            from src.paper.lake import resolve_active_strategies
+
+            active, _skipped = resolve_active_strategies(require_real_data=True)
+            live_ids = [sid for _s, sid, _v in active]
+        except Exception:  # noqa: BLE001 - unknown ensemble → any enabled candidate could run
+            live_ids = [c.id for c in sc.candidates if getattr(c, "enabled", False)]
+    if not live_ids:
+        # Nothing is promoted, so a live session trades nothing — but it can begin to the moment a
+        # promotion lands, and this check runs once at Start. Treat the whole universe as its scope.
+        live_ids = [c.id for c in sc.candidates if getattr(c, "enabled", False)]
+    basket_scope = {s for cid in baskets for s in sc.live_scope(cid, universe)}
+    live_scope = {s for cid in live_ids if cid not in baskets
+                  for s in sc.live_scope(cid, universe)}
+    return bool(basket_scope & live_scope)
+
+
+def _refuse_unpartitioned_coexistence(
+    job_type: str, redis_client: Any = None, basket_strategies: list[str] | None = None
+) -> None:
+    """Refuse to start a session type while the OTHER one would trade the same symbols.
 
     A per-symbol live session and a basket demo session are different job types, so the per-type
     exclusivity guard cannot see each other — but they share one exchange account, which holds ONE
-    net position per symbol. With no ``live_symbols`` declared anywhere (the shipped default), both
-    sessions scope to the WHOLE universe, so each would keep an independent mirror of a book they
-    share: a basket rebalance resizes or flattens the per-symbol strategy's stop-managed position,
-    and vice versa. That is exactly the hazard account partitioning exists to prevent.
-
-    When partitions ARE declared they are validated disjoint at config load, so coexistence is the
-    supported configuration and this check stands aside."""
-    from src.strategies.config import load_strategies_config
-
+    net position per symbol. Unpartitioned, both scope to the WHOLE universe, so each keeps an
+    independent mirror of a book they share: a basket rebalance resizes or flattens the per-symbol
+    strategy's stop-managed position, and vice versa. That is the hazard account partitioning
+    exists to prevent — and :func:`_account_scopes_overlap` decides it by comparing the symbols the
+    two sessions would ACTUALLY trade, not merely whether somebody declared a partition."""
     other = next((t for t in _ACCOUNT_SESSION_TYPES if t != job_type), None)
     if other is None or job_type not in _ACCOUNT_SESSION_TYPES:
         return
-    if load_strategies_config().reserved_symbols():  # a partition exists → disjoint by construction
+    if not _account_scopes_overlap(basket_strategies):
         return
     for job_id, params in _alive_session_jobs(other, redis_client=redis_client):
         # A live session started in PAPER mode drives the offline SimulatedVenue — it places no
@@ -855,7 +895,9 @@ def _enqueue_exclusive(
     try:
         if _has_active_job(job_type, strategy=strategy, redis_client=queue.redis):
             raise HTTPException(status_code=409, detail=conflict_detail)
-        _refuse_unpartitioned_coexistence(job_type, redis_client=queue.redis)
+        _refuse_unpartitioned_coexistence(
+            job_type, redis_client=queue.redis, basket_strategies=params.get("strategies")
+        )
         return queue.enqueue(job_type, params, requested_by=requested_by)
     finally:
         queue.redis.delete(lock_key)

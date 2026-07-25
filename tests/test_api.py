@@ -691,3 +691,51 @@ def test_a_paper_mode_live_session_does_not_block_a_basket_demo() -> None:
             ).all():
                 j.status = JobStatus.CANCELLED
                 j.failure_reason = "cancelled: enqueued by a test, never an intended session"
+
+
+@requires_db
+def test_a_partial_partition_is_not_mistaken_for_a_disjoint_one() -> None:
+    """REGRESSION in my own guard: it stood aside as soon as ANY strategy declared live_symbols.
+    Reserving symbols for basis_reversion leaves every OTHER per-symbol strategy unrestricted, and
+    an unrestricted strategy resolves to `universe - reserved` — the SAME set the baskets get. The
+    two sessions would still collide, with the guard waved off. What matters is whether the symbols
+    each session will actually trade are disjoint."""
+    import tempfile
+    from pathlib import Path
+
+    import src.strategies.config as cfgmod
+    import yaml
+    from src.api.app import _account_scopes_overlap
+    from src.strategies.config import load_strategies_config
+
+    baskets = ["funding_carry", "residual_momentum"]
+
+    live = ["lead_lag_xasset", "basis_reversion", "xsection_rs", "liquidation_reversal"]
+
+    def overlap_with(patch: dict) -> bool:
+        data = yaml.safe_load(Path("configs/strategies.yaml").read_text())
+        for c in data["strategies"]["candidates"]:
+            if c["id"] in patch:
+                c["live_symbols"] = patch[c["id"]]
+        tmp = Path(tempfile.mkdtemp()) / "strategies.yaml"
+        tmp.write_text(yaml.safe_dump(data))
+        load_strategies_config.cache_clear()
+        orig, cfgmod.STRATEGIES_YAML = cfgmod.STRATEGIES_YAML, tmp
+        try:
+            # The live ensemble is passed explicitly: which strategies are PROMOTED is DB state,
+            # and this test is about the scope arithmetic, not about what happens to be promoted.
+            return _account_scopes_overlap(baskets, live_strategies=live)
+        finally:
+            cfgmod.STRATEGIES_YAML = orig
+            load_strategies_config.cache_clear()
+
+    assert overlap_with({}) is True  # as shipped: both sessions take the whole universe
+    assert overlap_with({"basis_reversion": ["ADA/USDT:USDT"]}) is True, (
+        "one strategy reserving symbols does not separate the sessions"
+    )
+    assert overlap_with({  # every per-symbol strategy reserved → baskets get the remainder
+        "lead_lag_xasset": ["BTC/USDT:USDT"],
+        "basis_reversion": ["ADA/USDT:USDT", "XRP/USDT:USDT"],
+        "xsection_rs": ["ETH/USDT:USDT"],
+        "liquidation_reversal": ["SOL/USDT:USDT"],
+    }) is False, "a genuinely disjoint partition must let both sessions run"
