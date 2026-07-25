@@ -33,6 +33,22 @@ strategies:
   # validated expectancy_r — so the live ensemble stays small and diversified (0 = no cap).
   max_active_strategies: 5
 
+  # ACCOUNT PARTITIONING (Section 17) — running several strategies on ONE shared demo/live account.
+  # An exchange holds ONE net position per symbol, so two strategies trading the same symbol net
+  # into a single position: a directional strategy's stop-managed leg would be closed/resized by a
+  # basket's rebalance, and vice versa — unsafe. To coexist on one account, give each strategy a
+  # DISJOINT symbol set via `live_symbols` (below): a restricted strategy trades only those; an
+  # unrestricted one automatically gets every symbol NOT reserved by another. Each session then
+  # trades — and reconciles — ONLY its own symbols; positions in another strategy's symbols are
+  # recognized as ours and left alone (no false 'foreign' halt, no cross-flatten). `live_symbols`
+  # scopes LIVE/DEMO execution only; backtest/validation always uses the full universe, so it never
+  # changes a verdict or needs a STRATEGY_VERSION bump. Partitions must be disjoint (enforced at
+  # load). Example — reserve a couple of symbols for the per-symbol basis_reversion so the baskets
+  # (unrestricted) get the rest:
+  #   - id: basis_reversion
+  #     live_symbols: ["ADA/USDT:USDT", "XRP/USDT:USDT"]
+  # Leave `live_symbols` unset on every strategy to keep the single-account-exclusive behaviour.
+
   candidates:
     # ----------------------------------------------------------------------- #
     # Family A — Cross-Asset Lead-Lag (Section 12.A)                           #

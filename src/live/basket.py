@@ -470,7 +470,9 @@ def _strategy_extra(strategy: object) -> dict:
     return dict(getattr(params, "extra", {}) or {}) if params is not None else {}
 
 
-def _preflight_demo_basket(candidate_ids: list[str], settings, venue, limits, data_cfg) -> float:
+def _preflight_demo_basket(
+    candidate_ids: list[str], settings, venue, limits, data_cfg, scope_symbols
+) -> float:
     """Every refusal that must happen BEFORE a single real order — returns the account equity.
 
     Raises ``PermissionError`` on any blocker. Order matters: environment first (a live env must
@@ -494,10 +496,13 @@ def _preflight_demo_basket(candidate_ids: list[str], settings, venue, limits, da
         )
 
     # EVERY co-hosted strategy must clear the gate — one ineligible basket must not ride along
-    # on another's eligibility.
+    # on another's eligibility. Metadata is checked over the SESSION'S SCOPE (the partitioned
+    # symbols it will actually trade), not the whole universe — symbols reserved for another
+    # strategy are that strategy's problem to verify.
+    scope = list(scope_symbols)
     for cid in candidate_ids:
         report = DemoReadinessGuard(
-            settings, venue=venue, basket_candidate_id=cid, data_cfg=data_cfg
+            settings, venue=venue, basket_candidate_id=cid, data_cfg=data_cfg, symbols=scope
         ).evaluate()
         if not report.ok:
             raise PermissionError(
@@ -509,23 +514,31 @@ def _preflight_demo_basket(candidate_ids: list[str], settings, venue, limits, da
         venue, OwnershipPolicy(settings), environment=env, adopt=True
     )
     if recon.halt_required:
+        # A FOREIGN (non-prefix) order/position halts regardless of partitioning — it is not ours.
         raise PermissionError(
             "exchange book is not clean — refusing to start:\n" + recon.report()
         )
-    if limits.require_flat_book and (recon.owned_positions or recon.owned_orders):
-        # Several baskets on one account is supported and correct — but only CO-HOSTED, sharing
-        # one NetPositionManager (run_multi_basket_demo_session). A leftover position at startup
-        # means something ELSE holds this account: another process with its own independent
-        # mirror, or a crashed run. Neither can be attributed to a strategy here, so adopting it
-        # would corrupt the aggregate from tick 1.
+    # Under account partitioning we require only OUR SCOPE to be flat. Owned positions in OTHER
+    # symbols belong to another of our strategies (basis_reversion on its reserved symbols) and are
+    # legitimately present — recognized as ours, left alone. A leftover in our OWN scope, though,
+    # still cannot be attributed to a strategy in this session (a crashed prior run) and would
+    # corrupt the aggregate, so it still blocks.
+    scope_set = set(scope)
+    in_scope_pos = [s for s in recon.owned_positions if s in scope_set]
+    # reconcile_startup(adopt=True) put the owned Order objects in venue.open_orders — map id→symbol
+    # so a resting order (e.g. basis_reversion's stop) only blocks when it is in OUR scope.
+    in_scope_ord = [
+        oid for oid in recon.owned_orders
+        if getattr(getattr(venue, "open_orders", {}).get(oid, None), "symbol", None) in scope_set
+    ]
+    if limits.require_flat_book and (in_scope_pos or in_scope_ord):
         raise PermissionError(
-            "the demo account is NOT flat (positions="
-            f"{list(recon.owned_positions)} orders={list(recon.owned_orders)}). These cannot be "
-            "attributed to a strategy in this session. To run several baskets on this one "
-            "account, start them TOGETHER via run_multi_basket_demo_session / "
-            "`qbot demo-basket --strategy a --strategy b` — co-hosted baskets share a net-position "
-            "manager and net correctly. Otherwise close/cancel the leftovers first (or set "
-            "basket_demo.require_flat_book=false to adopt an untracked book at your own risk)."
+            "our own scope is NOT flat on the demo account (positions="
+            f"{in_scope_pos} orders={in_scope_ord}). These are in symbols THIS session trades but "
+            "cannot be attributed to it (a crashed prior run?). Close them first "
+            "(`qbot flatten-demo` clears the whole demo account), or co-host all baskets in ONE "
+            "session. Positions in OTHER symbols (another strategy's partition) are fine and were "
+            "left untouched."
         )
 
     equity = None
@@ -590,8 +603,27 @@ def _run_basket_session(
 
     settings = settings or get_settings()
     data_cfg = data_cfg or load_data_config()
-    syms = data_cfg.active_symbols()
     sc = load_strategies_config()
+
+    # Account partitioning: this session trades ONLY its scope — the universe minus every symbol
+    # another strategy reserves (basis_reversion et al.). Co-hosted baskets net among themselves
+    # inside the shared scope; nothing outside it is fetched, ranked, ordered or reconciled here,
+    # so two strategies never touch the same symbol on one account (the netting hazard). An
+    # explicitly-restricted basket intersects its own live_symbols. The feed, engine, sizing and
+    # the NetPositionManager all run on this scope, not the full universe.
+    universe = data_cfg.active_symbols()
+    syms = sorted({s for cid in ids for s in sc.live_scope(cid, universe)})
+    if not syms:
+        raise ValueError(
+            f"the account partition leaves {ids} with NO symbols to trade "
+            f"(universe={len(universe)}, reserved by others={sorted(sc.reserved_symbols(*ids))}). "
+            "Widen live_symbols or the data universe."
+        )
+    if set(syms) != set(universe) and on_event is not None:
+        on_event(
+            f"account partition: trading {len(syms)}/{len(universe)} symbols "
+            f"(reserved for other strategies: {sorted(set(universe) - set(syms))})"
+        )
 
     strategies: dict[str, object] = {}
     for cid in ids:
@@ -642,11 +674,12 @@ def _run_basket_session(
 
         limits = load_basket_demo_limits()
         venue = venue if venue is not None else get_venue(meta, settings, live=True)
-        equity = _preflight_demo_basket(ids, settings, venue, limits, data_cfg)
+        equity = _preflight_demo_basket(ids, settings, venue, limits, data_cfg, syms)
         env_label = settings.exchange_env
         manager = NetPositionManager(
             venue, meta, settings,
             disaster_stop_frac=limits.disaster_stop_frac, on_event=on_event,
+            scope_symbols=set(syms),  # touch ONLY our partition — never another strategy's symbols
         )
 
     # -- per-strategy equity slice --------------------------------------- #
@@ -736,29 +769,56 @@ def _run_basket_session(
 
 
 def _flatten_book_if_dirty(venue, manager, failed: list[str], on_event) -> None:
-    """Guarantee the account is flat at session end. First try a targeted flatten of any residual
-    position (reduce-only, per symbol); escalate to the audited emergency close if the book is
-    still not clean (or a leg's own close failed). Exclusive-account contract makes this safe."""
+    """Guarantee THIS session's symbols are flat at session end — never the whole account.
+
+    Under account partitioning a basket owns only its scope; another strategy (basis_reversion)
+    legitimately holds positions in its own symbols, so the backstop must touch ONLY our scope.
+    A residual in-scope position (a mis-observed fill, a failed close) is flattened reduce-only,
+    per symbol; anything that survives is surfaced for the operator. emergency_close_all — which
+    flattens EVERY position on the account — is used only for a SOLO session that owns the whole
+    account (``scope_symbols is None``)."""
+    in_scope = getattr(manager, "in_scope", lambda _s: True)
     try:
         residual = {s: (p.side * p.qty) for s, p in venue.fetch_exchange_positions().items()
-                    if p.qty > 0}
+                    if p.qty > 0 and in_scope(s)}
     except Exception as exc:  # noqa: BLE001 - if we cannot read the book, escalate to be safe
         _log.error("basket_end_book_read_failed", error=str(exc))
         residual = {}
         failed = failed or ["<unreadable book>"]
     for sym, qty in sorted(residual.items()):
         _log.warning("basket_end_residual_position", symbol=sym, qty=qty,
-                     hint="on the book at session end with no tracked leg — flattening")
+                     hint="in our scope at session end with no tracked leg — flattening")
         if manager is not None:
             manager.flatten_stray(sym, qty, 0.0)
-    # Re-read: anything that survived the targeted flatten, plus any failed leg close, escalates.
+    # Re-read our scope: anything that survived + any failed leg close still needs handling.
     try:
-        still = {s for s, p in venue.fetch_exchange_positions().items() if p.qty > 0}
+        still = {s for s, p in venue.fetch_exchange_positions().items()
+                 if p.qty > 0 and in_scope(s)}
     except Exception:  # noqa: BLE001 - unreadable → escalate
         still = set()
         failed = failed or ["<unreadable book>"]
-    if still or failed:
-        _emergency_flatten(venue, sorted(set(failed) | still), on_event)
+    remaining = sorted(set(failed) | still)
+    if not remaining:
+        return
+    solo = getattr(manager, "scope_symbols", None) is None
+    if solo:
+        # SOLO session owns the whole account → the audited whole-account emergency close is safe.
+        _emergency_flatten(venue, remaining, on_event)
+        return
+    # PARTITIONED: reduce-only close ONLY our own symbols; never touch another strategy's.
+    _log.error("basket_scoped_flatten", symbols=remaining)
+    if on_event is not None:
+        on_event(f"EMERGENCY: flattening our own symbols {remaining} (partitioned account)")
+    close = getattr(venue, "close_book_position", None)
+    unresolved = []
+    for sym in remaining:
+        if not callable(close) or not close(sym):
+            unresolved.append(sym)
+    if unresolved and on_event is not None:
+        on_event(
+            f"EMERGENCY: could not flatten {unresolved} — they may still be OPEN. Close manually "
+            "(qbot flatten-demo closes the whole demo account)."
+        )
 
 
 def _equity_slices(

@@ -109,6 +109,7 @@ class NetPositionManager:
         *,
         disaster_stop_frac: float = 0.25,
         on_event: Any | None = None,
+        scope_symbols: Any | None = None,
     ) -> None:
         self.venue = venue
         self.meta = meta
@@ -116,6 +117,14 @@ class NetPositionManager:
         self.ownership = OwnershipPolicy(settings)
         self.disaster_stop_frac = max(0.0, float(disaster_stop_frac))
         self.on_event = on_event
+        # The symbols this session OWNS on the account (account partitioning). Reconcile, stray-
+        # flatten and the session-end backstop act ONLY on these — a position in ANY other symbol
+        # belongs to another of our strategies (e.g. basis_reversion on its reserved symbols) and
+        # must never be touched. None = own the whole account (a solo basket session, the old
+        # exclusive behaviour). This is the guarantee that makes co-existence on one account safe.
+        self.scope_symbols: set[str] | None = (
+            set(scope_symbols) if scope_symbols is not None else None
+        )
         self._desired: dict[tuple[str, str], _Intent] = {}
         # Execution-quality record: every real fill, so a session can compare what the demo venue
         # actually did against what the backtest cost model assumed.
@@ -129,6 +138,12 @@ class NetPositionManager:
             )
 
     # -- aggregate state -------------------------------------------------- #
+    def in_scope(self, symbol: str) -> bool:
+        """Whether this session is allowed to touch ``symbol`` — always True for a solo session
+        (no scope), else only symbols in its partition. A position outside the scope is another
+        strategy's and is invisible to this manager's reconcile/flatten."""
+        return self.scope_symbols is None or symbol in self.scope_symbols
+
     def net(self, symbol: str) -> float:
         """The aggregate desired position across all strategies — what the exchange should hold."""
         total = sum(i.qty for (_s, sym), i in self._desired.items() if sym == symbol)
@@ -247,9 +262,17 @@ class NetPositionManager:
         except Exception as exc:  # noqa: BLE001 - a book read hiccup is not a trading failure
             _log.warning("basket_recon_fetch_failed", error=str(exc))
             return {}
-        actual = {sym: (p.side * p.qty) for sym, p in book.items() if p.qty > 0}
+        # ONLY our partition's symbols. A position in any other symbol is another of our strategies'
+        # (basis_reversion et al.) — recognized as ours, never reconciled or flattened here.
+        actual = {
+            sym: (p.side * p.qty)
+            for sym, p in book.items()
+            if p.qty > 0 and self.in_scope(sym)
+        }
         drift: dict[str, dict] = {}
         for sym in set(actual) | self.symbols():
+            if not self.in_scope(sym):
+                continue
             expected = self.net(sym)
             got = actual.get(sym, 0.0)
             if abs(expected - got) > max(_DUST, abs(expected) * 1e-6, abs(got) * 1e-6):
@@ -267,6 +290,10 @@ class NetPositionManager:
         True on a confirmed close, False otherwise (the next reconcile retries)."""
         if abs(book_qty) < _DUST:
             return True
+        if not self.in_scope(symbol):
+            # Defensive: never flatten a symbol outside our partition — it is another strategy's.
+            _log.error("basket_flatten_stray_out_of_scope", symbol=symbol)
+            return False
         # close_book_position closes what the REAL book holds even when it is absent from the
         # mirror (the mis-observed-fill case); plain close_position only touches the mirror.
         close = getattr(self.venue, "close_book_position", None) or getattr(

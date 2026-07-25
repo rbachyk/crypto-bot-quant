@@ -144,10 +144,17 @@ class LiveLoop:
         kill_switch: KillSwitch | None = None,
         guard: LiveOrderGuard | None = None,
         data_manager: Any | None = None,
+        scope_symbols: set[str] | None = None,
     ) -> None:
         if mode not in _MODES:
             raise ValueError(f"mode must be one of {_MODES}, got {mode!r}")
         self.mode = mode
+        # Account partition: the symbols this session OWNS on a shared account. When set,
+        # reconciliation considers ONLY these — an in-scope position is ours (adopt it), an
+        # out-of-scope one is another strategy's (invisible, never a foreign-halt). None = the
+        # unpartitioned default, where reconcile behaves exactly as before (strict foreign
+        # detection over the whole book).
+        self.scope_symbols = scope_symbols
         self.settings = settings or get_settings()
         # Paper uses the offline skeleton spec; a real venue (testnet/demo/live) must use the
         # metadata verified for ITS exchange so the venue's pre-trade metadata guard (Section 6)
@@ -233,32 +240,52 @@ class LiveLoop:
         own = OwnershipPolicy(self.settings)
         now_ts = decision_ts if decision_ts > 0 else int(time.time() * 1000)
         known_before = set(venue.positions)
-        foreign_orders = sorted(o for o, v in exch_orders.items() if not own.is_own(v.client_id))
-        foreign_positions = sorted(s for s, p in exch_positions.items() if not p.owned)
+        # Account partitioning: when a scope is set, this session considers ONLY its own symbols.
+        # A position outside the scope belongs to another of our strategies (a basket on its
+        # partition) and is INVISIBLE here — never adopted, never dropped, never a foreign-halt.
+        # And an IN-scope position is ours to manage regardless of the venue's ``owned`` flag,
+        # which is unreliable on Bybit (positions don't echo the opening order's clientOrderId, so
+        # every real position — including ours — reads owned=False; keying foreign-detection off it
+        # would false-halt on our own first position). Orders DO carry the prefix, so foreign-order
+        # detection stays honest, scoped to our symbols. Unpartitioned (scope None) = unchanged.
+        scope = self.scope_symbols
+        in_scope = (lambda s: True) if scope is None else (lambda s: s in scope)
+        foreign_orders = sorted(
+            o for o, v in exch_orders.items()
+            if in_scope(v.symbol) and not own.is_own(v.client_id)
+        )
+        if scope is None:
+            foreign_positions = sorted(s for s, p in exch_positions.items() if not p.owned)
+            owned_now = {s for s, p in exch_positions.items() if p.owned}
+        else:
+            # In-scope positions are ours; out-of-scope are another strategy's (ignored).
+            foreign_positions = []
+            owned_now = {s for s in exch_positions if in_scope(s)}
         # Refresh/adopt OWNED items from the exchange (real stop/TP protection + positions opened
-        # outside this session).
-        owned_now = {s for s, p in exch_positions.items() if p.owned}
-        for sym, p in exch_positions.items():
-            if p.owned:
-                venue.positions[sym] = p
-                self._absent_ticks.pop(sym, None)
-                if sym not in known_before and sym not in self._open_age:
-                    # M15: a position (re-)adopted by reconciliation re-arms its bot-side
-                    # time-stop with the ADOPTION time as the age baseline — the true entry time
-                    # is unknown after a restart/drop, and without re-arming it would never
-                    # time-stop. The hold horizon comes from the last known hold_bars for the
-                    # symbol; a startup-adopted position with no known horizon is logged only.
-                    hold = self._hold_by_symbol.get(sym, 0)
-                    if hold > 0:
-                        self._open_age[sym] = (now_ts, hold)
-                        _log.info(
-                            "time_stop_rearmed_on_adoption", symbol=sym, hold_bars=hold, ts=now_ts
-                        )
-                    else:
-                        _log.info("adopted_position_without_time_stop", symbol=sym)
-                if not p.has_exchange_side_stop():
-                    # Log (not alert) so a multi-day loop can't flood the alert sink every tick.
-                    _log.warning("live_owned_position_unprotected", symbol=sym)
+        # outside this session). ``owned_now`` already encodes ownership under both models: the
+        # venue's ``owned`` flag when unpartitioned, or in-scope membership when partitioned (where
+        # the flag is unreliable) — so we adopt from it, not the raw flag.
+        for sym in owned_now:
+            p = exch_positions[sym]
+            venue.positions[sym] = p
+            self._absent_ticks.pop(sym, None)
+            if sym not in known_before and sym not in self._open_age:
+                # M15: a position (re-)adopted by reconciliation re-arms its bot-side time-stop
+                # with the ADOPTION time as the age baseline — the true entry time is unknown after
+                # a restart/drop, and without re-arming it would never time-stop. The hold horizon
+                # comes from the last known hold_bars for the symbol; a startup-adopted position
+                # with no known horizon is logged only.
+                hold = self._hold_by_symbol.get(sym, 0)
+                if hold > 0:
+                    self._open_age[sym] = (now_ts, hold)
+                    _log.info(
+                        "time_stop_rearmed_on_adoption", symbol=sym, hold_bars=hold, ts=now_ts
+                    )
+                else:
+                    _log.info("adopted_position_without_time_stop", symbol=sym)
+            if not p.has_exchange_side_stop():
+                # Log (not alert) so a multi-day loop can't flood the alert sink every tick.
+                _log.warning("live_owned_position_unprotected", symbol=sym)
         # DEBOUNCED drop of closed positions: a mirror position the exchange no longer lists is
         # retired only after it's been absent for _ABSENT_DROP_TICKS consecutive reconciliations —
         # so a just-placed position lagging in fetch_positions is NOT false-dropped, but a real
@@ -281,9 +308,12 @@ class LiveLoop:
                 # which were previously popped here without booking anything.
                 self._book_exchange_exit(sym, pos, session, now_ts, reason="exchange_exit")
         # Sync owned resting orders to the real book (drop our filled/cancelled orders the exchange
-        # no longer lists, so the mirror doesn't grow unbounded over a multi-day run).
+        # no longer lists, so the mirror doesn't grow unbounded over a multi-day run). Scoped: keep
+        # only our own-symbol orders, so another strategy's resting stops (in its partition) don't
+        # pollute this session's mirror.
         venue.open_orders = {
-            oid: v for oid, v in exch_orders.items() if own.is_own(v.client_id)
+            oid: v for oid, v in exch_orders.items()
+            if own.is_own(v.client_id) and in_scope(v.symbol)
         }
         if foreign_orders or foreign_positions:
             _alert_reconcile(
@@ -379,6 +409,7 @@ class LiveLoop:
             self.venue,
             OwnershipPolicy(self.settings),
             environment=self.env_label,
+            scope_symbols=self.scope_symbols,
         )
 
     @property
@@ -761,6 +792,26 @@ def run_replay_session(
         )
         strategies = active
         active_ids = [sid for _s, sid, _v in active] or None
+
+    # Account partitioning: restrict this session to the symbols its active strategies OWN on a
+    # shared account (their live_symbols partition), so it never trades — or reconciles — a symbol
+    # reserved for another strategy (e.g. a basket). Only takes effect when a partition is declared
+    # (some strategy sets live_symbols); otherwise syms is unchanged and reconcile behaves exactly
+    # as before. This is what lets basis_reversion and the baskets share one demo account safely.
+    scope_symbols: set[str] | None = None
+    if active_ids:
+        from src.strategies.config import load_strategies_config
+
+        _sc = load_strategies_config()
+        _own_reserved = any(
+            c.live_symbols for a in active_ids if (c := _sc.candidate(a)) is not None
+        )
+        _partitioned = bool(_sc.reserved_symbols(*active_ids)) or _own_reserved
+        if _partitioned:
+            scoped = sorted({s for a in active_ids for s in _sc.live_scope(a, syms)})
+            if scoped:
+                scope_symbols = set(scoped)
+                syms = scoped
     # Resolve the decision timeframe from the strategies that ACTUALLY run (the pinned candidate, or
     # the active ensemble) — not every promoted row, so a benched promotion on a different timeframe
     # can't force a fallback to the base grid when the active set is uniform.
@@ -815,7 +866,8 @@ def run_replay_session(
             ws_rest_check=(transport == "ws"),
         )
         # The real-time feed owns the data-manager halt; don't double-poll at the loop level.
-        loop = LiveLoop(mode=mode, settings=settings, guard=guard, kill_switch=kill_switch)
+        loop = LiveLoop(mode=mode, settings=settings, guard=guard, kill_switch=kill_switch,
+                        scope_symbols=scope_symbols)
     elif multi_strategy:
         from src.paper.lake import build_active_lake_inputs
 
@@ -829,7 +881,7 @@ def run_replay_session(
         feed = ReplayFeed(inputs)
         loop = LiveLoop(
             mode=mode, settings=settings, guard=guard,
-            data_manager=data_manager, kill_switch=kill_switch,
+            data_manager=data_manager, kill_switch=kill_switch, scope_symbols=scope_symbols,
         )
     else:
         feed = replay_feed_from_lake(
@@ -837,7 +889,7 @@ def run_replay_session(
         )
         loop = LiveLoop(
             mode=mode, settings=settings, guard=guard,
-            data_manager=data_manager, kill_switch=kill_switch,
+            data_manager=data_manager, kill_switch=kill_switch, scope_symbols=scope_symbols,
         )
     # M9/M10: any real-venue session persists its breaker state (tripped manual-reset halts,
     # calendar loss-window anchors, peak equity, loss streak) keyed by trading environment, so a

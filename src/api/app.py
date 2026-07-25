@@ -1828,12 +1828,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }.get(env, f"environment {_esc(env)}")
         running = bool(active_ids)
         start_disabled = " disabled" if running else ""
-        # A per-symbol REAL-venue session while a basket demo session holds the same account would
-        # be two independent mirrors of one book — each sizing against exposure it does not own,
-        # neither able to reconcile. That is precisely the collision co-hosting exists to prevent
-        # (src/live/basket_exec.py), so the real-orders Start is refused while a basket demo runs.
-        # The offline paper Start is unaffected: SimulatedVenue touches no account.
-        real_start_disabled = " disabled" if (running or demo_basket_active) else ""
+        # A per-symbol REAL-venue session while a basket demo session holds the same account is
+        # only safe under ACCOUNT PARTITIONING — each strategy scoped to disjoint symbols (its
+        # live_symbols), so they never touch the same symbol and their reconciles ignore each
+        # other's positions (src/strategies/config.py live_scope). With a partition configured they
+        # coexist; without one they would be two independent mirrors of one book (the collision),
+        # so the real-orders Start stays blocked. The offline paper Start is always fine.
+        try:
+            from src.strategies.config import load_strategies_config as _lsc
+
+            _partition_configured = any(c.live_symbols for c in _lsc().candidates)
+        except Exception:  # noqa: BLE001 - config trouble → fall back to the safe (blocked) side
+            _partition_configured = False
+        _blocked_by_basket = demo_basket_active and not _partition_configured
+        real_start_disabled = " disabled" if (running or _blocked_by_basket) else ""
         # Paper button appends mode=paper (offline SimulatedVenue — no real orders); the env-default
         # button places real virtual-fund orders on the demo/testnet venue.
         paper_submit = (
@@ -1884,11 +1892,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             + (
                 '<p class="meta" style="color:#b45309">A <b>basket demo session</b> is holding '
-                "this account — the real-orders Start is disabled. Two sessions on one account "
-                "each keep an independent mirror of the same book (positions net per symbol on "
-                "the exchange), so neither would reconcile. Stop it below first, or co-host the "
-                "strategies in one session from <b>Paper Trading</b>.</p>"
-                if (demo_basket_active and not running)
+                "this account and no symbol partition is configured — the real-orders Start is "
+                "disabled. Without a partition, two sessions on one account each keep an "
+                "independent mirror of the same book (positions net per symbol), so neither would "
+                "reconcile. Give the per-symbol strategy its own <code>live_symbols</code> in "
+                "configs/strategies.yaml to run them side by side, or Stop the basket first.</p>"
+                if _blocked_by_basket and not running
+                else ""
+            )
+            + (
+                '<p class="meta" style="color:#3fb950">A basket demo session is running and a '
+                "symbol <b>partition</b> is configured — this per-symbol session is scoped to its "
+                "own symbols and will coexist without touching the baskets' positions.</p>"
+                if (demo_basket_active and _partition_configured and not running)
                 else ""
             )
             + "</div>"

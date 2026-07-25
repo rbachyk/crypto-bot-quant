@@ -537,3 +537,57 @@ def test_live_loop_halts_on_data_integrity_failure(tmp_path) -> None:
     result = LiveLoop(mode="paper", data_manager=_HaltingDataManager()).run(feed, session_name="t")
     assert result.halted
     assert result.executed == 0  # nothing trades while live data integrity is down
+
+
+# -- account partitioning: the per-symbol loop coexists with a basket on one account ---
+def test_scoped_reconcile_ignores_out_of_scope_positions() -> None:
+    """A partitioned per-symbol session (basis_reversion scoped to its symbols) must NOT halt on a
+    position in another strategy's symbol — a basket's leg on the shared account, which Bybit
+    reports owned=False. It is invisible to this session, not foreign."""
+    settings = _testnet_settings()
+    fake = FakeCcxt(positions=[
+        # A basket's SOL leg: no clientOrderId echo (Bybit) → owned=False. In the basket's
+        # partition, NOT this session's.
+        {"symbol": "SOL/USDT:USDT", "side": "long", "contracts": 0.5, "entryPrice": 150.0,
+         "info": {}},
+    ])
+    venue = CcxtLiveVenue(load_metadata_config(), settings, client=fake)
+    loop = LiveLoop(mode="testnet", venue=venue, settings=settings,
+                    scope_symbols={"BTC/USDT:USDT", "ETH/USDT:USDT"})
+    session = loop.engine.new_session("t")
+
+    assert loop._reconcile_live(session) is False  # NOT a halt — out of our scope
+    assert not session.foreign_order_halt_triggered
+    assert "SOL/USDT:USDT" not in venue.positions  # never adopted into our mirror
+
+
+def test_scoped_reconcile_adopts_our_own_position_despite_owned_false() -> None:
+    """Within our partition, a position is OURS even though Bybit reports owned=False (positions
+    don't echo the opening order's clientOrderId). Keying foreign-detection off that flag would
+    false-halt on our own first position — the scoped path recognizes it instead."""
+    settings = _testnet_settings()
+    fake = FakeCcxt(positions=[
+        {"symbol": "BTC/USDT:USDT", "side": "long", "contracts": 0.01, "entryPrice": 50_000.0,
+         "info": {}},  # our position, but owned=False from the venue
+    ])
+    venue = CcxtLiveVenue(load_metadata_config(), settings, client=fake)
+    loop = LiveLoop(mode="testnet", venue=venue, settings=settings,
+                    scope_symbols={"BTC/USDT:USDT"})
+    session = loop.engine.new_session("t")
+
+    assert loop._reconcile_live(session) is False  # ours → no halt
+    assert "BTC/USDT:USDT" in venue.positions  # adopted for management
+
+
+def test_unpartitioned_reconcile_still_halts_on_foreign() -> None:
+    """The default (no scope) path is unchanged: a non-prefix position still halts (Section 7)."""
+    settings = _testnet_settings()
+    fake = FakeCcxt(positions=[
+        {"symbol": "XRP/USDT:USDT", "side": "long", "contracts": 5.0, "entryPrice": 0.5,
+         "info": {"clientOrderId": "MANUAL_human_1"}},
+    ])
+    venue = CcxtLiveVenue(load_metadata_config(), settings, client=fake)
+    loop = LiveLoop(mode="testnet", venue=venue, settings=settings)  # no scope
+    session = loop.engine.new_session("t")
+    assert loop._reconcile_live(session) is True
+    assert session.foreign_order_halt_triggered

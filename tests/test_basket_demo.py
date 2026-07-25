@@ -646,7 +646,9 @@ def test_preflight_refuses_real_money_environment() -> None:
     regardless of readiness, gates, or sign-off."""
     settings = Settings(exchange_env="live", exchange_api_key="k", exchange_api_secret="s")
     with pytest.raises(PermissionError, match="EXCHANGE_ENV=live"):
-        _preflight_demo_basket(["funding_carry"], settings, FakeVenue(), _limits(), None)
+        _preflight_demo_basket(
+            ["funding_carry"], settings, FakeVenue(), _limits(), None, ["BTC/USDT:USDT"]
+        )
 
 
 def test_preflight_refuses_a_non_virtual_funds_environment() -> None:
@@ -656,7 +658,8 @@ def test_preflight_refuses_a_non_virtual_funds_environment() -> None:
 
     with pytest.raises(PermissionError, match="not a virtual-funds environment"):
         _preflight_demo_basket(
-            ["funding_carry"], SimpleNamespace(exchange_env="local"), FakeVenue(), _limits(), None
+            ["funding_carry"], SimpleNamespace(exchange_env="local"), FakeVenue(), _limits(),
+            None, ["BTC/USDT:USDT"],
         )
 
 
@@ -1072,3 +1075,70 @@ def test_flatten_demo_cli_refuses_live_and_flattens_demo(monkeypatch) -> None:
     res = CliRunner().invoke(app, ["flatten-demo", "--yes"])
     assert res.exit_code == 0
     assert venue.positions == {}
+
+
+# -- account partitioning: baskets + basis_reversion share ONE account safely ---
+def test_live_scope_partitions_the_universe_disjointly() -> None:
+    """A restricted strategy trades exactly its live_symbols; an unrestricted one gets the rest.
+    The two scopes are disjoint by construction — the guarantee that no two strategies touch the
+    same symbol on a shared account (one net position per symbol → netting hazard)."""
+    import dataclasses
+
+    from src.strategies.config import load_strategies_config
+
+    sc = load_strategies_config()
+    universe = ["A/USDT:USDT", "B/USDT:USDT", "C/USDT:USDT", "D/USDT:USDT"]
+    # Reserve A,B for basis_reversion (a per-symbol strategy); baskets get C,D.
+    br = sc.candidate("basis_reversion")
+    br2 = dataclasses.replace(br, live_symbols=("A/USDT:USDT", "B/USDT:USDT"))
+    sc2 = dataclasses.replace(
+        sc, candidates=tuple(br2 if c.id == "basis_reversion" else c for c in sc.candidates)
+    )
+
+    br_scope = sc2.live_scope("basis_reversion", universe)
+    fc_scope = sc2.live_scope("funding_carry", universe)  # unrestricted → the rest
+    assert br_scope == ["A/USDT:USDT", "B/USDT:USDT"]
+    assert fc_scope == ["C/USDT:USDT", "D/USDT:USDT"]
+    assert not (set(br_scope) & set(fc_scope))  # DISJOINT
+
+
+def test_overlapping_partitions_are_refused_at_load() -> None:
+    from src.strategies.config import _validate_disjoint_partitions, load_strategies_config
+
+    sc = load_strategies_config()
+    import dataclasses
+
+    a = dataclasses.replace(sc.candidate("funding_carry"), live_symbols=("X/USDT:USDT",))
+    b = dataclasses.replace(sc.candidate("basis_reversion"), live_symbols=("X/USDT:USDT",))
+    with pytest.raises(ValueError, match="partition overlap"):
+        _validate_disjoint_partitions((a, b))
+
+
+def test_a_scoped_manager_ignores_positions_outside_its_partition() -> None:
+    """THE COEXISTENCE GUARANTEE. A basket scoped to its own symbols must NEVER see, reconcile, or
+    flatten a position in another strategy's symbol (basis_reversion's) — that would flatten a
+    stop-managed directional position, the hazard partitioning prevents."""
+    venue = FakeVenue()
+    mgr = _manager(venue, scope_symbols={"BTC/USDT:USDT", "ETH/USDT:USDT"})
+    # basis_reversion holds SOL (its partition); the basket owns BTC/ETH only.
+    venue._apply_to_book("SOL/USDT:USDT", 0.5, 150.0)
+
+    assert mgr.reconcile() == {}, "an out-of-scope position must be invisible to reconcile"
+    assert not mgr.flatten_stray("SOL/USDT:USDT", 0.5, 150.0)  # refused — not ours
+    assert venue.net("SOL/USDT:USDT") == pytest.approx(0.5)  # basis_reversion's leg untouched
+
+
+def test_scoped_session_end_backstop_flattens_only_our_symbols() -> None:
+    """The session-end backstop must flatten OUR scope, never emergency_close_all the whole account
+    (which would nuke basis_reversion's positions)."""
+    from src.live.basket import _flatten_book_if_dirty
+
+    venue = FakeVenue()
+    mgr = _manager(venue, scope_symbols={"BTC/USDT:USDT"})
+    venue._apply_to_book("BTC/USDT:USDT", 0.01, 50_000.0)   # ours — must be flattened
+    venue._apply_to_book("SOL/USDT:USDT", 0.5, 150.0)       # another strategy's — must survive
+
+    _flatten_book_if_dirty(venue, mgr, [], None)
+
+    assert "BTC/USDT:USDT" not in venue.positions  # our scope flattened
+    assert venue.net("SOL/USDT:USDT") == pytest.approx(0.5)  # the other partition untouched

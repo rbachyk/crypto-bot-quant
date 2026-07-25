@@ -91,6 +91,7 @@ class DemoReadinessGuard:
         venue: Any | None = None,
         basket_candidate_id: str | None = None,
         data_cfg: Any | None = None,
+        symbols: Any | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self._kill_switch = kill_switch
@@ -101,6 +102,10 @@ class DemoReadinessGuard:
         # configs/data.bybit.yaml would pass readiness on 3 verified symbols and then have every
         # order for the other 18 rejected at runtime — a false PASS. Always pass the session's cfg.
         self._data_cfg = data_cfg
+        # An EXPLICIT symbol set (takes precedence over data_cfg): the session's partition scope,
+        # so metadata is checked only for the symbols this session actually trades — symbols
+        # reserved for another strategy are that strategy's to verify.
+        self._symbols = list(symbols) if symbols is not None else None
         # A basket (cross-sectional) demo run names ONE strategy explicitly and cannot use the
         # promoted ensemble at all — the per-symbol engine refuses cross-sectional strategies
         # (src/paper/lake.py). Its eligibility check is therefore about THAT candidate, not the
@@ -200,6 +205,10 @@ class DemoReadinessGuard:
         return load_metadata_for(self.settings.exchange_id)
 
     def _active_symbols(self) -> list[str]:
+        # An explicit symbol scope wins (the session's partition); then the session's data config;
+        # then the default config / metadata symbols.
+        if self._symbols is not None:
+            return list(self._symbols)
         # Prefer the session's OWN data config (the universe it will actually trade); only fall
         # back to the default config / metadata symbols when none was provided.
         if self._data_cfg is not None:

@@ -156,6 +156,7 @@ def reconcile_startup(
     environment: str = "local",
     alert_sink: AlertSink | None = None,
     adopt: bool = True,
+    scope_symbols: set[str] | None = None,
 ) -> StartupReconResult:
     """Reconcile the REAL exchange book against this bot at startup (Section 7).
 
@@ -164,6 +165,13 @@ def reconcile_startup(
     item exists. Owned items are adopted into the venue's mirror so the per-tick risk/recon
     checks see real exposure. A venue without the fetch hooks (the offline SimulatedVenue used
     by paper) is a no-op clean book — there is no real exchange to reconcile against.
+
+    ``scope_symbols`` (account partitioning): when set, ONLY these symbols are this session's
+    concern — a position/order outside the scope belongs to another of our strategies and is
+    ignored (never owned, never foreign, never adopted). An IN-scope position is treated as ours
+    regardless of the venue's per-position ``owned`` flag, which is unreliable on Bybit (positions
+    don't echo the opening order's clientOrderId). Orders carry the prefix, so foreign-order
+    detection stays honest. None = the unpartitioned default, unchanged.
     """
     if not hasattr(venue, "fetch_open_orders") or not hasattr(venue, "fetch_exchange_positions"):
         return StartupReconResult(
@@ -173,11 +181,23 @@ def reconcile_startup(
 
     exch_orders: dict[str, Order] = venue.fetch_open_orders()
     exch_positions: dict[str, VenuePosition] = venue.fetch_exchange_positions()
+    in_scope = (lambda s: True) if scope_symbols is None else (lambda s: s in scope_symbols)
 
-    owned_orders = sorted(oid for oid, o in exch_orders.items() if ownership.is_own(o.client_id))
-    foreign_orders = sorted(oid for oid in exch_orders if oid not in set(owned_orders))
-    owned_positions = sorted(sym for sym, p in exch_positions.items() if p.owned)
-    foreign_positions = sorted(sym for sym in exch_positions if sym not in set(owned_positions))
+    owned_orders = sorted(
+        oid for oid, o in exch_orders.items()
+        if in_scope(o.symbol) and ownership.is_own(o.client_id)
+    )
+    foreign_orders = sorted(
+        oid for oid, o in exch_orders.items()
+        if in_scope(o.symbol) and oid not in set(owned_orders)
+    )
+    if scope_symbols is None:
+        owned_positions = sorted(sym for sym, p in exch_positions.items() if p.owned)
+        foreign_positions = sorted(sym for sym in exch_positions if sym not in set(owned_positions))
+    else:
+        # In-scope positions are ours (the owned flag is unreliable); out-of-scope are ignored.
+        owned_positions = sorted(sym for sym in exch_positions if in_scope(sym))
+        foreign_positions = []
 
     # Adopt owned items into the venue mirror so risk/recon see the real open exposure.
     if adopt:

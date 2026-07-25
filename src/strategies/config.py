@@ -96,6 +96,15 @@ class CandidateConfig:
     # edges (funding carry, liquidation flow) whose phenomenon has no clean synthetic analog — the
     # real-data walk-forward + locked hold-out + deflated-Sharpe gate is the proper test.
     lake_only: bool = False
+    # Symbols this candidate is restricted to when several strategies SHARE one live/demo account
+    # (account partitioning). Empty = unrestricted. Purely an EXECUTION-routing scope: it bounds
+    # what the strategy trades on a shared account so two strategies never touch the same symbol
+    # (an exchange holds one net position per symbol, so overlap would net a stop-managed
+    # directional position with an unstopped basket leg — unsafe). It does NOT affect
+    # backtest/validation, which always uses the full universe, so it never changes a verdict or
+    # requires a STRATEGY_VERSION bump. Partitions must be DISJOINT across candidates (enforced at
+    # load); an unrestricted strategy on a shared account gets every symbol NOT reserved by another.
+    live_symbols: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +125,33 @@ class StrategiesConfig:
             if c.id == candidate_id:
                 return c
         return None
+
+    def reserved_symbols(self, *exclude_ids: str) -> set[str]:
+        """Symbols reserved by OTHER candidates' ``live_symbols`` (account partitioning).
+
+        The scope of an unrestricted strategy on a shared account is ``universe − reserved``, so a
+        basket automatically yields the few symbols basis_reversion reserves without listing the
+        other eighteen. ``exclude_ids`` are the strategies asking (their own reservations don't
+        count against them)."""
+        excluded = set(exclude_ids)
+        out: set[str] = set()
+        for c in self.candidates:
+            if c.id not in excluded:
+                out.update(c.live_symbols)
+        return out
+
+    def live_scope(self, candidate_id: str, universe: list[str]) -> list[str]:
+        """The symbols ``candidate_id`` may trade on a shared account, given the full ``universe``.
+
+        A restricted strategy trades exactly its ``live_symbols`` (intersected with the universe);
+        an unrestricted one trades everything not reserved by another strategy. The result is
+        DISJOINT from every other strategy's scope by construction."""
+        cand = self.candidate(candidate_id)
+        universe_set = set(universe)
+        if cand is not None and cand.live_symbols:
+            return [s for s in universe if s in set(cand.live_symbols)]
+        reserved = self.reserved_symbols(candidate_id)
+        return [s for s in universe if s not in reserved and s in universe_set]
 
 
 # Reserved param keys that map to StrategyParams fields; everything else is "extra".
@@ -168,6 +204,21 @@ def _parse_fixture(raw: dict) -> FixtureConfig:
     )
 
 
+def _validate_disjoint_partitions(candidates: tuple[CandidateConfig, ...]) -> None:
+    """A symbol may be reserved by at most ONE candidate — overlapping partitions would put two
+    strategies in the same symbol on a shared account, the exact netting hazard partitioning
+    exists to prevent. Fail loudly at load, not at runtime."""
+    owner: dict[str, str] = {}
+    for c in candidates:
+        for sym in c.live_symbols:
+            if sym in owner and owner[sym] != c.id:
+                raise ValueError(
+                    f"live_symbols partition overlap: {sym!r} is reserved by both "
+                    f"{owner[sym]!r} and {c.id!r} — partitions must be disjoint (Section 17)"
+                )
+            owner[sym] = c.id
+
+
 @lru_cache
 def load_strategies_config(path: str | None = None) -> StrategiesConfig:
     yaml_path = Path(path) if path else STRATEGIES_YAML
@@ -182,9 +233,11 @@ def load_strategies_config(path: str | None = None) -> StrategiesConfig:
             params=_parse_params(c["params"]),
             fixture=_parse_fixture(c["fixture"]),
             lake_only=bool(c.get("lake_only", False)),
+            live_symbols=tuple(str(s) for s in c.get("live_symbols", ())),
         )
         for c in data["candidates"]
     )
+    _validate_disjoint_partitions(candidates)
     return StrategiesConfig(
         strategy_version=str(data.get("strategy_version", "strat_0001")),
         min_side_expectancy_r=float(data.get("min_side_expectancy_r", 0.0)),
