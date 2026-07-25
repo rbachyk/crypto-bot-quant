@@ -93,7 +93,14 @@ class WebsocketFeedSource:
 
             klass = getattr(ccxtpro, self.exchange_id)
             self._ex = klass({"enableRateLimit": True, "options": {"defaultType": "swap"}})
-            apply_exchange_env(self._ex, self.exchange_env)  # live | testnet | demo
+            # MARKET DATA only — route it exactly like the REST source (src/data/ccxt_source.py):
+            # TESTNET klines must come from testnet (they are a different market), while demo and
+            # live both read MAINNET. Enabling demo mode here would point this client's REST side
+            # (load_markets, which watch_ohlcv needs) at api-demo, which serves no public market
+            # data — the same silent no-data failure the REST source documents. Public ws streams
+            # stay on mainnet under demo anyway, so there is nothing to switch.
+            if self.exchange_env == "testnet":
+                apply_exchange_env(self._ex, "testnet")
             self._watcher = lambda sym: self._ex.watch_ohlcv(sym, self.timeframe)
         try:
             await asyncio.gather(*(self._watch(s) for s in self.symbols), return_exceptions=True)

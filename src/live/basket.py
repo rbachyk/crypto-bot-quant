@@ -203,9 +203,11 @@ class BasketPaperLoop:
             if bar is not None and sym_in is not None:
                 pnl = self.engine._close_leg(leg, bar, "end_of_data", self._result, sym_in)
                 if pnl is None:
-                    # REAL-venue close failed at session end (demo path). The exchange still holds
-                    # this leg: keep it tracked and record it so the caller escalates to the
-                    # audited emergency close rather than exiting with a live position adrift.
+                    # REAL-venue close failed — or only PARTIALLY filled (the engine books the
+                    # closed portion and keeps the remainder). Either way the exchange still holds
+                    # this leg: keep it tracked and record it so the caller escalates to the audited
+                    # emergency close rather than exiting with a live position adrift.
+                    self._equity += self.engine.drain_partial_pnl()  # book what DID close
                     self.failed_closes.append(sym)
                     _log.error(
                         "basket_close_all_venue_close_failed", symbol=sym, close_ts=ts,
@@ -886,6 +888,17 @@ def _reconcile_tick(manager, loops: dict[str, BasketPaperLoop], on_event) -> Non
                 )
             continue
         dropped = manager.drop_symbol(symbol)
+        # A PARTIAL exchange-side close (part of the net was liquidated / manually closed) leaves a
+        # residual the intent no longer accounts for once the legs below are booked out. Flatten it
+        # in THIS tick rather than waiting for the next reconcile to rediscover it as a stray — the
+        # legs are being booked as closed right now, so the residual belongs to nobody from here on.
+        if abs(actual) >= 1e-12:
+            _log.warning(
+                "basket_partial_exchange_close", symbol=symbol, expected=expected, actual=actual,
+                hint="only part of the net closed exchange-side — legs booked out, residual "
+                "flattened reduce-only",
+            )
+            manager.flatten_stray(symbol, actual, 0.0)
         for cid, qty in dropped.items():
             loop = loops.get(cid)
             leg = loop._holdings.get(symbol) if loop is not None else None

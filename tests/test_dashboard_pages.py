@@ -146,3 +146,18 @@ def test_period_selector_is_custom_segmented_control(client) -> None:
     # Not a native <select> — a styled segmented pill control (the spec's "non-standard control").
     html = client.get("/dashboard/execution").text
     assert 'class="segment"' in html
+
+
+@requires_db
+def test_the_control_centre_asks_every_crawler_to_stay_out(client) -> None:
+    """In production Caddy publishes this dashboard on a real hostname. It is authenticated, but a
+    discoverable, indexed control centre for a trading bot is not something to leave to the auth
+    wall alone — every response carries the header, pages carry the meta tag, and robots.txt
+    disallows everything (unauthenticated, or a crawler would never read it)."""
+    page = client.get("/dashboard/gates")
+    assert "noindex" in page.headers.get("X-Robots-Tag", "")
+    assert "<meta name='robots' content='noindex,nofollow,noarchive'>" in page.text
+
+    robots = client.get("/robots.txt")
+    assert robots.status_code == 200
+    assert robots.text.strip() == "User-agent: *\nDisallow: /"

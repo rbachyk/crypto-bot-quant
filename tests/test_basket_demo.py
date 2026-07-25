@@ -349,6 +349,25 @@ def test_a_reducing_order_does_not_re_arm_the_disaster_stop() -> None:
     assert venue.orders[-1].stop is None
 
 
+def test_a_net_that_flips_side_gets_a_fresh_disaster_stop() -> None:
+    """A flip CLOSES the old position, and Bybit's stop is position-level — it dies with it. So a
+    delta that crosses zero must re-arm, even when the new net is SMALLER than the old one (which
+    an 'only when the net grows' rule silently skips, leaving the new side unprotected)."""
+    venue = FakeVenue()
+    mgr = _manager(venue, disaster_stop_frac=0.25)
+    a = LiveBasketExecutor(mgr, strategy_id="a")
+    b = LiveBasketExecutor(mgr, strategy_id="b")
+    a.open_leg(symbol="BTC/USDT:USDT", side=1, qty=0.03, ref_price=50_000.0, ts=0)
+    # B shorts more than A holds: net +0.03 → −0.01. Smaller in absolute terms, opposite side.
+    b.open_leg(symbol="BTC/USDT:USDT", side=-1, qty=0.04, ref_price=50_000.0, ts=0)
+
+    assert mgr.net("BTC/USDT:USDT") == pytest.approx(-0.01)
+    stop = venue.orders[-1].stop
+    assert stop is not None, "the flipped (short) net must carry its own disaster stop"
+    assert stop.side == "buy" and stop.reduce_only is True
+    assert stop.stop_price == pytest.approx(62_500.0, rel=1e-3)  # 25% ABOVE, for a short
+
+
 # -- the loop end-to-end against a netting venue ------------------------ #
 def _fixture():
     """10 flat-priced symbols with constant funding_z — the same planted carry the paper test
@@ -568,6 +587,67 @@ def test_leg_closed_exchange_side_is_booked_not_vaporised() -> None:
     assert booked.exit_price == pytest.approx(95.0)
     assert booked.exit_reason == "exchange_close"
     assert mgr.net(victim) == 0.0  # intent cleared, so the aggregate matches the book again
+
+
+def test_a_partially_closed_leg_books_the_part_and_keeps_the_remainder() -> None:
+    """A close that only HALF filled is not a close. Booking the whole leg would overstate the
+    realized P&L and drop a leg the account still holds — and since the executor's intent shrank by
+    the same half, the leftover would MATCH intent, so reconciliation would never flag it. It would
+    then sit on the exchange, owned by nobody, until session end."""
+    venue = FakeVenue()
+    mgr = _manager(venue)
+    loop = _loop("funding_carry", manager=mgr)
+    by_symbol, snaps = _fixture()
+    for i, (ts, bars, rows) in enumerate(snaps):
+        loop.step(ts, bars, rows, by_symbol)
+        if loop._holdings and i > 2:
+            break
+    sym = sorted(loop._holdings)[0]
+    leg = loop._holdings[sym]
+    full_qty, entry_fee = leg.qty, leg.entry_fee
+    booked_before = len(loop._result.trades)
+    venue.fill_ratio = 0.5  # the venue fills only half of the closing delta
+
+    bar = {"ts": N * IV, "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0,
+           "volume": 1e6}
+    pnl = loop.engine._close_leg(leg, bar, "rebalance", loop._result, by_symbol[sym])
+
+    assert pnl is None, "a partial close leaves the leg held — the caller must not drop it"
+    assert leg.qty == pytest.approx(full_qty / 2)  # shrunk to exactly what is still open
+    assert leg.entry_fee == pytest.approx(entry_fee / 2)  # cost basis split pro-rata
+    assert mgr.strategy_qty("funding_carry", sym) == pytest.approx(leg.side * leg.qty)
+    assert venue.net(sym) == pytest.approx(leg.side * leg.qty)  # book == intent == the remainder
+    trades = loop._result.trades[booked_before:]
+    assert len(trades) == 1 and trades[0].qty == pytest.approx(full_qty / 2)
+    # The booked P&L is real and must not vanish just because the leg stayed open.
+    assert loop.engine.drain_partial_pnl() == pytest.approx(trades[0].pnl)
+    assert loop.engine.drain_partial_pnl() == 0.0  # drained once, never double-counted
+
+
+def test_a_partial_exchange_side_close_flattens_the_residual_in_the_same_tick() -> None:
+    """Half the net was closed by the exchange (a partial liquidation). The legs are booked out,
+    so the leftover belongs to no strategy from that moment — flatten it now rather than let the
+    next reconcile rediscover it as a stray a full cadence later."""
+    events: list[str] = []
+    venue = FakeVenue()
+    mgr = _manager(venue, on_event=events.append)
+    loop = _loop("funding_carry", manager=mgr)
+    by_symbol, snaps = _fixture()
+    for i, (ts, bars, rows) in enumerate(snaps):
+        loop.step(ts, bars, rows, by_symbol)
+        if loop._holdings and i > 2:
+            break
+    victim = sorted(loop._holdings)[0]
+    held = mgr.net(victim)
+    venue._apply_to_book(victim, -held / 2, 100.0)  # half of it closed exchange-side
+    assert venue.net(victim) == pytest.approx(held / 2)
+
+    _reconcile_tick(mgr, {"funding_carry": loop}, events.append)
+
+    assert venue.net(victim) == 0.0, "the unattributable residual must not be left running"
+    assert mgr.net(victim) == 0.0
+    assert victim not in loop._holdings
+    assert any("flattened stray" in e for e in events)
 
 
 def test_a_stray_position_with_no_intent_is_flattened_not_left_open() -> None:

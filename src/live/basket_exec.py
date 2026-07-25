@@ -181,10 +181,18 @@ class NetPositionManager:
         reduce_only = abs(new_net) < abs(old_net) and (
             new_net == 0.0 or (new_net > 0) == (old_net > 0)
         )
-        # The disaster stop rides the NET position, so it is (re)attached only when the net grows
-        # — a reducing order neither needs nor should move it.
+        # The disaster stop rides the NET position, so it is (re)attached when the net GROWS — a
+        # reducing order neither needs nor should move it — and whenever the net FLIPS SIDE. A flip
+        # closes the old position, and Bybit's position-level stop dies with it: the opposite
+        # position that opens in the same order would otherwise carry no exchange-resident stop at
+        # all, which is precisely what the disaster stop exists to prevent (Section 2.2).
+        flipped = (
+            abs(new_net) >= _DUST and abs(old_net) >= _DUST and (new_net > 0) != (old_net > 0)
+        )
         attach_stop = (
-            self.disaster_stop_frac > 0 and abs(new_net) > abs(old_net) and abs(new_net) >= _DUST
+            self.disaster_stop_frac > 0
+            and abs(new_net) >= _DUST
+            and (abs(new_net) > abs(old_net) or flipped)
         )
         plan = self._build_plan(
             symbol=symbol, side=side, qty=qty, ref_price=ref_price,

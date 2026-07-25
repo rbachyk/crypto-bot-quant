@@ -20,7 +20,13 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from sqlalchemy import desc, func, select
 
 from src.api.auth import require_dashboard_auth
@@ -536,6 +542,11 @@ def _page(title: str, body: str, *, env_chip: str = "") -> str:
     return (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        # This control centre is operator-only and (in production) published on a real hostname by
+        # Caddy. It must never be indexed: the auth wall would be the only thing standing between a
+        # search result and the trading controls, and even the login page leaks that this host runs
+        # a trading bot. Paired with the /robots.txt route and the X-Robots-Tag response header.
+        "<meta name='robots' content='noindex,nofollow,noarchive'>"
         f"<title>{_esc(title)} — Quant Bot</title>"
         f"{_CSS}"
         f"{_CHART_JS}"
@@ -1077,7 +1088,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Standalone minimal HTML (does NOT call _page, which itself touches db/redis and could
         # fail again during an outage).
         return HTMLResponse(
-            "<!doctype html><html><head><meta charset='utf-8'><title>Error</title></head>"
+            "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+            "<meta name='robots' content='noindex,nofollow,noarchive'><title>Error</title></head>"
             "<body style='font-family:system-ui;background:#0b0e14;color:#c9d1d9;padding:2.5rem'>"
             "<h2>Something went wrong</h2>"
             "<p>This view hit an error and could not render. The rest of the dashboard is "
@@ -1086,6 +1098,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "</body></html>",
             status_code=500,
         )
+
+    # Crawler posture: an operator control centre must stay out of every index. The meta tag in
+    # _page covers rendered pages; this header covers JSON/API responses and anything a crawler
+    # reaches without parsing HTML (robots.txt itself is served below).
+    @app.middleware("http")
+    async def _no_index(request: Request, call_next):  # type: ignore[no-untyped-def]
+        response = await call_next(request)
+        response.headers.setdefault("X-Robots-Tag", "noindex, nofollow, noarchive")
+        return response
+
+    @app.get("/robots.txt", include_in_schema=False)
+    def robots() -> PlainTextResponse:
+        """Disallow every crawler. The dashboard is authenticated, but a published hostname is
+        still discoverable — nothing here belongs in a search index."""
+        return PlainTextResponse("User-agent: *\nDisallow: /\n")
 
     # ----- health (unauthenticated; for orchestration/monitoring) ---------- #
     @app.get("/health")

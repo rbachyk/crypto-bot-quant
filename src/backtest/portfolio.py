@@ -32,6 +32,10 @@ from src.exchange.metadata import MetadataConfig
 
 _log = structlog.get_logger("backtest.portfolio")
 
+#: A leg remainder smaller than this (in contracts) is treated as fully closed — floating-point
+#: residue from a pro-rata split must not keep a leg alive forever.
+_LEG_DUST = 1e-12
+
 
 @dataclass(slots=True)
 class _Leg:
@@ -137,6 +141,9 @@ class CrossSectionalEngine:
         # reference only). Nothing else about the basket math changes: same scores, same cadence,
         # same sizing — which is what makes a demo run comparable to its backtest.
         self.executor: Any | None = None
+        # Realized P&L of PARTIAL live closes, awaiting the caller's drain (see
+        # _close_leg_live / drain_partial_pnl). Always 0 on the backtest path.
+        self._partial_pnl = 0.0
         self._grid_iv = 1
         self._sym_rets: dict[str, tuple[list[int], list[float]]] = {}
         self._mkt_ret: dict[int, float] = {}
@@ -205,6 +212,7 @@ class CrossSectionalEngine:
             # Backtest path: executor is None, so this never returns None (`or 0.0` is only a
             # type-level guard, not a silent swallow of a real failed close — `run()` is offline).
             equity += self._close_leg(leg, bar, "end_of_data", result, by_symbol[sym]) or 0.0
+        equity += self.drain_partial_pnl()  # 0 offline; keeps the live path's equity honest
         holdings.clear()
         if result.equity_curve:
             result.equity_curve[-1] = equity
@@ -273,6 +281,10 @@ class CrossSectionalEngine:
                     continue  # real close failed — keep the leg, retry next cadence
                 equity += gap_pnl
                 del holdings[sym]
+        # A leg that only PARTIALLY closed on the real venue was kept (its remainder is still on the
+        # exchange), so its realized P&L never reached the branches above — take it here, before the
+        # new legs are sized off equity. No-op on the backtest path.
+        equity += self.drain_partial_pnl()
         # Open new legs (stable same-side members are kept — no churn). Per-leg target notional is
         # divided over the FULL target basket (all longs+shorts, kept + new), so each new leg is the
         # SAME size as the kept legs and total book exposure ≈ gross. (An earlier attempt sized over
@@ -520,7 +532,16 @@ class CrossSectionalEngine:
     def _close_leg_live(
         self, leg: _Leg, bar: dict, reason: str, result: BacktestResult, exit_ts: int
     ) -> float | None:
-        """Close one leg on the REAL venue and book it at the OBSERVED exit (demo path)."""
+        """Close one leg on the REAL venue and book it at the OBSERVED exit (demo path).
+
+        Only what actually CLOSED is booked. A partial close books the closed portion as its own
+        trade and SHRINKS the leg to the remainder — which is still on the exchange, and which the
+        executor's intent still carries. Booking the full leg off a partial fill would overstate the
+        realized P&L and, worse, drop a leg the account still holds: the position would then match
+        the executor's intent (so reconciliation sees nothing wrong) and sit there, untracked by any
+        strategy, until session end. A partial therefore returns None — the established 'leg still
+        held, retry next cadence' signal — and its realized P&L is drained into equity by the caller
+        via :meth:`drain_partial_pnl`."""
         ref_price = float(bar["close"])
         closed = self.executor.close_leg(  # type: ignore[union-attr]
             symbol=leg.symbol, side=leg.side, qty=leg.qty,
@@ -529,32 +550,67 @@ class CrossSectionalEngine:
         if closed is None:
             return None  # the exchange still holds it — keep the leg, retry next cadence
         exit_price = closed.price
-        gross = leg.side * (exit_price - leg.entry_price) * leg.qty
-        total_fee = leg.entry_fee + closed.fee
-        pnl = gross - total_fee - leg.funding
+        qty = min(float(closed.qty), leg.qty)
+        if qty <= 0:
+            return None
+        partial = qty < leg.qty - _LEG_DUST
+        # The closed portion carries its pro-rata share of the leg's entry cost basis, so the
+        # remainder keeps exactly the rest — no fee or funding is double-booked or lost.
+        frac = qty / leg.qty if leg.qty > 0 else 1.0
+        entry_fee = leg.entry_fee * frac
+        funding = leg.funding * frac
+        notional = leg.notional * frac
+        risk_amount = leg.risk_amount * frac
+        entry_slip = leg.slippage_cost * frac
+        gross = leg.side * (exit_price - leg.entry_price) * qty
+        total_fee = entry_fee + closed.fee
+        pnl = gross - total_fee - funding
         result.trades.append(
             Trade(
                 symbol=leg.symbol,
                 strategy=self.name,
                 side=leg.side,
-                qty=leg.qty,
+                qty=qty,
                 entry_ts=leg.entry_ts,
                 entry_price=leg.entry_price,
                 exit_ts=exit_ts,
                 exit_price=exit_price,
                 exit_reason=reason,
-                notional=leg.notional,
-                risk_amount=leg.risk_amount,
+                notional=notional,
+                risk_amount=risk_amount,
                 fee=total_fee,
-                funding=leg.funding,
-                slippage_cost=leg.slippage_cost + closed.slippage_cost,
+                funding=funding,
+                slippage_cost=entry_slip + closed.slippage_cost,
                 pnl=pnl,
-                pnl_r=pnl / leg.risk_amount if leg.risk_amount > 0 else 0.0,
+                pnl_r=pnl / risk_amount if risk_amount > 0 else 0.0,
                 regime=leg.regime,
                 session=leg.session,
                 bars_held=int((exit_ts - leg.entry_ts) // self._grid_iv),
             )
         )
+        if not partial:
+            return pnl
+        leg.qty -= qty
+        leg.notional -= notional
+        leg.risk_amount -= risk_amount
+        leg.entry_fee -= entry_fee
+        leg.funding -= funding
+        leg.slippage_cost -= entry_slip
+        self._partial_pnl += pnl
+        _log.warning(
+            "basket_leg_partially_closed", symbol=leg.symbol, strategy=self.name,
+            closed_qty=qty, remaining_qty=leg.qty, reason=reason,
+            hint="only part of the leg filled — the remainder stays open and retries next cadence",
+        )
+        return None
+
+    def drain_partial_pnl(self) -> float:
+        """Realized P&L from partial live closes since the last drain (see :meth:`_close_leg_live`).
+
+        A partially-closed leg is KEPT, so the caller's "closed → add pnl, drop the leg" path never
+        sees that P&L; draining it here keeps the session's equity equal to the sum of its booked
+        trades instead of silently drifting below it."""
+        pnl, self._partial_pnl = self._partial_pnl, 0.0
         return pnl
 
     def _maker_offset(self, spread_bps: float) -> float:
