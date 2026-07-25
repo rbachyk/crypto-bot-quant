@@ -470,7 +470,7 @@ def _strategy_extra(strategy: object) -> dict:
     return dict(getattr(params, "extra", {}) or {}) if params is not None else {}
 
 
-def _preflight_demo_basket(candidate_ids: list[str], settings, venue, limits) -> float:
+def _preflight_demo_basket(candidate_ids: list[str], settings, venue, limits, data_cfg) -> float:
     """Every refusal that must happen BEFORE a single real order — returns the account equity.
 
     Raises ``PermissionError`` on any blocker. Order matters: environment first (a live env must
@@ -496,7 +496,9 @@ def _preflight_demo_basket(candidate_ids: list[str], settings, venue, limits) ->
     # EVERY co-hosted strategy must clear the gate — one ineligible basket must not ride along
     # on another's eligibility.
     for cid in candidate_ids:
-        report = DemoReadinessGuard(settings, venue=venue, basket_candidate_id=cid).evaluate()
+        report = DemoReadinessGuard(
+            settings, venue=venue, basket_candidate_id=cid, data_cfg=data_cfg
+        ).evaluate()
         if not report.ok:
             raise PermissionError(
                 f"demo readiness is not PASS for {cid!r} — refusing to place real orders:\n"
@@ -640,7 +642,7 @@ def _run_basket_session(
 
         limits = load_basket_demo_limits()
         venue = venue if venue is not None else get_venue(meta, settings, live=True)
-        equity = _preflight_demo_basket(ids, settings, venue, limits)
+        equity = _preflight_demo_basket(ids, settings, venue, limits, data_cfg)
         env_label = settings.exchange_env
         manager = NetPositionManager(
             venue, meta, settings,
@@ -720,11 +722,43 @@ def _run_basket_session(
             loop.close_all(close_ts, last_bars, feed.symbol_inputs())
             failed.extend(loop.failed_closes)
             persist_paper_session(sessions[cid], build_paper_report(sessions[cid]), settings)
-        if live and failed and venue is not None:
-            _emergency_flatten(venue, failed, on_event)
+        if live and venue is not None:
+            # Backstop: after flattening every tracked leg, confirm the account is ACTUALLY flat.
+            # A mis-observed fill or a failed close can leave a real position no leg tracked, so a
+            # clean close_all is not proof of a clean book. The basket demo owns the account
+            # exclusively (pre-flight), so anything still on it is ours to remove — emergency-close
+            # the remainder. This is the guarantee the SOL orphan violated: a session never EXITS
+            # leaving a position open.
+            _flatten_book_if_dirty(venue, manager, failed, on_event)
     if manager is not None and on_event is not None:
         on_event(f"execution quality: {manager.execution_summary()}")
     return sum(len(s.trades) for s in sessions.values())
+
+
+def _flatten_book_if_dirty(venue, manager, failed: list[str], on_event) -> None:
+    """Guarantee the account is flat at session end. First try a targeted flatten of any residual
+    position (reduce-only, per symbol); escalate to the audited emergency close if the book is
+    still not clean (or a leg's own close failed). Exclusive-account contract makes this safe."""
+    try:
+        residual = {s: (p.side * p.qty) for s, p in venue.fetch_exchange_positions().items()
+                    if p.qty > 0}
+    except Exception as exc:  # noqa: BLE001 - if we cannot read the book, escalate to be safe
+        _log.error("basket_end_book_read_failed", error=str(exc))
+        residual = {}
+        failed = failed or ["<unreadable book>"]
+    for sym, qty in sorted(residual.items()):
+        _log.warning("basket_end_residual_position", symbol=sym, qty=qty,
+                     hint="on the book at session end with no tracked leg — flattening")
+        if manager is not None:
+            manager.flatten_stray(sym, qty, 0.0)
+    # Re-read: anything that survived the targeted flatten, plus any failed leg close, escalates.
+    try:
+        still = {s for s, p in venue.fetch_exchange_positions().items() if p.qty > 0}
+    except Exception:  # noqa: BLE001 - unreadable → escalate
+        still = set()
+        failed = failed or ["<unreadable book>"]
+    if still or failed:
+        _emergency_flatten(venue, sorted(set(failed) | still), on_event)
 
 
 def _equity_slices(
@@ -769,17 +803,26 @@ def _reconcile_tick(manager, loops: dict[str, BasketPaperLoop], on_event) -> Non
     Best-effort — a reconciliation read must never take the trading loop down."""
     drift = manager.reconcile()
     for symbol, state in sorted(drift.items()):
-        if abs(state["actual"]) > abs(state["expected"]):
-            # MORE on the exchange than we asked for: not ours to book. Surface it loudly and
-            # leave it — silently adopting unexplained exposure is how a bot compounds an error.
+        expected, actual = state["expected"], state["actual"]
+        if abs(expected) < 1e-12 and abs(actual) >= 1e-12:
+            # A position on the book we have NO intent for. On this exclusively-owned account
+            # (pre-flight required a flat book + forbids a second session) that is a MIS-OBSERVED
+            # FILL — the order opened a position the fill poll reported as unfilled, so nothing was
+            # recorded. Flatten it reduce-only to restore book==intent instead of logging CRITICAL
+            # every tick and leaving it open (the exact SOL orphan that accrued for 12h).
+            manager.flatten_stray(symbol, actual, 0.0)
+            continue
+        if abs(actual) > abs(expected):
+            # We DO hold a legit leg here and there is extra we cannot attribute. Blind-closing the
+            # whole symbol would take our leg too, so alert rather than act — the operator decides.
             _log.error(
                 "basket_unexpected_exchange_position", symbol=symbol,
-                expected=state["expected"], actual=state["actual"],
+                expected=expected, actual=actual,
             )
             if on_event is not None:
                 on_event(
-                    f"CRITICAL: {symbol} exchange position {state['actual']:+g} exceeds our "
-                    f"intent {state['expected']:+g} — investigate before trusting this session"
+                    f"CRITICAL: {symbol} exchange position {actual:+g} exceeds our intent "
+                    f"{expected:+g} — investigate before trusting this session"
                 )
             continue
         dropped = manager.drop_symbol(symbol)

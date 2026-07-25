@@ -39,7 +39,7 @@ from src.paper.session import PaperSession
 from src.strategies.candidates import build_strategy
 from src.strategies.config import load_strategies_config
 
-from tests.conftest import requires_redis
+from tests.conftest import requires_db, requires_redis
 
 IV = 60_000
 N = 120
@@ -61,12 +61,18 @@ class FakeVenue:
     Records every order so tests can assert on sizes/sides/reduce-only, and can be told to fill
     partially, reject, or report a specific exit execution."""
 
-    def __init__(self, *, fill_ratio: float = 1.0, reject: bool = False):
+    def __init__(self, *, fill_ratio: float = 1.0, reject: bool = False,
+                 mis_observe: bool = False, owned: bool = False):
         self.orders: list = []
         self.positions: dict[str, VenuePosition] = {}
         self.open_orders: dict = {}
         self.fill_ratio = fill_ratio
         self.reject = reject
+        # mis_observe: the order opens a real position on the book but the fill poll reports qty 0
+        # (the SOL incident). owned=False mirrors Bybit — positions come back WITHOUT our
+        # clientOrderId, so the venue reports owned=False even for legs we opened.
+        self.mis_observe = mis_observe
+        self.owned = owned
         self.exit_price = 101.0
         self.exit_fee = 0.05
         self.equity = 5_000.0
@@ -76,20 +82,25 @@ class FakeVenue:
         self.orders.append(plan)
         if self.reject:
             raise RuntimeError("insufficient margin")
-        qty = plan.entry.qty * self.fill_ratio
+        filled = plan.entry.qty * self.fill_ratio
+        # A mis-observed fill: the venue MOVES the book (the order really executed) but reports a
+        # zero fill, so the manager records nothing.
+        booked = plan.entry.qty if self.mis_observe else filled
+        reported = 0.0 if self.mis_observe else filled
         px = ref_price * (1.0 + (0.0005 if plan.side > 0 else -0.0005))
-        self._apply_to_book(plan.symbol, plan.side * qty, px)
+        self._apply_to_book(plan.symbol, plan.side * booked, px)
         fill = Fill(
-            client_id=plan.entry.client_id, symbol=plan.symbol, side=plan.entry.side, qty=qty,
-            expected_price=ref_price, actual_price=px, fee=qty * px * 0.00055, maker=False,
-            latency_ms=1.0, slippage_frac=0.0005, slippage_cost=abs(px - ref_price) * qty,
+            client_id=plan.entry.client_id, symbol=plan.symbol, side=plan.entry.side,
+            qty=reported, expected_price=ref_price, actual_price=px, fee=reported * px * 0.00055,
+            maker=False, latency_ms=1.0, slippage_frac=0.0005,
+            slippage_cost=abs(px - ref_price) * reported,
             spread_bps_at_order=2.0, signal_age_ms=0.0, order_type="market",
         )
         return BracketResult(
             fill=fill,
             position=self.positions.get(plan.symbol)
             or VenuePosition(symbol=plan.symbol, side=plan.side, qty=0.0, entry_price=px),
-            fully_filled=self.fill_ratio >= 1.0,
+            fully_filled=(not self.mis_observe) and self.fill_ratio >= 1.0,
         )
 
     def _apply_to_book(self, symbol: str, delta: float, price: float) -> None:
@@ -102,6 +113,7 @@ class FakeVenue:
         self.positions[symbol] = VenuePosition(
             symbol=symbol, side=1 if net > 0 else -1, qty=abs(net),
             entry_price=(pos.entry_price if pos is not None else price),
+            owned=self.owned,  # Bybit-realistic: our own positions come back owned=False
         )
 
     def net(self, symbol: str) -> float:
@@ -120,6 +132,13 @@ class FakeVenue:
 
     def fetch_account_equity(self) -> float | None:
         return self.equity
+
+    def close_book_position(self, symbol: str) -> bool:
+        """Reduce-only close of the REAL book position (works even when nothing is mirrored)."""
+        if symbol not in self.positions:
+            return False
+        self.positions.pop(symbol, None)
+        return True
 
     def emergency_close_all(self, *, confirm: bool) -> int:
         assert confirm
@@ -551,19 +570,40 @@ def test_leg_closed_exchange_side_is_booked_not_vaporised() -> None:
     assert mgr.net(victim) == 0.0  # intent cleared, so the aggregate matches the book again
 
 
-def test_unexplained_extra_exchange_exposure_is_surfaced_not_adopted() -> None:
-    """More on the exchange than we asked for is not ours to book — silently adopting unexplained
-    exposure is how a bot compounds someone else's error."""
-    venue = FakeVenue()
-    mgr = _manager(venue)
-    loop = _loop("funding_carry", manager=mgr)
+def test_a_stray_position_with_no_intent_is_flattened_not_left_open() -> None:
+    """THE SOL INCIDENT. A position on the book we have zero intent for — a mis-observed fill on
+    this exclusively-owned account — must be closed reduce-only to restore book==intent, not
+    logged CRITICAL every tick while it sits open (the original behaviour orphaned SOL for 12h)."""
     events: list[str] = []
+    venue = FakeVenue()
+    mgr = _manager(venue, on_event=events.append)
+    loop = _loop("funding_carry", manager=mgr)
 
-    venue._apply_to_book("BTC/USDT:USDT", 5.0, 50_000.0)  # appeared from nowhere
+    venue._apply_to_book("SOL/USDT:USDT", -0.2, 150.0)  # mis-observed fill: on the book, no intent
+    assert venue.net("SOL/USDT:USDT") == pytest.approx(-0.2)
+
     _reconcile_tick(mgr, {"funding_carry": loop}, events.append)
 
-    assert any("CRITICAL" in e for e in events)
-    assert mgr.net("BTC/USDT:USDT") == 0.0  # never adopted into our intent
+    assert venue.net("SOL/USDT:USDT") == 0.0  # flattened
+    assert mgr.net("SOL/USDT:USDT") == 0.0  # never adopted into intent
+    assert any("flattened stray" in e for e in events)
+
+
+def test_own_position_is_reconciled_despite_owned_being_false() -> None:
+    """REGRESSION for the reconcile bug: Bybit returns positions owned=False (no clientOrderId
+    echo), so keying reconcile off `owned` marked every real leg 'foreign' forever and hid genuine
+    drift. Reconcile must work off INTENT, not the venue's owned flag."""
+    venue = FakeVenue(owned=False)  # Bybit-realistic
+    mgr = _manager(venue)
+    a = LiveBasketExecutor(mgr, strategy_id="funding_carry")
+    a.open_leg(symbol="BTC/USDT:USDT", side=1, qty=0.01, ref_price=50_000.0, ts=0)
+    # book matches intent → NO drift, even though the venue reports owned=False.
+    assert not venue.positions["BTC/USDT:USDT"].owned
+    assert mgr.reconcile() == {}
+
+    venue.positions.pop("BTC/USDT:USDT")  # now it vanishes (stop/liquidation)
+    drift = mgr.reconcile()
+    assert drift["BTC/USDT:USDT"]["expected"] == pytest.approx(0.01)  # detected despite owned=False
 
 
 # -- capital allocation across co-hosted baskets ------------------------ #
@@ -606,7 +646,7 @@ def test_preflight_refuses_real_money_environment() -> None:
     regardless of readiness, gates, or sign-off."""
     settings = Settings(exchange_env="live", exchange_api_key="k", exchange_api_secret="s")
     with pytest.raises(PermissionError, match="EXCHANGE_ENV=live"):
-        _preflight_demo_basket(["funding_carry"], settings, FakeVenue(), _limits())
+        _preflight_demo_basket(["funding_carry"], settings, FakeVenue(), _limits(), None)
 
 
 def test_preflight_refuses_a_non_virtual_funds_environment() -> None:
@@ -616,7 +656,7 @@ def test_preflight_refuses_a_non_virtual_funds_environment() -> None:
 
     with pytest.raises(PermissionError, match="not a virtual-funds environment"):
         _preflight_demo_basket(
-            ["funding_carry"], SimpleNamespace(exchange_env="local"), FakeVenue(), _limits()
+            ["funding_carry"], SimpleNamespace(exchange_env="local"), FakeVenue(), _limits(), None
         )
 
 
@@ -948,3 +988,87 @@ def test_checkboxes_keep_native_appearance_despite_the_global_input_reset() -> N
     assert override_at > reset_at
     # the checkboxes the fix is for are actually on the page
     assert page.count('type="checkbox" class="demo-basket-strat"') >= 2
+
+
+# -- Fix A: demo-readiness validates the SESSION's universe, not the default ---
+def test_readiness_metadata_check_uses_the_provided_data_cfg_universe() -> None:
+    """THE ROOT CAUSE. The guard must check metadata for the universe the session will TRADE
+    (configs/data.bybit.yaml, 21 symbols), not load_data_config()'s 3-symbol default — otherwise
+    it PASSes on 3 verified symbols while 18 unverified ones get rejected all night."""
+    from types import SimpleNamespace
+
+    from src.live.demo_guard import DemoReadinessGuard
+
+    big = SimpleNamespace(active_symbols=lambda: [f"C{i}/USDT:USDT" for i in range(21)])
+    guard = DemoReadinessGuard(_settings(), data_cfg=big)
+    assert guard._active_symbols() == big.active_symbols()  # the session's 21, not the default 3
+
+
+def test_readiness_falls_back_to_default_universe_when_no_cfg_given() -> None:
+    from src.live.demo_guard import DemoReadinessGuard
+
+    guard = DemoReadinessGuard(_settings())  # no data_cfg
+    # Falls through to load_data_config()/metadata symbols — a non-empty list, no crash.
+    assert isinstance(guard._active_symbols(), list)
+
+
+# -- Fix C: a mis-observed fill is flattened, and the session never exits dirty ---
+def test_mis_observed_fill_is_reconciled_and_flattened_next_tick() -> None:
+    """The order reports qty 0 but really opened a position (the SOL scenario). The manager records
+    nothing, so intent and book diverge — reconcile must catch it and flatten."""
+    venue = FakeVenue(mis_observe=True)
+    mgr = _manager(venue)
+    ex = LiveBasketExecutor(mgr, strategy_id="funding_carry")
+
+    fill = ex.open_leg(symbol="SOL/USDT:USDT", side=-1, qty=0.2, ref_price=150.0, ts=0)
+    assert fill is None  # the venue reported no fill…
+    assert mgr.net("SOL/USDT:USDT") == 0.0  # …so intent recorded nothing
+    assert venue.net("SOL/USDT:USDT") == pytest.approx(-0.2)  # …but the book really moved
+
+    _reconcile_tick(mgr, {"funding_carry": _loop("funding_carry", manager=mgr)}, None)
+    assert venue.net("SOL/USDT:USDT") == 0.0  # the stray was flattened
+
+
+def test_session_end_backstop_flattens_a_residual_position() -> None:
+    """A session must NEVER exit leaving a real position open. Even if a leg was never tracked
+    (mis-observed) so close_all can't touch it, the end-of-session backstop flattens the book."""
+    from src.live.basket import _flatten_book_if_dirty
+
+    venue = FakeVenue()
+    mgr = _manager(venue)
+    venue._apply_to_book("SOL/USDT:USDT", -0.2, 150.0)  # orphan on the book, untracked
+    assert venue.positions
+
+    _flatten_book_if_dirty(venue, mgr, [], None)
+
+    assert venue.positions == {}, "the account must be flat when the session ends"
+
+
+@requires_db
+def test_flatten_demo_cli_refuses_live_and_flattens_demo(monkeypatch) -> None:
+    from src.cli.main import app
+    from typer.testing import CliRunner
+
+    # Refuses on a real-money env.
+    monkeypatch.setattr(
+        "src.cli.main.get_settings",
+        lambda: Settings(_env_file=None, exchange_env="live",
+                         exchange_api_key="k", exchange_api_secret="s"),
+    )
+    res = CliRunner().invoke(app, ["flatten-demo", "--yes"])
+    assert res.exit_code == 2
+    assert "not demo/testnet" in res.output
+
+    # On demo, flattens the book via the venue.
+    venue = FakeVenue()
+    venue._apply_to_book("SOL/USDT:USDT", -0.2, 150.0)
+    monkeypatch.setattr(
+        "src.cli.main.get_settings",
+        lambda: Settings(_env_file=None, exchange_env="demo",
+                         exchange_api_key="k", exchange_api_secret="s"),
+    )
+    monkeypatch.setattr("src.execution.live_venue.get_venue", lambda *a, **k: venue)
+    monkeypatch.setattr("src.exchange.metadata.load_metadata_for", lambda *a, **k: None)
+    res = CliRunner().invoke(app, ["flatten-demo", "--yes"])
+    assert res.exit_code == 0
+    assert venue.positions == {}

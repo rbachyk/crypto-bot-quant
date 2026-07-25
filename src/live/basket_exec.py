@@ -232,28 +232,62 @@ class NetPositionManager:
     def reconcile(self) -> dict[str, dict]:
         """Compare the aggregate intent against the REAL exchange book, per symbol.
 
-        Returns ``{symbol: {"expected": x, "actual": y}}`` for every symbol that disagrees. A
-        drift means a position moved without us — a disaster stop firing, a liquidation, or a
-        manual close — and the caller decides which strategy's leg it belonged to."""
+        Returns ``{symbol: {"expected": x, "actual": y}}`` for every symbol that disagrees — a
+        drift the caller must resolve so ``book == intent`` holds again.
+
+        The basket demo session owns the account EXCLUSIVELY (the pre-flight requires a flat book
+        and forbids a second session), so ``_desired`` is the complete source of truth for what
+        SHOULD be on the book. We therefore reconcile against intent and do NOT trust the venue's
+        per-position ``owned`` flag: Bybit's position read does not echo the opening order's
+        clientOrderId, so every real position — including our own legs — comes back ``owned=False``.
+        Keying off it produced a permanent false 'foreign position' CRITICAL and, worse, filtered
+        the real book out of the comparison so genuine drift went undetected."""
         try:
             book = self.venue.fetch_exchange_positions()
         except Exception as exc:  # noqa: BLE001 - a book read hiccup is not a trading failure
             _log.warning("basket_recon_fetch_failed", error=str(exc))
             return {}
-        actual = {
-            sym: (p.side * p.qty) for sym, p in book.items() if p.qty > 0 and p.owned
-        }
-        foreign = sorted(sym for sym, p in book.items() if p.qty > 0 and not p.owned)
-        if foreign:
-            _log.error("basket_foreign_position_detected", symbols=foreign)
-            self._event(f"CRITICAL: foreign position on the account: {foreign}")
+        actual = {sym: (p.side * p.qty) for sym, p in book.items() if p.qty > 0}
         drift: dict[str, dict] = {}
         for sym in set(actual) | self.symbols():
             expected = self.net(sym)
             got = actual.get(sym, 0.0)
-            if abs(expected - got) > max(_DUST, abs(expected) * 1e-6):
+            if abs(expected - got) > max(_DUST, abs(expected) * 1e-6, abs(got) * 1e-6):
                 drift[sym] = {"expected": expected, "actual": got}
         return drift
+
+    def flatten_stray(self, symbol: str, book_qty: float, ref_price: float) -> bool:
+        """Reduce-only close of a position on the book that our intent does NOT account for.
+
+        A mis-observed fill (the venue reported qty 0 but the order actually opened a position) or
+        any exposure on this exclusively-owned account that ``_desired`` did not put there. Closing
+        it restores ``book == intent`` instead of leaving it to sit — the SOL orphan this method
+        exists for accrued for 12h before the session ended and left it open. ``book_qty`` is
+        SIGNED (+long / −short); the close is the opposite side, reduce-only. Best-effort: returns
+        True on a confirmed close, False otherwise (the next reconcile retries)."""
+        if abs(book_qty) < _DUST:
+            return True
+        # close_book_position closes what the REAL book holds even when it is absent from the
+        # mirror (the mis-observed-fill case); plain close_position only touches the mirror.
+        close = getattr(self.venue, "close_book_position", None) or getattr(
+            self.venue, "close_position", None
+        )
+        if not callable(close):
+            return False
+        try:
+            ok = bool(close(symbol))
+        except Exception as exc:  # noqa: BLE001 - surface + let the next tick retry
+            _log.error("basket_flatten_stray_failed", symbol=symbol, error=str(exc))
+            self._event(f"flatten of stray {symbol} FAILED: {exc} — will retry")
+            return False
+        if ok:
+            _log.warning(
+                "basket_flattened_stray", symbol=symbol, book_qty=book_qty,
+                hint="position on the book with no matching intent (mis-observed fill?) — "
+                "closed reduce-only to restore book==intent",
+            )
+            self._event(f"flattened stray {symbol} ({book_qty:+g}) — book/intent realigned")
+        return ok
 
     def drop_symbol(self, symbol: str) -> dict[str, float]:
         """Forget every strategy's intent in ``symbol`` (the exchange no longer holds it).

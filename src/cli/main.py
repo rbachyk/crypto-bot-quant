@@ -650,6 +650,10 @@ def demo_readiness(
     strategy: str = typer.Option(
         "", "--strategy", help="cross-sectional candidate id — check BASKET demo eligibility"
     ),
+    config_path: str = typer.Option(
+        "configs/data.bybit.yaml", "--config",
+        help="data config whose universe metadata is checked (must match the session's)",
+    ),
 ) -> None:
     """Pre-flight demo readiness gate — PASS / FAIL / BLOCKED with per-check detail.
 
@@ -681,13 +685,65 @@ def demo_readiness(
         except Exception as exc:  # noqa: BLE001 - no creds / no network → recon stays BLOCKED
             typer.echo(f"(reconciliation will stay BLOCKED — could not connect venue: {exc})")
 
+    # Check metadata against the SAME universe the session trades (configs/data.bybit.yaml by
+    # default), not load_data_config()'s 3-symbol skeleton default — otherwise readiness can PASS
+    # on 3 verified symbols while the basket's real 21-symbol universe is mostly unverified.
+    data_cfg = None
+    try:
+        from src.data.config import load_data_config
+
+        data_cfg = load_data_config(config_path or None)
+    except Exception as exc:  # noqa: BLE001 - fall back to the guard's default universe
+        typer.echo(f"(could not load {config_path!r}; using the default universe: {exc})")
+
     report = DemoReadinessGuard(
-        settings, venue=venue, basket_candidate_id=strategy or None
+        settings, venue=venue, basket_candidate_id=strategy or None, data_cfg=data_cfg
     ).evaluate()
     typer.echo(report.report())
     typer.echo(json.dumps(report.to_dict(), indent=2))
     if not report.ok:
         raise typer.Exit(code=1)
+
+
+@app.command(name="flatten-demo")
+def flatten_demo(
+    yes: bool = typer.Option(False, "--yes", help="skip the confirmation prompt"),
+) -> None:
+    """Reduce-only close EVERY position and cancel every owned order on the demo/testnet account.
+
+    The operator escape hatch for a book left dirty — e.g. a mis-observed fill that orphaned a
+    position a basket session did not track. Refuses on EXCHANGE_ENV=live (this flattens a whole
+    account; real-money flattening is not a CLI convenience). Places only reduce-only closes."""
+    settings = get_settings()
+    if settings.exchange_env not in ("demo", "testnet"):
+        typer.echo(f"refusing: EXCHANGE_ENV={settings.exchange_env!r} is not demo/testnet")
+        raise typer.Exit(code=2)
+    if not (settings.exchange_api_key and settings.exchange_api_secret):
+        typer.echo("no EXCHANGE_API_KEY/SECRET configured")
+        raise typer.Exit(code=2)
+
+    from typing import Any
+
+    from src.exchange.metadata import load_metadata_for
+    from src.execution.live_venue import get_venue
+
+    # Typed Any: get_venue returns the Venue protocol, but the live (ccxt) venue additionally
+    # exposes fetch_exchange_positions / emergency_close_all used below.
+    venue: Any = get_venue(load_metadata_for(settings.exchange_id), settings, live=True)
+    try:
+        positions = {s: (p.side * p.qty) for s, p in venue.fetch_exchange_positions().items()
+                     if p.qty > 0}
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"could not read the exchange book: {exc}")
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"demo account [{settings.exchange_env}] positions: {positions or 'FLAT'}")
+    if not positions:
+        typer.echo("nothing to flatten.")
+        return
+    if not yes and not typer.confirm("Reduce-only close ALL of the above?"):
+        raise typer.Exit(code=1)
+    n = venue.emergency_close_all(confirm=True)
+    typer.echo(f"flattened: {n} position/order actions.")
 
 
 @app.command(name="demo-smoke")

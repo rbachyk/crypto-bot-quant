@@ -723,6 +723,32 @@ class CcxtLiveVenue:
         self.positions.pop(symbol, None)
         return True
 
+    def close_book_position(self, symbol: str) -> bool:
+        """Reduce-only market close of a position read from the REAL exchange book, whether or not
+        it is in the local mirror.
+
+        :meth:`close_position` only closes what the mirror already tracks — useless against a
+        MIS-OBSERVED fill, where the order opened a real position but the fill poll reported qty 0
+        so nothing was mirrored. This fetches the live position and closes exactly it (the basket
+        demo reconcile uses it to flatten a stray). Returns True only on a confirmed placement."""
+        try:
+            live = self.fetch_exchange_positions().get(symbol)
+        except Exception as exc:  # noqa: BLE001 - a book read failure is not a close
+            _log.error("close_book_position_fetch_failed", symbol=symbol, error=str(exc))
+            return False
+        if live is None or live.qty <= 0:
+            return False
+        close_side = "sell" if live.side > 0 else "buy"
+        try:
+            self._ex.create_order(
+                symbol, "market", close_side, live.qty, None, {"reduceOnly": True}
+            )
+        except Exception as exc:  # noqa: BLE001 - surface; the caller retries next tick
+            _log.error("close_book_position_failed", symbol=symbol, error=str(exc))
+            return False
+        self.positions.pop(symbol, None)
+        return True
+
     def emergency_close_all(self, *, confirm: bool) -> int:
         """Flatten the REAL exchange book (M14): reduce-only close every exchange-listed
         position and cancel every resting order carrying our ownership prefix — fetched from
