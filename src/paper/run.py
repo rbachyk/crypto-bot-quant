@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from src.config import Settings, get_settings
 from src.db.base import session_scope
@@ -147,15 +147,12 @@ def persist_paper_session(
         if report_path is not None:
             run.report_path = str(report_path)
         run.related_versions = settings.versions()
-        # Replace any prior trade rows for this session (idempotent re-run).
-        for old in (
-            db.execute(
-                select(PaperTradeRecord).where(PaperTradeRecord.session_id == session.session_id)
-            )
-            .scalars()
-            .all()
-        ):
-            db.delete(old)
+        # Replace any prior trade rows for this session (idempotent re-run). ONE bulk DELETE, not
+        # a SELECT plus a round-trip per row: the incremental flush re-runs this every time a trade
+        # closes, so row-by-row deletion made each flush cost a query per trade already booked.
+        db.execute(
+            delete(PaperTradeRecord).where(PaperTradeRecord.session_id == session.session_id)
+        )
         for t in trades:
             db.add(
                 PaperTradeRecord(
@@ -195,10 +192,9 @@ def _persist_decision_and_explainability(db, session: PaperSession) -> None:
     from src.explainability import ExplainabilityError
 
     sid = session.session_id
-    # Replace any prior rows for this session (idempotent re-run).
+    # Replace any prior rows for this session (idempotent re-run) — one bulk DELETE per table.
     for model in (DecisionLog, TradeExplainabilityRow):
-        for old in db.execute(select(model).where(model.session_id == sid)).scalars().all():
-            db.delete(old)
+        db.execute(delete(model).where(model.session_id == sid))
     for d in session.decision_logs:
         db.add(
             DecisionLog(

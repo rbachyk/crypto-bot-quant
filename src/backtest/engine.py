@@ -526,7 +526,14 @@ class BacktestEngine:
             # (the accepted "fewer trades" cost of maker execution). A maker fill is exact at the
             # limit price with zero slippage and pays the maker fee. The toxic-spread blocker above
             # still applies; the taker slippage cap does not (a resting limit has no slippage).
-            offset = max(0.0, sig.limit_offset_frac)
+            # The passive distance is floored at HALF the modelled spread — where a quote joining
+            # the near touch actually sits relative to the mid/open. Without the floor an offset
+            # that collapses to ~0 (``limit_offset_atr_mult × atr_pct`` with a degenerate ATR)
+            # puts the limit AT the bar open, and `low <= open` always holds: every maker entry
+            # would then fill unconditionally, at the open, with a maker fee and zero slippage —
+            # a fill no book would have given. The basket engine floors it for exactly this reason
+            # (src/backtest/portfolio.py:_maker_offset); the two must agree.
+            offset = max(sig.limit_offset_frac, 0.5 * spread_bps / 10_000.0)
             limit_price = ref_price * (1.0 - sig.side * offset)
             if sig.side > 0:
                 if float(bar["low"]) > limit_price:
@@ -540,9 +547,15 @@ class BacktestEngine:
             entry_fee = self.fees.fee(sym_in.symbol, notional, maker=True)
             entry_slip_cost = 0.0
         else:
-            bar_notional = float(bar["volume"]) * ref_price
+            # A bar with no (or missing) volume must not be read as "no market impact" — that
+            # would price the CHEAPEST possible fill on the least liquid bar in the sample. Fall
+            # back to the order's own notional, i.e. the order is the whole bar, exactly as the
+            # exit side (_close) and the basket engine already do.
+            bar_notional = float(bar.get("volume", 0.0) or 0.0) * ref_price
             slip = self.slippage.slippage_frac(
-                spread_bps=spread_bps, notional=sizing.notional, bar_notional=bar_notional
+                spread_bps=spread_bps,
+                notional=sizing.notional,
+                bar_notional=bar_notional or sizing.notional,
             )
             if slip > self.cfg.execution.max_slippage_frac:
                 reject(f"slippage_estimate_exceeds_cap({slip:.4f})")

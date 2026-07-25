@@ -739,8 +739,14 @@ def _run_basket_session(
                 # Persist as soon as legs CLOSE (a rebalance), not just at session end — otherwise
                 # closed trades stay invisible on the dashboard until the session is stopped.
                 if len(sessions[cid].trades) > persisted[cid]:
+                    # INCREMENTAL flush: run summary + trade rows only. The defaults would dump a
+                    # fresh timestamped full-session report JSON into the lake and re-write the
+                    # whole decision-log/explainability history on EVERY rebalance that closes a
+                    # leg — quadratic disk and DB work over a multi-day session, and exactly what
+                    # persist_paper_session's docstring says to avoid. The final persist below
+                    # keeps the defaults, so the report and logs are still written once.
                     persist_paper_session(
-                        sessions[cid], build_paper_report(sessions[cid]), settings
+                        sessions[cid], settings=settings, write_report=False, write_logs=False
                     )
                     persisted[cid] = len(sessions[cid].trades)
             if manager is not None:

@@ -430,6 +430,65 @@ def test_maker_entry_that_is_not_touched_does_not_fill(cfg, meta):
     assert any(r.reason == "maker_no_fill" for r in result.rejected)
 
 
+def test_a_collapsed_maker_offset_does_not_buy_a_free_fill_at_the_open(cfg, meta):
+    """REGRESSION: ``limit_offset_atr_mult × atr_pct`` collapses to 0 whenever ATR is degenerate,
+    which put the passive limit AT the bar open — and ``low <= open`` always holds, so every maker
+    entry filled unconditionally, at the open, with a maker fee and zero slippage. That is a fill
+    no book would have given, and it flatters exactly the family that trades maker. The offset is
+    floored at half the modelled spread, so a bar that only touches the open does NOT fill."""
+    from src.features.pipeline import FeatureFrame
+
+    iv = 60_000
+
+    class ZeroOffsetMaker:
+        name = "zero_offset_maker"
+        strategy_version = "t1"
+
+        def evaluate(self, row: dict):
+            if row["decision_ts"] == iv:
+                # What a degenerate ATR produces: maker intent, no passive distance at all.
+                return Signal(
+                    side=1, stop_frac=0.5, tp_frac=0.05, maker=True, limit_offset_frac=0.0
+                )
+            return None
+
+    def bar(ts, o, h, low, c):
+        return {"ts": ts, "open": o, "high": h, "low": low, "close": c, "volume": 10_000.0}
+
+    bars = [
+        bar(0, 100, 100, 100, 100),
+        bar(iv, 100, 102, 100, 101),  # low == open: touches the limit only if it sits AT the open
+        bar(2 * iv, 101, 103, 100, 102),
+    ]
+    rows = [{"ts": k * iv, "decision_ts": (k + 1) * iv, "atr_pct": 0.0} for k in range(len(bars))]
+    frame = FeatureFrame(symbol=REF_SYMBOL, timeframe="1m", feature_names=["atr_pct"], rows=rows)
+    spread = [{"ts": b["ts"], "spread_bps": 20.0} for b in bars]  # 20bps → 10bps inside the open
+    sym = SymbolInput(
+        symbol=REF_SYMBOL, bars=bars, frame=frame, spread_samples=spread, funding_events=[]
+    )
+
+    result = BacktestEngine(cfg, meta, ZeroOffsetMaker()).run([sym])
+
+    assert result.trades == [], "a passive limit half a spread inside the open cannot fill here"
+    assert any(r.reason == "maker_no_fill" for r in result.rejected)
+
+
+def test_a_zero_volume_bar_is_not_priced_as_a_frictionless_fill(cfg, meta):
+    """A bar with no volume is the LEAST liquid bar in the sample; reading its zero bar-notional as
+    'no market impact' priced the cheapest possible fill exactly where the fill is hardest. The
+    entry now falls back to the order's own notional for the impact term — the convention the exit
+    side (_close) and the basket engine already use."""
+    from src.backtest.costs import SlippageModel
+
+    slip = SlippageModel(cfg.costs)
+    impact_coeff = cfg.costs.impact_coeff
+    if impact_coeff <= 0:  # impact disabled in config → nothing to prove, the terms coincide
+        pytest.skip("impact_coeff is 0 in this config")
+    frictionless = slip.slippage_frac(spread_bps=2.0, notional=10_000.0, bar_notional=0.0)
+    fallback = slip.slippage_frac(spread_bps=2.0, notional=10_000.0, bar_notional=10_000.0)
+    assert fallback > frictionless, "the fallback must cost MORE than assuming no impact"
+
+
 def _manage_sym(bars, extra_cols=("atr_pct",)):
     """Build a single-symbol input on a 1-minute grid (used by the manage-hook tests)."""
     from src.features.pipeline import FeatureFrame

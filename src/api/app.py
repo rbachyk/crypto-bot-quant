@@ -185,6 +185,9 @@ pre{background:#0b0e16;padding:13px;border-radius:10px;overflow-x:auto;font-size
 .pillset label:hover{color:#fff;background:var(--elev)}
 .pillset input:checked+label{background:linear-gradient(180deg,#7491ff,#6c8cff);color:#fff;
   box-shadow:0 1px 4px rgba(108,140,255,.4)}
+/* The radio itself is visually hidden, so its focus ring is too — without this the keyboard
+   user tabbing through a pill group has no idea where they are. Ride the ring on the label. */
+.pillset input:focus-visible+label{box-shadow:0 0 0 3px var(--accent-soft);color:#fff}
 .toolbar{display:flex;flex-wrap:wrap;gap:14px 22px;align-items:center;background:var(--surface);
   border:1px solid var(--border);border-radius:var(--radius);padding:14px 18px;margin-bottom:18px}
 .toolbar .grp{display:flex;flex-direction:column;gap:6px}
@@ -230,6 +233,13 @@ pre{background:#0b0e16;padding:13px;border-radius:10px;overflow-x:auto;font-size
   .container{padding:16px 14px 44px}
   .topbar{padding:0 14px;height:54px}
   .topbar h1{font-size:16px}
+}
+/* Respect the OS "reduce motion" setting: every transition/lift here is decoration, and for a
+   vestibular-sensitive operator the hover-lift on a wall of buttons is the opposite of usable. */
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{transition-duration:.01ms!important;animation-duration:.01ms!important;
+    animation-iteration-count:1!important;scroll-behavior:auto!important}
+  button:hover,.btn:hover{transform:none}
 }
 @media(max-width:560px){
   .container{padding:12px 10px 36px}
@@ -426,7 +436,9 @@ _BRAND_MARK = _icon("live")  # the equity-curve glyph as the product mark
 
 def _render_sidebar(title: str) -> str:
     out = [
-        '<aside class="sidebar">',
+        # A <nav> landmark, not <aside>: this IS the primary navigation, and "complementary"
+        # (what <aside> announces) is what a screen reader tells the user to skip.
+        '<nav class="sidebar" aria-label="Primary">',
         '<div class="brand">'
         f'<span class="mark">{_BRAND_MARK}</span>'
         '<span><span class="name">Quant Bot</span><br>'
@@ -437,8 +449,13 @@ def _render_sidebar(title: str) -> str:
         for label, href, icon, prefixes in items:
             active = any(title == p or title.startswith(p) for p in prefixes)
             cls = "navlink active" if active else "navlink"
-            out.append(f'<a class="{cls}" href="{href}">{_icon(icon)}<span>{label}</span></a>')
-    out.append("</aside>")
+            # aria-current carries "you are here" to assistive tech; the highlight alone is
+            # colour-only information.
+            current = ' aria-current="page"' if active else ""
+            out.append(
+                f'<a class="{cls}"{current} href="{href}">{_icon(icon)}<span>{label}</span></a>'
+            )
+    out.append("</nav>")
     return "".join(out)
 
 
@@ -553,7 +570,9 @@ def _page(title: str, body: str, *, env_chip: str = "") -> str:
         "</head><body>"
         '<div class="app">'
         f"{_render_sidebar(title)}"
-        '<div class="main">'
+        # <main>, not a div: with the nav in a landmark of its own, a screen reader can jump
+        # straight to the page content instead of walking the 23-item sidebar on every page.
+        '<main class="main">'
         '<header class="topbar">'
         f"<div><div class='crumb'>Quant Trading Bot</div><h1>{_esc(title)}</h1></div>"
         '<div style="display:flex;align-items:center;gap:14px">'
@@ -561,7 +580,7 @@ def _page(title: str, body: str, *, env_chip: str = "") -> str:
         f'<div class="envchip">{chip}</div>'
         "</div></header>"
         f'<div class="container">{body}</div>'
-        "</div></div>"
+        "</main></div>"
         f"{_ENV_JS}"
         f"{_AUTOREFRESH_JS}"
         "</body></html>"

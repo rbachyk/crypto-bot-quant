@@ -161,3 +161,15 @@ def test_the_control_centre_asks_every_crawler_to_stay_out(client) -> None:
     robots = client.get("/robots.txt")
     assert robots.status_code == 200
     assert robots.text.strip() == "User-agent: *\nDisallow: /"
+
+
+@requires_db
+def test_the_shell_exposes_real_landmarks_for_assistive_tech(client) -> None:
+    """The sidebar IS the primary navigation, and the content region is the main region. Announcing
+    them as <aside> (complementary — the thing screen readers offer to skip) and an anonymous <div>
+    left a keyboard/SR operator walking 23 nav links to reach every page. The active link also
+    carries aria-current, so "you are here" is not colour-only information."""
+    html = client.get("/dashboard/gates").text
+    assert '<nav class="sidebar" aria-label="Primary">' in html
+    assert '<main class="main">' in html
+    assert 'aria-current="page"' in html
