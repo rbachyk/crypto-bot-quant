@@ -353,8 +353,20 @@ class DemoReadinessGuard:
         from src.execution.ownership import OwnershipPolicy
         from src.execution.reconciliation import reconcile_startup
 
+        # Reconcile over THIS session's partition, exactly as the session's own pre-flight does.
+        # Unscoped, positions are classified by the venue's per-position ``owned`` flag — which
+        # Bybit cannot populate (a position read echoes no clientOrderId), so every position on the
+        # account reads foreign. Under account partitioning that means another strategy's position,
+        # sitting legitimately in ITS reserved symbols, would BLOCK this session's readiness — while
+        # the pre-flight immediately downstream, which does pass a scope, correctly ignores it. A
+        # leftover in our OWN scope is not waved through: the pre-flight separately requires the
+        # scope to be flat, and says so in its own terms.
         res = reconcile_startup(
-            self._venue, OwnershipPolicy(self.settings), environment=self.environment, adopt=False
+            self._venue,
+            OwnershipPolicy(self.settings),
+            environment=self.environment,
+            adopt=False,
+            scope_symbols=set(self._symbols) if self._symbols is not None else None,
         )
         if res.halt_required:
             return ReadinessCheck(

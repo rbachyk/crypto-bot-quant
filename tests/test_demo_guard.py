@@ -123,3 +123,60 @@ def test_demo_guard_passes_when_all_controls_green() -> None:
     ).evaluate()
     assert report.verdict == PASS, report.report()
     assert all(c.status == PASS for c in report.checks)
+
+
+def test_readiness_ignores_another_strategys_position_in_its_own_partition() -> None:
+    """REGRESSION: the guard reconciled the WHOLE book while the session it gates reconciles only
+    its partition. Bybit cannot populate a position's `owned` flag (a position read echoes no
+    clientOrderId), so unscoped every position reads foreign — meaning a basket session would be
+    blocked from starting by another strategy's position sitting legitimately in ITS reserved
+    symbols, which is the very arrangement account partitioning exists to allow (and the one the
+    account lock tells operators to adopt)."""
+    from src.execution.venue import VenuePosition
+
+    class _VenueHoldingAnotherStrategysLeg:
+        def fetch_open_orders(self):
+            return {}
+
+        def fetch_exchange_positions(self):
+            return {
+                "XRP/USDT:USDT": VenuePosition(  # basis_reversion's partition, not ours
+                    symbol="XRP/USDT:USDT", side=1, qty=5.0, entry_price=0.5, owned=False
+                )
+            }
+
+    guard = DemoReadinessGuard(
+        _settings(),
+        kill_switch=_DisengagedKill(),
+        venue=_VenueHoldingAnotherStrategysLeg(),
+        symbols=["BTC/USDT:USDT", "ETH/USDT:USDT"],  # our partition
+    )
+    recon = next(c for c in guard.evaluate().checks if c.name == "reconciliation")
+    assert recon.status == PASS, recon.detail
+
+
+def test_readiness_still_blocks_on_a_foreign_item_inside_our_own_partition() -> None:
+    """The scoping must not blunt the check: a manual ORDER on a symbol we trade still blocks
+    (orders carry our ownership prefix, so their attribution is exact)."""
+    from src.execution.order import Order, OrderType
+
+    class _VenueWithAManualOrder:
+        def fetch_open_orders(self):
+            return {
+                "MANUAL-1": Order(
+                    client_id="MANUAL-1", symbol="BTC/USDT:USDT", side="buy", qty=1.0,
+                    order_type=OrderType.LIMIT, price=1.0,
+                )
+            }
+
+        def fetch_exchange_positions(self):
+            return {}
+
+    guard = DemoReadinessGuard(
+        _settings(),
+        kill_switch=_DisengagedKill(),
+        venue=_VenueWithAManualOrder(),
+        symbols=["BTC/USDT:USDT"],
+    )
+    recon = next(c for c in guard.evaluate().checks if c.name == "reconciliation")
+    assert recon.status == BLOCKED and "MANUAL-1" in recon.detail
