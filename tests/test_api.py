@@ -636,6 +636,7 @@ def test_a_basket_demo_is_refused_while_a_live_session_owns_the_account() -> Non
         )
         assert r.status_code == 409
         assert "live_symbols" in r.json()["detail"]  # …and says how to make them coexist
+        assert jid in r.json()["detail"], "…and names the session holding the account"
     finally:
         rc.delete(processing_key(wid))
         rc.delete(worker_key(wid))
@@ -643,3 +644,50 @@ def test_a_basket_demo_is_refused_while_a_live_session_owns_the_account() -> Non
             obj = s.get(Job, jid)
             if obj is not None:
                 s.delete(obj)
+
+
+@requires_db
+@requires_redis
+def test_a_paper_mode_live_session_does_not_block_a_basket_demo() -> None:
+    """A live session started in PAPER mode drives the offline SimulatedVenue: no exchange orders,
+    no shared account, nothing to collide with. The dashboard offers exactly that override, so
+    refusing the basket demo for it was a false block on a session that cannot conflict."""
+    import uuid
+
+    from src.config import get_settings
+    from src.db.base import session_scope
+    from src.db.models import Job, JobStatus
+    from src.jobs import JobQueue
+    from src.jobs.routing import processing_key, worker_key
+    from src.strategies.config import load_strategies_config
+
+    if load_strategies_config().reserved_symbols():
+        pytest.skip("a live_symbols partition is declared — the coexistence check stands aside")
+
+    rc = JobQueue(get_settings()).redis
+    jid = "test-paper-live-" + uuid.uuid4().hex[:8]
+    wid = "test-worker-" + uuid.uuid4().hex[:8]
+    with session_scope() as s:
+        s.add(Job(job_id=jid, job_type="run_live_session", status=JobStatus.RUNNING,
+                  input_params={"mode": "paper"}))
+    rc.lpush(processing_key(wid), jid)
+    rc.set(worker_key(wid), wid, ex=60)
+    try:
+        r = client.post(
+            "/api/paper/run-basket-demo",
+            params={"strategies": "funding_carry", "timeframe": ""},
+            auth=AUTH, headers={"sec-fetch-site": "same-origin"},
+        )
+        assert r.status_code != 409, r.text
+    finally:
+        rc.delete(processing_key(wid))
+        rc.delete(worker_key(wid))
+        with session_scope() as s:
+            # the seeded live job, plus the basket job this test really enqueued
+            s.query(Job).filter(Job.job_id == jid).delete()
+            for j in s.query(Job).filter(
+                Job.job_type == "run_basket_demo_session",
+                Job.status.in_((JobStatus.QUEUED, JobStatus.RUNNING)),
+            ).all():
+                j.status = JobStatus.CANCELLED
+                j.failure_reason = "cancelled: enqueued by a test, never an intended session"

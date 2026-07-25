@@ -744,11 +744,10 @@ def _session_job_alive(redis_client: Any, job_id: str, job_type: str) -> bool:
     return False
 
 
-def _has_active_job(
+def _alive_session_jobs(
     job_type: str, *, strategy: str | None = None, redis_client: Any = None
-) -> bool:
-    """True if a GENUINELY-ALIVE QUEUED/RUNNING job of this type (optionally pinned to ``strategy``)
-    exists. Guards a duplicate Start from double-booking the same continuous session.
+) -> list[tuple[str, dict]]:
+    """``(job_id, params)`` for every GENUINELY-ALIVE QUEUED/RUNNING job of this type.
 
     A killed session leaves its row in RUNNING with no live owner — Stop can't clear it (no handler
     to see the cancel) and it silently blocks every future Start. So any active row that is NOT
@@ -758,7 +757,7 @@ def _has_active_job(
 
     from src.db.models import JobStatus
 
-    alive = False
+    out: list[tuple[str, dict]] = []
     with session_scope() as session:
         rows = (
             session.execute(
@@ -771,17 +770,25 @@ def _has_active_job(
             .all()
         )
         for j in rows:
-            if strategy is not None and (j.input_params or {}).get("strategy") != strategy:
+            params = dict(j.input_params or {})
+            if strategy is not None and params.get("strategy") != strategy:
                 continue
             if _session_job_alive(redis_client, j.job_id, job_type):
-                alive = True
+                out.append((j.job_id, params))
             else:
                 j.status = JobStatus.FAILED
                 j.failure_reason = "orphaned session (no live owner) — auto-cleared by Start guard"
                 structlog.get_logger("api").warning(
                     "orphaned_session_job_auto_failed", job_id=j.job_id, job_type=job_type
                 )
-    return alive
+    return out
+
+
+def _has_active_job(
+    job_type: str, *, strategy: str | None = None, redis_client: Any = None
+) -> bool:
+    """True if a genuinely-alive session job of this type exists (see :func:`_alive_session_jobs`)."""
+    return bool(_alive_session_jobs(job_type, strategy=strategy, redis_client=redis_client))
 
 
 #: The two continuous session types that place orders on the SAME exchange account. Each is
@@ -809,14 +816,20 @@ def _refuse_unpartitioned_coexistence(job_type: str, redis_client: Any = None) -
         return
     if load_strategies_config().reserved_symbols():  # a partition exists → disjoint by construction
         return
-    if _has_active_job(other, redis_client=redis_client):
+    for job_id, params in _alive_session_jobs(other, redis_client=redis_client):
+        # A live session started in PAPER mode drives the offline SimulatedVenue — it places no
+        # exchange orders and shares no account, so it is not a conflict. (The dashboard offers
+        # exactly that override, so refusing it was a false block on a session that cannot collide.)
+        if other == "run_live_session" and params.get("mode") == "paper":
+            continue
         raise HTTPException(
             status_code=409,
             detail=(
-                f"a {other!r} session is already running on this account and no live_symbols "
-                "partition is declared, so both sessions would trade the whole universe and net "
-                "into each other's positions. Stop it first, or give the strategies disjoint "
-                "`live_symbols` in configs/strategies.yaml so they can coexist."
+                f"a {other!r} session ({job_id}) is already running on this account and no "
+                "live_symbols partition is declared, so both sessions would trade the whole "
+                "universe and net into each other's positions. Stop that session (Jobs → "
+                f"{job_id} → Cancel), or give the strategies disjoint `live_symbols` in "
+                "configs/strategies.yaml so they can coexist."
             ),
         )
 
