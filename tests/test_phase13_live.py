@@ -380,6 +380,31 @@ class TestDeploy:
         assert isinstance(parsed, dict)
         assert "services" in parsed
 
+    def test_every_db_service_waits_for_the_migration(self):
+        """REGRESSION: nothing ran `alembic upgrade` on deploy, so new code could meet an old
+        database. Only the pages touching the changed table broke — they rendered the generic
+        error shell while "column X does not exist" sat in the logs (this actually happened:
+        migration 0015 vs /dashboard/paper + /dashboard/live). Every DB-touching service now waits
+        for the one-shot `migrate` service to COMPLETE, so that state is unreachable."""
+        import yaml
+
+        repo_root = Path(__file__).resolve().parents[1]
+        services = yaml.safe_load((repo_root / "docker-compose.yml").read_text())["services"]
+
+        assert "migrate" in services, "the one-shot migration service must exist"
+        # Quoted "no": bare `no` is YAML false, which the auto-restart criterion reads as
+        # "declares no restart policy".
+        assert services["migrate"]["restart"] == "no"
+
+        infra = {"postgres", "redis", "migrate", "caddy"}  # caddy is a pure proxy
+        for name, svc in services.items():
+            if name in infra:
+                continue
+            dep = svc.get("depends_on") or {}
+            assert dep.get("migrate", {}).get("condition") == "service_completed_successfully", (
+                f"{name} starts without waiting for the schema migration"
+            )
+
     def test_live_engine_service_defined(self):
         """trading-engine-live service is defined in docker-compose.yml."""
         repo_root = Path(__file__).resolve().parents[1]

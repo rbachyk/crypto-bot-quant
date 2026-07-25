@@ -40,8 +40,10 @@ docker-down:
 	$(COMPOSE) down
 
 # --- Database ---------------------------------------------------------------
+# Same entrypoint the compose `migrate` service runs, so a hand-run migration and a deploy behave
+# identically (including the "database is ahead of this code" warning).
 migrate:
-	$(RUN) alembic upgrade head
+	$(RUN) python scripts/migrate.py
 
 seed-dev:
 	$(RUN) python -m src.cli.main enqueue sync_exchange_metadata

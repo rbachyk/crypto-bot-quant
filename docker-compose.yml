@@ -114,6 +114,34 @@ services:
     ports:
       - "127.0.0.1:6379:6379"
 
+  # One-shot schema migration, run to completion BEFORE any app service starts.
+  #
+  # Nothing used to run `alembic upgrade` on deploy — it was a manual `make migrate` — so new code
+  # could meet an old database. The failure is nasty to diagnose from outside: only the pages that
+  # touch the changed table break (they render the generic error shell) while the real cause,
+  # "column X does not exist", sits in the logs. Every DB-touching service below now waits on
+  # `service_completed_successfully`, so that state is unreachable: either the schema is at head or
+  # the stack does not come up. A failed migration stopping the deploy is the POINT — a
+  # half-migrated system serving reads is the worse outcome.
+  #
+  # The migration is idempotent, so re-running it on every `docker compose up` is a cheap no-op
+  # once the database is current. `restart: "no"` (quoted — bare `no` is YAML false, which reads as
+  # "no policy declared" to the DEPLOY gate) because completing IS success here, not a crash to
+  # restart. scripts/migrate.py rather than bare `alembic upgrade head`: a database AHEAD of this
+  # image's migrations (an `up -d` without `--build` after a hand-run migration, or a deliberate
+  # rollback) makes alembic exit 255, which — with every service gated on this one — would take the
+  # whole stack down at exactly the wrong moment. The script warns and proceeds for that case only.
+  migrate:
+    <<: *app-build
+    restart: "no"
+    environment:
+      <<: *app-env
+      SERVICE_NAME: migrate
+    command: ["python", "scripts/migrate.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   backend:
     <<: *app-build
     environment:
@@ -121,6 +149,8 @@ services:
       SERVICE_NAME: backend
     command: ["uvicorn", "src.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -145,6 +175,8 @@ services:
       SERVICE_NAME: dashboard
     command: ["uvicorn", "src.api.app:app", "--host", "0.0.0.0", "--port", "8001"]
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       backend:
         condition: service_started
     expose:
@@ -167,6 +199,8 @@ services:
       SERVICE_NAME: worker-data
     command: ["python", "-m", "src.cli.main", "worker", "--queues", "data"]
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -179,6 +213,8 @@ services:
       SERVICE_NAME: worker-backtest
     command: ["python", "-m", "src.cli.main", "worker", "--queues", "backtest"]
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
 
@@ -189,6 +225,8 @@ services:
       SERVICE_NAME: worker-ml
     command: ["python", "-m", "src.cli.main", "worker", "--queues", "ml"]
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
 
@@ -199,6 +237,8 @@ services:
       SERVICE_NAME: worker-rl
     command: ["python", "-m", "src.cli.main", "worker", "--queues", "rl"]
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
 
@@ -209,6 +249,8 @@ services:
       SERVICE_NAME: worker-reports
     command: ["python", "-m", "src.cli.main", "worker", "--queues", "gates"]
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
 
@@ -233,6 +275,8 @@ services:
       - --concurrency
       - "${LIVE_WORKER_CONCURRENCY:-4}"
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       postgres:
@@ -252,6 +296,8 @@ services:
     # gated by the enable_* toggles. It only enqueues; the dedicated workers consume.
     command: ["python", "-m", "src.cli.main", "scheduler"]
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
 
@@ -264,6 +310,8 @@ services:
     # Dedicated process (B.13). Serves the default queue alongside the scheduler.
     command: ["python", "-m", "src.cli.main", "worker", "--queues", "default"]
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -302,6 +350,8 @@ services:
       - --config
       - "${PAPER_DATA_CONFIG:-configs/data.bybit.yaml}"
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -334,6 +384,8 @@ services:
       - --config
       - "${PAPER_DATA_CONFIG:-configs/data.bybit.yaml}"
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -361,6 +413,8 @@ services:
       - --config
       - "${PAPER_DATA_CONFIG:-configs/data.bybit.yaml}"
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -376,6 +430,8 @@ services:
       SERVICE_NAME: trading-engine-live
     command: ["python", "-m", "src.cli.main", "config"]
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
