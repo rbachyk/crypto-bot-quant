@@ -918,22 +918,45 @@ def _pnl_color(v: float) -> str:
     return "#3fb950" if v >= 0 else "#f85149"
 
 
-def _open_positions_table() -> str:
+def _apply_env_to(query: Any, session_id_col: Any, env: str | None) -> Any:
+    """Scope a query on a ``session_id`` column to one trading environment.
+
+    The same rule the statistics use (src.api.stats._apply_env), lifted so anything keyed by
+    session_id — open positions included — separates environments identically. Self-test sessions
+    are always excluded: they are fabricated candidates and never belong in an operator's view."""
+    from src.api.stats import _REAL_ENV_PREFIXES, _SELFTEST_PREFIX
+
+    query = query.where(~session_id_col.like(f"{_SELFTEST_PREFIX}%"))
+    if not env or env == "all":
+        return query
+    if env == "paper":
+        for pfx in _REAL_ENV_PREFIXES:
+            query = query.where(~session_id_col.like(f"{pfx}%"))
+        return query
+    if env == "real":
+        from sqlalchemy import or_ as _or
+
+        return query.where(_or(*(session_id_col.like(f"{pfx}%") for pfx in _REAL_ENV_PREFIXES)))
+    return query.where(session_id_col.like(f"{env}:%"))
+
+
+def _open_positions_table(env: str | None = "paper") -> str:
     """The refreshable INNER content of the Open-positions panel: per-position rows grouped by
     strategy with a per-strategy subtotal, plus a grand total. Served standalone to the auto-refresh
-    poll so the panel updates without a full page reload."""
-    from src.api.stats import _REAL_ENV_PREFIXES, _SELFTEST_PREFIX
+    poll so the panel updates without a full page reload.
+
+    ``env`` scopes it exactly like the statistics do (``src.api.stats._apply_env``): ``paper`` is
+    everything that is NOT a real venue or a self-test, ``demo``/``testnet``/``live`` are their own
+    prefixes, ``real`` is all three, and None/``all`` is every environment. A demo or live session
+    persists its held legs the same way a paper one does — they were simply never displayed
+    anywhere, so an operator running a demo basket could see realized trades but not what the
+    account was holding right now."""
     from src.db.models import OpenPosition
 
     try:
         with session_scope() as session:
-            # Scope to PAPER sessions only — the per-symbol live loop persists OpenPosition rows for
-            # demo/testnet/live real-venue runs too, and without this filter their held legs (and
-            # unrealized P&L) leak into the Paper page's panel + grand total. Mirrors stats' paper
-            # definition: everything that is NOT a real-venue or self-test session.
             q = select(OpenPosition).order_by(OpenPosition.strategy, OpenPosition.symbol)
-            for pfx in (*_REAL_ENV_PREFIXES, _SELFTEST_PREFIX):
-                q = q.where(~OpenPosition.session_id.like(f"{pfx}%"))
+            q = _apply_env_to(q, OpenPosition.session_id, env)
             rows = session.execute(q).scalars().all()
             data = [
                 (r.strategy, r.symbol, r.side, r.qty, r.entry_price, r.mark_price,
@@ -987,20 +1010,22 @@ def _open_positions_table() -> str:
    <b style="color:{_pnl_color(total_funding)}">{total_funding:+,.2f}</b></p>"""
 
 
-def _open_positions_card() -> str:
+def _open_positions_card(env: str | None = "paper") -> str:
     """Live OPEN positions (held basket legs / live entries) marked to market — UNREALIZED P&L until
-    they close, grouped by strategy with subtotals. Auto-refreshes every 15s via a fragment poll."""
+    they close, grouped by strategy with subtotals. Auto-refreshes every 15s via a fragment poll.
+    ``env`` scopes it to one trading environment (see :func:`_open_positions_table`)."""
+    scope = "" if not env or env == "all" else f" · {_esc(env)}"
     return f"""
 <div class="card">
-  <h2>Open positions</h2>
+  <h2>Open positions{scope}</h2>
   <p class="meta">Live held legs marked to market — <b>unrealized</b> P&amp;L, refreshed each tick
      (auto-updates here every 15s). A leg drops off and becomes a realized trade when it closes.</p>
-  <div id="open-pos-body">{_open_positions_table()}</div>
+  <div id="open-pos-body">{_open_positions_table(env)}</div>
 </div>
 <script>
 (function(){{
   function refresh(){{
-    fetch('/api/open-positions',{{headers:{{'sec-fetch-site':'same-origin'}}}})
+    fetch('/api/open-positions?env={_esc(env or "all")}',{{headers:{{'sec-fetch-site':'same-origin'}}}})
       .then(function(r){{return r.ok?r.text():null;}})
       .then(function(h){{if(h!==null){{document.getElementById('open-pos-body').innerHTML=h;}}}})
       .catch(function(){{}});
@@ -1112,6 +1137,10 @@ def _kpi_row(t: Any) -> str:
     pf = "∞" if t.gross_loss == 0 and t.gross_win > 0 else f"{t.profit_factor:.2f}"
     cards = [
         _kpi("Net P&L", _money(t.realized_pnl)),
+        # Open exposure, not history: the account's mark-to-market on positions still held. Sat in
+        # the payload as a hardcoded 0.00 until it was wired up, so a running session's held legs
+        # were invisible in the headline numbers as well as on the page.
+        _kpi("Unrealized", _money(t.unrealized_pnl)),
         _kpi("Win rate", f"{t.win_rate * 100:.1f}%"),
         _kpi(
             "Expectancy R",
@@ -2134,6 +2163,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             + controls
             + jobs_card
             + basket_card
+            # The account's CURRENT exposure. Scoped to "real" — every virtual-funds/real venue —
+            # to match the session table below it, which lists demo, testnet AND live runs. Keying
+            # it to settings.exchange_env instead would hide a demo session's held legs from a
+            # deployment configured for testnet, on the very page built to watch them.
+            + _open_positions_card("real")
             + '<p class="meta">Live (real-money) trading is hard-gated: TRADING_MODE=LIVE + '
             "APP_ENV=production + ENABLE_LIVE_TRADING=true, all blocks_live gates PASS, an "
             "approved live_activation sign-off, and bounded-live caps (configs/live.yaml). "
@@ -2524,6 +2558,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     env=env, period=period, symbol=symbol, strategy=strategy, session=session,
                 )
                 + _kpi_row(t)
+                # What the account is holding RIGHT NOW, in whichever environment the selector is
+                # on. Realized trades alone never showed a demo/live operator their open exposure.
+                + _open_positions_card(env)
                 + _interactive_charts(t.trade_series, _PAPER_BASE_EQUITY, cid="st")
                 + _breakdown_table("By Symbol", t.by_symbol, "Symbol")
                 + _breakdown_table("By Strategy", t.by_strategy, "Strategy")
@@ -4109,10 +4146,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return RedirectResponse(url="/dashboard/paper", status_code=303)
 
     @app.get("/api/open-positions", response_class=HTMLResponse)
-    def open_positions_fragment(user: str = Depends(require_dashboard_auth)) -> str:
-        """The Open-positions panel's refreshable inner HTML — polled by the Paper page so the
-        live unrealized P&L updates without a full page reload."""
-        return _open_positions_table()
+    def open_positions_fragment(
+        env: str | None = None, user: str = Depends(require_dashboard_auth)
+    ) -> str:
+        """The Open-positions panel's refreshable inner HTML — polled by the Paper, Statistics and
+        Live pages so held legs and their unrealized P&L update without a full page reload.
+        ``env`` scopes it to one trading environment (paper / demo / testnet / live / real)."""
+        return _open_positions_table(env if env is not None else "paper")
 
     @app.get("/dashboard/paper", response_class=HTMLResponse)
     def dashboard_paper(user: str = Depends(require_dashboard_auth)) -> str:

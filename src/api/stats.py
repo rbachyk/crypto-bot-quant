@@ -277,6 +277,34 @@ def _breakdown(rows: list[Any], key) -> list[dict[str, Any]]:
     return sorted(out, key=lambda d: d["pnl"], reverse=True)
 
 
+def _open_unrealized(
+    *, env: str | None = None, strategy: str | None = None, session_id: str | None = None
+) -> float:
+    """Summed unrealized P&L of the currently-open positions in this scope.
+
+    Marked to market by the running session each tick (src/live/basket.py persists it), so this is
+    a read of live state, not a recomputation. Symbol is deliberately NOT a filter here: the
+    per-symbol drill-down shows realized history for one symbol, while this number answers "what is
+    the account carrying", which is a portfolio-level question."""
+    with session_scope() as session:
+        q = select(func.coalesce(func.sum(OpenPosition.unrealized_pnl), 0.0))
+        q = q.where(~OpenPosition.session_id.like(f"{_SELFTEST_PREFIX}%"))
+        if env == "paper":
+            for pfx in _REAL_ENV_PREFIXES:
+                q = q.where(~OpenPosition.session_id.like(f"{pfx}%"))
+        elif env == "real":
+            q = q.where(
+                or_(*(OpenPosition.session_id.like(f"{pfx}%") for pfx in _REAL_ENV_PREFIXES))
+            )
+        elif env and env != "all":
+            q = q.where(OpenPosition.session_id.like(f"{env}:%"))
+        if strategy:
+            q = q.where(OpenPosition.strategy == strategy)
+        if session_id:
+            q = q.where(OpenPosition.session_id == session_id)
+        return float(session.execute(q).scalar_one() or 0.0)
+
+
 def compute_trading_stats(
     window: TimeWindow,
     *,
@@ -331,6 +359,13 @@ def compute_trading_stats(
         base_equity = _base_equity_for(session, q)
 
     st.total_trades = len(rows)
+    # Unrealized P&L of what is OPEN right now, in the same environment scope. Computed BEFORE the
+    # early return below: a session that has opened positions and closed nothing has no realized
+    # history, which is precisely when "what am I holding?" matters most. (The field had been in
+    # the payload since the dataclass was written with nothing ever computing it.)
+    st.unrealized_pnl = round(
+        _open_unrealized(env=env, strategy=strategy, session_id=session_id), 2
+    )
     if not rows:
         return st
     wins = [t for t in rows if t.pnl > 0]
