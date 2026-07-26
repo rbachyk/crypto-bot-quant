@@ -739,3 +739,26 @@ def test_a_partial_partition_is_not_mistaken_for_a_disjoint_one() -> None:
         "xsection_rs": ["ETH/USDT:USDT"],
         "liquidation_reversal": ["SOL/USDT:USDT"],
     }) is False, "a genuinely disjoint partition must let both sessions run"
+
+
+def test_json_responses_declare_their_encoding() -> None:
+    """REGRESSION: Starlette sends `application/json` with no charset. JSON is UTF-8 by definition,
+    but a terminal or curl pipe that guesses Latin-1 renders "->" as "â†'" — which is how an
+    operator read a 409 that was trying to tell them which session to cancel. Error bodies are
+    exactly the ones read raw, and HTTPException bypasses default_response_class."""
+    from fastapi import HTTPException
+    from src.api.app import create_app
+
+    app = create_app(Settings(_env_file=None, dashboard_auth_mode="none"))
+
+    @app.get("/__enc_probe")
+    def _probe():  # pragma: no cover - exercised through the client below
+        raise HTTPException(status_code=409, detail="dash — arrow → ok")
+
+    probe = TestClient(app, follow_redirects=False)
+    for path, expected in (("/__enc_probe", 409), ("/health", 200)):
+        r = probe.get(path)
+        assert r.status_code == expected
+        assert r.headers["content-type"] == "application/json; charset=utf-8", path
+    body = probe.get("/__enc_probe")
+    assert body.json()["detail"] == "dash — arrow → ok"  # survives the round trip intact

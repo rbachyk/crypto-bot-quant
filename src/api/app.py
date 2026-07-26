@@ -28,6 +28,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from sqlalchemy import desc, func, select
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from src.api.auth import require_dashboard_auth
 from src.config import Settings, get_settings
@@ -867,8 +868,8 @@ def _refuse_unpartitioned_coexistence(
             detail=(
                 f"a {other!r} session ({job_id}) is already running on this account and no "
                 "live_symbols partition is declared, so both sessions would trade the whole "
-                "universe and net into each other's positions. Stop that session (Jobs → "
-                f"{job_id} → Cancel), or give the strategies disjoint `live_symbols` in "
+                "universe and net into each other's positions. Stop that session (Jobs -> "
+                f"{job_id} -> Cancel), or give the strategies disjoint `live_symbols` in "
                 "configs/strategies.yaml so they can coexist."
             ),
         )
@@ -1171,10 +1172,33 @@ def _gate_status_line(g: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
+class Utf8JSONResponse(JSONResponse):
+    """JSON that DECLARES its encoding.
+
+    Starlette sends ``application/json`` with no charset. JSON is UTF-8 by definition (RFC 8259)
+    and browsers honour that, but a terminal, a curl pipe or a naive client will happily decode the
+    bytes as Latin-1 — which is why an operator saw "Jobs â†’ job_…" instead of "Jobs -> job_…" in a
+    409 body. Saying utf-8 out loud costs nothing and removes the guess."""
+
+    media_type = "application/json; charset=utf-8"
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     configure_logging()
     settings = settings or get_settings()
-    app = FastAPI(title="Quant Trading Bot — Control Center", version="0.7.0")
+    app = FastAPI(
+        title="Quant Trading Bot — Control Center",
+        version="0.7.0",
+        default_response_class=Utf8JSONResponse,
+    )
+
+    # HTTPException bodies bypass default_response_class (Starlette formats them itself), and they
+    # are precisely the ones an operator reads raw — the 409 that started this.
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_exception(request: Request, exc: StarletteHTTPException):  # type: ignore[no-untyped-def]
+        return Utf8JSONResponse(
+            {"detail": exc.detail}, status_code=exc.status_code, headers=getattr(exc, "headers", None)
+        )
 
     app.dependency_overrides[get_settings] = lambda: settings
 
@@ -1188,7 +1212,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if request.method in ("POST", "PUT", "PATCH", "DELETE"):
             sfs = request.headers.get("sec-fetch-site", "")
             if sfs in ("cross-site", "cross-origin"):
-                return JSONResponse({"detail": "cross-site request blocked (CSRF)"}, status_code=403)
+                return Utf8JSONResponse(
+                    {"detail": "cross-site request blocked (CSRF)"}, status_code=403
+                )
             origin = request.headers.get("origin")
             if origin:
                 from urllib.parse import urlparse
@@ -1196,7 +1222,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if urlparse(origin).netloc and urlparse(origin).netloc != request.headers.get(
                     "host", ""
                 ):
-                    return JSONResponse({"detail": "origin mismatch (CSRF)"}, status_code=403)
+                    return Utf8JSONResponse(
+                        {"detail": "origin mismatch (CSRF)"}, status_code=403
+                    )
         return await call_next(request)
 
     # Graceful degradation: an unhandled error in ONE page (e.g. a DB hiccup or a missing config)
@@ -1211,7 +1239,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         path = request.url.path
         if path.startswith("/api") or path in ("/health", "/livez", "/readyz"):
-            return JSONResponse({"detail": "internal error"}, status_code=500)
+            return Utf8JSONResponse({"detail": "internal error"}, status_code=500)
         # Standalone minimal HTML (does NOT call _page, which itself touches db/redis and could
         # fail again during an outage).
         return HTMLResponse(
