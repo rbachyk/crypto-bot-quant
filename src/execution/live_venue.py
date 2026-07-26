@@ -701,7 +701,14 @@ class CcxtLiveVenue:
     def fetch_open_orders(self) -> dict[str, Order]:
         """Live resting orders on the exchange, keyed by clientOrderId (for startup
         reconciliation vs the bot's mirror, Section 7). Orders whose clientOrderId lacks
-        the bot's ownership prefix are foreign/manual and must halt new entries."""
+        the bot's ownership prefix are foreign/manual and must halt new entries.
+
+        The PROTECTIVE nature of an order is carried through (``reduce_only`` / ``stop_price`` /
+        ``role``) because it decides attribution as much as the prefix does. A position-level
+        stop-loss is created by the EXCHANGE from the entry's ``stopLoss`` param — we never send it
+        as an order, so it carries no clientOrderId of ours and surfaces here under a bare exchange
+        UUID. Reported as a bare id it reads foreign, which halted a session on its own disaster
+        stops: exactly the orders proving the position was protected."""
         out: dict[str, Order] = {}
         for o in self._ex.fetch_open_orders() or []:
             info = o.get("info") or {}
@@ -709,13 +716,33 @@ class CcxtLiveVenue:
             if not cid:
                 continue
             side = str(o.get("side") or "").lower()
+            # Bybit stamps position-attached protection with stopOrderType (StopLoss / TakeProfit /
+            # TrailingStop / Stop); ccxt surfaces a trigger price and reduceOnly for the same thing.
+            stop_type = str(info.get("stopOrderType") or "").strip()
+            trigger = (
+                _num(o.get("triggerPrice"))
+                or _num(o.get("stopPrice"))
+                or _num(info.get("triggerPrice"))
+            )
+            reduce_only = bool(
+                o.get("reduceOnly")
+                if o.get("reduceOnly") is not None
+                else str(info.get("reduceOnly", "")).lower() == "true"
+            )
+            protective = bool(stop_type) or trigger is not None or reduce_only
+            role = "entry"
+            if protective:
+                role = "take_profit" if "takeprofit" in stop_type.lower() else "stop"
             out[cid] = Order(
                 client_id=cid,
                 symbol=str(o.get("symbol") or ""),
                 side="buy" if side == "buy" else "sell",
                 qty=_num(o.get("amount")) or 0.0,
-                order_type=OrderType.LIMIT,
+                order_type=OrderType.STOP_MARKET if protective else OrderType.LIMIT,
+                role=role,
                 price=_num(o.get("price")),
+                stop_price=trigger,
+                reduce_only=reduce_only or protective,
                 # Only orders carrying our prefix are tagged as ours; the reconciler keys
                 # ownership off is_own(client_id), so an empty tag dict here is deliberate.
                 tags={"bot_instance_id": self.settings.bot_instance_id}

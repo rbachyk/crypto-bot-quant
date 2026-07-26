@@ -1117,3 +1117,49 @@ def test_close_book_position_also_confirms(monkeypatch) -> None:
     assert (
         _closing_venue(ClosingFakeCcxt(closes=False)).close_book_position("BTC/USDT:USDT") is False
     )
+
+
+def test_position_attached_protection_is_reported_as_protective_not_as_a_limit() -> None:
+    """A Bybit position-level stop arrives with NO orderLinkId (we never sent it as an order — the
+    exchange created it from the entry's stopLoss param), a bare UUID id, and stopOrderType set.
+    fetch_open_orders used to flatten every order to a plain LIMIT with reduce_only=False, so the
+    reconciler had no way to tell a position's own protection from a manual entry order and halted
+    the session on its own disaster stops."""
+
+    class _FakeWithAttachedStop(FakeCcxt):
+        def fetch_open_orders(self, *a, **k):
+            return [
+                {  # position-attached stop-loss, as Bybit reports it
+                    "id": "0a987d18-a561-4abc-a093-94d11aae2a97",
+                    "clientOrderId": None,
+                    "symbol": "BTC/USDT:USDT",
+                    "side": "sell",
+                    "amount": 0.01,
+                    "price": None,
+                    "triggerPrice": 37_500.0,
+                    "reduceOnly": True,
+                    "info": {"stopOrderType": "StopLoss", "orderLinkId": ""},
+                },
+                {  # an ordinary resting entry someone placed by hand
+                    "id": "manual-entry-1",
+                    "clientOrderId": "HUMAN_1",
+                    "symbol": "ETH/USDT:USDT",
+                    "side": "buy",
+                    "amount": 1.0,
+                    "price": 3_000.0,
+                    "info": {},
+                },
+            ]
+
+    orders = CcxtLiveVenue(
+        load_metadata_config(), _testnet_settings(), client=_FakeWithAttachedStop()
+    ).fetch_open_orders()
+
+    stop = orders["0a987d18-a561-4abc-a093-94d11aae2a97"]
+    assert stop.reduce_only is True and stop.stop_price == 37_500.0 and stop.role == "stop"
+    entry = orders["HUMAN_1"]
+    assert entry.reduce_only is False and entry.stop_price is None and entry.role == "entry"
+
+    from src.execution.reconciliation import _is_position_protection
+
+    assert _is_position_protection(stop) and not _is_position_protection(entry)

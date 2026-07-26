@@ -180,3 +180,66 @@ def test_readiness_still_blocks_on_a_foreign_item_inside_our_own_partition() -> 
     )
     recon = next(c for c in guard.evaluate().checks if c.name == "reconciliation")
     assert recon.status == BLOCKED and "MANUAL-1" in recon.detail
+
+
+def test_a_positions_own_stop_is_not_a_foreign_order() -> None:
+    """REGRESSION (reported from a live demo run). A position-level stop-loss is created by the
+    EXCHANGE from the parameters attached to our entry — we never send it as an order, so it
+    carries no clientOrderId of ours and surfaces under a bare exchange UUID. Judged by prefix
+    alone it read foreign, and the readiness guard BLOCKED the session on its own disaster stops:
+
+        BLOCKED reconciliation: foreign/manual items on the exchange:
+        orders=['0a987d18-...', '21b342af-...', ...] positions=[]
+
+    …which is unrecoverable by construction — the stops exist precisely because the session is
+    doing its job, so it could never restart while holding a protected position."""
+    from src.execution.order import Order, OrderType
+
+    class _VenueWithAttachedStops:
+        def fetch_open_orders(self):
+            return {  # what Bybit reports for position-attached protection
+                "0a987d18-a561-4abc-a093-94d11aae2a97": Order(
+                    client_id="0a987d18-a561-4abc-a093-94d11aae2a97",
+                    symbol="BTC/USDT:USDT", side="sell", qty=0.01,
+                    order_type=OrderType.STOP_MARKET, role="stop",
+                    stop_price=37_500.0, reduce_only=True,
+                )
+            }
+
+        def fetch_exchange_positions(self):
+            return {}
+
+    guard = DemoReadinessGuard(
+        _settings(),
+        kill_switch=_DisengagedKill(),
+        venue=_VenueWithAttachedStops(),
+        symbols=["BTC/USDT:USDT"],
+    )
+    recon = next(c for c in guard.evaluate().checks if c.name == "reconciliation")
+    assert recon.status == PASS, recon.detail
+
+
+def test_a_foreign_ENTRY_order_still_blocks() -> None:
+    """The relaxation is narrow on purpose: a reduce-only/triggered order can only close a
+    position, but an ordinary order without our prefix can open exposure behind our back — the
+    thing Section 7 halts for."""
+    from src.execution.order import Order, OrderType
+
+    class _VenueWithAManualEntry:
+        def fetch_open_orders(self):
+            return {
+                "MANUAL-1": Order(
+                    client_id="MANUAL-1", symbol="BTC/USDT:USDT", side="buy", qty=1.0,
+                    order_type=OrderType.LIMIT, price=50_000.0,
+                )
+            }
+
+        def fetch_exchange_positions(self):
+            return {}
+
+    guard = DemoReadinessGuard(
+        _settings(), kill_switch=_DisengagedKill(),
+        venue=_VenueWithAManualEntry(), symbols=["BTC/USDT:USDT"],
+    )
+    recon = next(c for c in guard.evaluate().checks if c.name == "reconciliation")
+    assert recon.status == BLOCKED and "MANUAL-1" in recon.detail

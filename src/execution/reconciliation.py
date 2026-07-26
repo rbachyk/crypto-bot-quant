@@ -149,6 +149,23 @@ class StartupReconResult:
         return "\n".join(lines)
 
 
+def _is_position_protection(order: Any) -> bool:
+    """Is this order a POSITION's own protection rather than a foreign entry?
+
+    A position-level stop-loss or take-profit is created by the exchange from the parameters we
+    attached to the entry — we never send it as an order of our own, so it carries no clientOrderId
+    of ours and arrives under a bare exchange UUID. Judged by prefix alone it reads foreign, and a
+    session halted on its OWN disaster stops: the very orders proving its positions were protected.
+
+    A reduce-only / triggered order cannot open exposure — the worst a stray one can do is close a
+    position early — so it is not the "unknown order placing trades behind our back" that Section 7
+    halts for. An ordinary (non-reduce-only) order without our prefix still halts."""
+    return (
+        bool(getattr(order, "reduce_only", False))
+        or getattr(order, "stop_price", None) is not None
+    )
+
+
 def reconcile_startup(
     venue: Any,
     ownership: OwnershipPolicy,
@@ -193,7 +210,7 @@ def reconcile_startup(
 
     owned_orders = sorted(
         oid for oid, o in exch_orders.items()
-        if in_scope(o.symbol) and ownership.is_own(o.client_id)
+        if in_scope(o.symbol) and (ownership.is_own(o.client_id) or _is_position_protection(o))
     )
     foreign_orders = sorted(
         oid for oid, o in exch_orders.items()

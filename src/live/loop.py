@@ -33,7 +33,11 @@ from src.data.config import DataConfig, load_data_config
 from src.exchange.metadata import MetadataConfig, load_metadata_config
 from src.execution.live_venue import LiveOrderGuard, get_venue
 from src.execution.ownership import OwnershipPolicy
-from src.execution.reconciliation import StartupReconResult, reconcile_startup
+from src.execution.reconciliation import (
+    StartupReconResult,
+    _is_position_protection,
+    reconcile_startup,
+)
 from src.execution.venue import Venue
 from src.killswitch import KillSwitch
 from src.monitoring import Alert, AlertSeverity, get_alert_sink
@@ -250,9 +254,14 @@ class LiveLoop:
         # detection stays honest, scoped to our symbols. Unpartitioned (scope None) = unchanged.
         scope = self.scope_symbols
         in_scope = (lambda s: True) if scope is None else (lambda s: s in scope)
+        # A position's own protection is not a foreign order: an exchange-created stop/TP carries
+        # no clientOrderId of ours (see reconciliation._is_position_protection), and a reduce-only
+        # order cannot open exposure. Judged by prefix alone, a session halts on its own stops.
         foreign_orders = sorted(
             o for o, v in exch_orders.items()
-            if in_scope(v.symbol) and not own.is_own(v.client_id)
+            if in_scope(v.symbol)
+            and not own.is_own(v.client_id)
+            and not _is_position_protection(v)
         )
         if scope is None:
             # The `owned` flag CANNOT be the sole discriminator here either: Bybit's position read
