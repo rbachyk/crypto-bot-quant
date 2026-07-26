@@ -56,6 +56,11 @@ strategies:
     - id: lead_lag_xasset
       family: A
       enabled: true
+      # ACCOUNT PARTITION (Section 17): this strategy trades ONLY these symbols live, so
+      # the demo/testnet account can also run the funding_carry + residual_momentum
+      # baskets without the two sessions netting into each other"s positions.
+      # cross-asset: needs the BTC leader plus at least one follower to mean anything.
+      live_symbols: ["BTC/USDT:USDT", "ETH/USDT:USDT"]
       # Exit geometry: momentum/short-burst — explicit initial SL for sizing,
       # time-stop, NO fixed TP (tp_frac large; the lagged move is the edge).
       exit_profile: momentum
@@ -128,6 +133,11 @@ strategies:
     - id: basis_reversion
       family: B
       enabled: true
+      # ACCOUNT PARTITION (Section 17): this strategy trades ONLY these symbols live, so
+      # the demo/testnet account can also run the funding_carry + residual_momentum
+      # baskets without the two sessions netting into each other"s positions.
+      # genuinely per-symbol: one name is a complete universe for it.
+      live_symbols: ["ADA/USDT:USDT"]
       # Exit geometry: mean-reversion — near fixed TP, wider SL, asymmetric
       # (high win-rate / low R). Reversion is measured net of fees+slippage+funding.
       exit_profile: mean_reversion
@@ -189,6 +199,11 @@ strategies:
     - id: xsection_rs
       family: G
       enabled: true
+      # ACCOUNT PARTITION (Section 17): this strategy trades ONLY these symbols live, so
+      # the demo/testnet account can also run the funding_carry + residual_momentum
+      # baskets without the two sessions netting into each other"s positions.
+      # cross-sectional: 2 names is THIN for relative strength — treat its live output as indicative, not evidence.
+      live_symbols: ["SOL/USDT:USDT", "DOGE/USDT:USDT"]
       # Exit geometry: momentum (relative-strength continuation) — initial SL for
       # sizing, time-stop, no fixed TP.
       exit_profile: momentum
@@ -276,6 +291,11 @@ strategies:
     - id: liquidation_reversal
       family: D
       enabled: true
+      # ACCOUNT PARTITION (Section 17): this strategy trades ONLY these symbols live, so
+      # the demo/testnet account can also run the funding_carry + residual_momentum
+      # baskets without the two sessions netting into each other"s positions.
+      # genuinely per-symbol; reserved because an UNRESTRICTED strategy takes `universe - reserved`, i.e. the baskets" 14 — which is the collision this prevents.
+      live_symbols: ["XRP/USDT:USDT"]
       lake_only: true
       exit_profile: mean_reversion
       params:

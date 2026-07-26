@@ -1043,6 +1043,13 @@ def test_real_orders_start_is_blocked_while_a_basket_demo_holds_the_account(
 ) -> None:
     """Two sessions on one demo account each keep an independent mirror of the same book. The
     per-symbol real-orders Start must be refused while a basket demo session is live."""
+    from src.api.app import _account_scopes_overlap
+
+    if not _account_scopes_overlap(["funding_carry"]):
+        pytest.skip(
+            "configs/strategies.yaml declares a genuinely disjoint partition — the sessions may "
+            "coexist, which the sibling test covers"
+        )
     client = _dashboard("demo")
     before = client.get("/dashboard/live").text
     assert "session (real orders)</button>" in before
@@ -1258,3 +1265,25 @@ def test_a_leg_closed_exchange_side_books_at_the_LAST_mark_not_the_entry() -> No
     booked = loop.session.trades[-1]
     assert booked.exit_price == pytest.approx(80.0), "booked at the last mark, not the entry"
     assert booked.pnl < 0, "a 20% adverse move must book as a loss, not break-even"
+
+
+@requires_db
+@requires_redis
+def test_a_disjoint_partition_lets_both_sessions_run(no_active_demo_job) -> None:
+    """The other side of the same guard: when the symbols the two sessions would actually trade are
+    disjoint, the per-symbol real-orders Start stays ENABLED and the page says why. The page must
+    never promise a coexistence the Start guard would then refuse — both now decide it the same
+    way (scope intersection, not "somebody declared live_symbols")."""
+    from src.api.app import _account_scopes_overlap
+
+    if _account_scopes_overlap(["funding_carry"]):
+        pytest.skip("no disjoint partition configured — the sibling test covers that regime")
+
+    client = _dashboard("demo")
+    client.post("/api/paper/run-basket-demo?strategies=funding_carry", follow_redirects=False)
+
+    after = client.get("/dashboard/live").text
+    assert "will coexist without touching the baskets" in after
+    assert "basket demo session</b> is holding" not in after
+    idx = after.index("session (real orders)</button>")
+    assert "disabled" not in after[idx - 200 : idx], "a disjoint partition must not disable Start"

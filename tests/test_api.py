@@ -729,8 +729,13 @@ def test_a_partial_partition_is_not_mistaken_for_a_disjoint_one() -> None:
             cfgmod.STRATEGIES_YAML = orig
             load_strategies_config.cache_clear()
 
-    assert overlap_with({}) is True  # as shipped: both sessions take the whole universe
-    assert overlap_with({"basis_reversion": ["ADA/USDT:USDT"]}) is True, (
+    # Explicit UNPARTITIONED baseline — no longer "whatever the shipped config says", which is now
+    # partitioned. The test owns both ends of the comparison.
+    unpartitioned = dict.fromkeys(
+        ["lead_lag_xasset", "basis_reversion", "xsection_rs", "liquidation_reversal"], []
+    )
+    assert overlap_with(unpartitioned) is True  # both sessions take the whole universe
+    assert overlap_with({**unpartitioned, "basis_reversion": ["ADA/USDT:USDT"]}) is True, (
         "one strategy reserving symbols does not separate the sessions"
     )
     assert overlap_with({  # every per-symbol strategy reserved → baskets get the remainder

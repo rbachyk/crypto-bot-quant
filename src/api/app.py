@@ -840,6 +840,16 @@ def _account_scopes_overlap(
     return bool(basket_scope & live_scope)
 
 
+def _active_basket_strategies() -> list[str] | None:
+    """The basket strategies a live demo session is running, from its job params (None if none)."""
+    for _job_id, params in _alive_session_jobs("run_basket_demo_session"):
+        got = params.get("strategies") or params.get("strategy")
+        ids = [got] if isinstance(got, str) else list(got or [])
+        if ids:
+            return ids
+    return None
+
+
 def _refuse_unpartitioned_coexistence(
     job_type: str, redis_client: Any = None, basket_strategies: list[str] | None = None
 ) -> None:
@@ -2016,10 +2026,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # other's positions (src/strategies/config.py live_scope). With a partition configured they
         # coexist; without one they would be two independent mirrors of one book (the collision),
         # so the real-orders Start stays blocked. The offline paper Start is always fine.
+        # "Somebody declared live_symbols" is NOT the question — reserving symbols for one
+        # strategy leaves the others unrestricted, and an unrestricted strategy resolves to
+        # `universe - reserved`, which is exactly what the baskets get. Ask whether the symbols the
+        # two sessions would ACTUALLY trade are disjoint, the same way the Start guard decides it,
+        # so this page can never promise a coexistence the API then refuses (or vice versa).
         try:
-            from src.strategies.config import load_strategies_config as _lsc
-
-            _partition_configured = any(c.live_symbols for c in _lsc().candidates)
+            _partition_configured = not _account_scopes_overlap(_active_basket_strategies())
         except Exception:  # noqa: BLE001 - config trouble → fall back to the safe (blocked) side
             _partition_configured = False
         _blocked_by_basket = demo_basket_active and not _partition_configured
